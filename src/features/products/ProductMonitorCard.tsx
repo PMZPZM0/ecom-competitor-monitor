@@ -1,8 +1,9 @@
-import { BellRing, CalendarClock, Check, Coins, Copy, Download, ExternalLink, Images, PauseCircle, PlayCircle, ReceiptText, RotateCw, Save, TimerReset, Trash2 } from 'lucide-react'
+import { BellRing, CalendarClock, Check, CircleAlert, CircleCheck, Coins, Copy, Download, ExternalLink, Images, LoaderCircle, PauseCircle, PlayCircle, ReceiptText, RotateCw, Save, TimerReset, Trash2 } from 'lucide-react'
 import { lazy, Suspense, useEffect, useRef, useState } from 'react'
 import { Badge } from '../../components/ui/badge'
 import { Button } from '../../components/ui/button'
 import { api } from '../../lib/api'
+import { downloadFile } from '../../lib/download'
 import { currency, timeAgo } from '../../lib/utils'
 import { normalizeProductUrlIfPossible } from '../../lib/productUrl'
 import type { Overview, Product, Snapshot } from '../../types/domain'
@@ -56,6 +57,12 @@ type Props = {
   onPreview: (preview: Preview) => void
   compactContext?: boolean
   captureProtectionUntil?: string | null
+}
+
+type OperationStatus = {
+  key: string
+  tone: 'progress' | 'success' | 'error'
+  message: string
 }
 
 function primaryPriceClass(label: string) {
@@ -305,8 +312,11 @@ export function ProductMonitorCard({ product, monitor, onToggle, onSchedule, onC
   const [copiedProductUrl, setCopiedProductUrl] = useState(false)
   const [openingProduct, setOpeningProduct] = useState(false)
   const [syncingFeishu, setSyncingFeishu] = useState(false)
+  const [togglingMonitor, setTogglingMonitor] = useState(false)
   const [savingSchedule, setSavingSchedule] = useState(false)
   const [buyerShowOpen, setBuyerShowOpen] = useState(false)
+  const [operation, setOperation] = useState<OperationStatus | null>(null)
+  const operationTimerRef = useRef<number | null>(null)
   const [scheduleDraft, setScheduleDraft] = useState(String(product.monitorIntervalMinutes ?? monitor.intervalMinutes))
   const initialIntervalMinutes = product.monitorIntervalMinutes ?? monitor.intervalMinutes
   const [scheduleDateDraft, setScheduleDateDraft] = useState(() => scheduleInputParts(product.monitorStartAt, product.nextMonitorAt, initialIntervalMinutes).date)
@@ -370,6 +380,51 @@ export function ProductMonitorCard({ product, monitor, onToggle, onSchedule, onC
     setScheduleTimeDraft(parts.time)
   }, [product.id, product.monitorIntervalMinutes, product.monitorStartAt, product.nextMonitorAt, monitor.intervalMinutes])
 
+  useEffect(() => () => {
+    if (operationTimerRef.current) window.clearTimeout(operationTimerRef.current)
+  }, [])
+
+  function showOperation(next: OperationStatus, clearAfter = 0) {
+    if (operationTimerRef.current) window.clearTimeout(operationTimerRef.current)
+    setOperation(next)
+    operationTimerRef.current = clearAfter
+      ? window.setTimeout(() => setOperation((current) => current?.key === next.key ? null : current), clearAfter)
+      : null
+  }
+
+  async function runDownload(key: string, message: string, path: string, filename: string) {
+    showOperation({ key, tone: 'progress', message })
+    try {
+      await downloadFile(path, filename)
+      showOperation({ key, tone: 'success', message: '下载已开始，请到浏览器下载列表或系统下载目录查看。' }, 5000)
+    } catch (error) {
+      showOperation({ key, tone: 'error', message: error instanceof Error ? error.message : '下载失败，请稍后重试。' }, 9000)
+    }
+  }
+
+  async function captureNow() {
+    showOperation({ key: 'capture', tone: 'progress', message: '正在抓取价格、SKU、素材和买家秀，请保持软件运行。' })
+    try {
+      await onCapture(product)
+      showOperation({ key: 'capture', tone: 'success', message: '抓取完成，价格、素材和买家秀已更新。' }, 5000)
+    } catch (error) {
+      showOperation({ key: 'capture', tone: 'error', message: error instanceof Error ? error.message : '抓取失败，请检查账号状态。' }, 9000)
+    }
+  }
+
+  async function toggleMonitoring() {
+    setTogglingMonitor(true)
+    showOperation({ key: 'monitor', tone: 'progress', message: product.enabled ? '正在暂停该商品监控...' : '正在启用该商品监控...' })
+    try {
+      await onToggle(product)
+      showOperation({ key: 'monitor', tone: 'success', message: product.enabled ? '该商品已暂停自动监控。' : '该商品已加入自动监控。' }, 5000)
+    } catch (error) {
+      showOperation({ key: 'monitor', tone: 'error', message: error instanceof Error ? error.message : '监控状态更新失败。' }, 9000)
+    } finally {
+      setTogglingMonitor(false)
+    }
+  }
+
   async function copyTitle() {
     await navigator.clipboard.writeText(title)
     setCopiedTitle(true)
@@ -409,11 +464,12 @@ export function ProductMonitorCard({ product, monitor, onToggle, onSchedule, onC
 
   async function syncFeishu() {
     setSyncingFeishu(true)
+    showOperation({ key: 'feishu', tone: 'progress', message: '正在把当前商品的全部 SKU 价格同步到飞书...' })
     try {
       await api.syncProductToFeishu(product.id)
-      window.alert('当前商品价格已同步到已启用的飞书机器人和飞书文档。')
+      showOperation({ key: 'feishu', tone: 'success', message: '飞书同步完成，机器人和价格文档已更新。' }, 5000)
     } catch (error) {
-      window.alert(error instanceof Error ? error.message : '飞书同步失败')
+      showOperation({ key: 'feishu', tone: 'error', message: error instanceof Error ? error.message : '飞书同步失败。' }, 9000)
     } finally {
       setSyncingFeishu(false)
     }
@@ -431,10 +487,12 @@ export function ProductMonitorCard({ product, monitor, onToggle, onSchedule, onC
       return
     }
     setSavingSchedule(true)
+    showOperation({ key: 'schedule', tone: 'progress', message: '正在保存定时监控计划...' })
     try {
       await onSchedule(product, intervalMinutes, monitorStart.toISOString())
+      showOperation({ key: 'schedule', tone: 'success', message: '定时监控计划已保存。' }, 5000)
     } catch (error) {
-      window.alert(error instanceof Error ? error.message : '保存单品定时监控失败')
+      showOperation({ key: 'schedule', tone: 'error', message: error instanceof Error ? error.message : '保存单品定时监控失败。' }, 9000)
     } finally {
       setSavingSchedule(false)
     }
@@ -588,10 +646,10 @@ export function ProductMonitorCard({ product, monitor, onToggle, onSchedule, onC
       </div>
 
       <div className="mt-2 flex flex-wrap items-center gap-2">
-        <CaptureButton busy={busy} captureProtectionUntil={captureProtectionUntil} onCapture={() => onCapture(product)} />
-        <Button type="button" variant="ghost" onClick={() => onToggle(product)}>
+        <CaptureButton busy={busy} captureProtectionUntil={captureProtectionUntil} onCapture={captureNow} />
+        <Button type="button" variant="ghost" onClick={toggleMonitoring} disabled={togglingMonitor}>
           {product.enabled ? <PauseCircle className="h-4 w-4" /> : <PlayCircle className="h-4 w-4" />}
-          {product.enabled ? '暂停监控' : '启用监控'}
+          {togglingMonitor ? '更新中' : product.enabled ? '暂停监控' : '启用监控'}
         </Button>
         <Button type="button" variant="secondary" onClick={syncFeishu} disabled={syncingFeishu || !product.lastSnapshot}>
           <BellRing className="h-4 w-4" />{syncingFeishu ? '同步中' : '同步飞书'}
@@ -604,13 +662,25 @@ export function ProductMonitorCard({ product, monitor, onToggle, onSchedule, onC
           <Button type="button" variant="secondary" onClick={() => setBuyerShowOpen(true)} disabled={!buyerShows.length} title={buyerShows.length ? `预览 ${buyerShows.length} 条有效买家秀` : '当前快照暂无有效买家秀，请重新抓取商品'}>
             <Images className="h-4 w-4" />买家秀预览{buyerShows.length ? `（${buyerShows.length}）` : ''}
           </Button>
-          {buyerShows.length > 0 && <a href={downloadBuyerShowsHref(product.id)} className="inline-flex h-10 items-center justify-center gap-2 rounded-md border border-amber-200 bg-amber-50 px-4 text-sm font-medium text-amber-700 hover:bg-amber-100"><Download className="h-4 w-4" />买家秀下载</a>}
-          <a href={downloadMediaBundleHref(product.id)} className="inline-flex h-10 items-center justify-center gap-2 rounded-md border border-emerald-600 bg-emerald-600 px-4 text-sm font-medium text-white hover:bg-emerald-700">
-            <Download className="h-4 w-4" />一键下载素材包
-          </a>
+          {buyerShows.length > 0 && <Button type="button" variant="secondary" onClick={() => runDownload('buyer-shows', '正在整理买家秀图片、视频和文案并生成 ZIP...', downloadBuyerShowsHref(product.id), `${title}_买家秀.zip`)} disabled={operation?.tone === 'progress'} className="border-amber-200 bg-amber-50 text-amber-700 hover:bg-amber-100"><Download className="h-4 w-4" />{operation?.key === 'buyer-shows' && operation.tone === 'progress' ? '生成中' : '买家秀下载'}</Button>}
+          <Button type="button" onClick={() => runDownload('media', '正在整理主图、SKU 图、详情图和视频并生成素材包...', downloadMediaBundleHref(product.id), `${title}_素材包.zip`)} disabled={operation?.tone === 'progress'}>
+            <Download className="h-4 w-4" />{operation?.key === 'media' && operation.tone === 'progress' ? '生成中' : '一键下载素材包'}
+          </Button>
         </div>
       </div>
-      {buyerShowOpen && <BuyerShowDialog title={title} items={buyerShows} onClose={() => setBuyerShowOpen(false)} onDownload={() => { window.location.href = downloadBuyerShowsHref(product.id) }} onDownloadItem={(item) => { window.location.href = downloadBuyerShowItemHref(product.id, item.id) }} />}
+      {(operation || busy) && (
+        <div
+          className={`mt-2 flex items-center gap-2 rounded-md px-3 py-2 text-xs ${
+            (operation?.tone === 'progress' || busy) ? 'bg-sky-50 text-sky-700' : operation?.tone === 'success' ? 'bg-emerald-50 text-emerald-700' : 'bg-red-50 text-red-700'
+          }`}
+          role="status"
+          aria-live="polite"
+        >
+          {(operation?.tone === 'progress' || busy) ? <LoaderCircle className="h-4 w-4 shrink-0 animate-spin" /> : operation?.tone === 'success' ? <CircleCheck className="h-4 w-4 shrink-0" /> : <CircleAlert className="h-4 w-4 shrink-0" />}
+          <span>{operation?.message || '正在抓取价格、素材和买家秀，请保持软件运行。'}</span>
+        </div>
+      )}
+      {buyerShowOpen && <BuyerShowDialog title={title} items={buyerShows} onClose={() => setBuyerShowOpen(false)} downloadBusy={operation?.tone === 'progress' && operation.key.startsWith('buyer-show')} downloadMessage={operation?.key.startsWith('buyer-show') ? operation.message : ''} onDownload={() => runDownload('buyer-shows', '正在整理全部买家秀并生成 ZIP...', downloadBuyerShowsHref(product.id), `${title}_买家秀.zip`)} onDownloadItem={(item) => runDownload(`buyer-show-item:${item.id}`, '正在整理这条买家秀并生成 ZIP...', downloadBuyerShowItemHref(product.id, item.id), `${title}_买家秀.zip`)} />}
     </article>
   )
 }

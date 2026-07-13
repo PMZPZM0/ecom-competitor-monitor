@@ -489,3 +489,30 @@ test("buyerShowsFromRateDetail keeps each Tmall review with its own pictures and
   const items = buyerShowsFromRateDetail({ rateList: [{ id: 123, rateContent: "加热很快", displayUserNick: "买***家", auctionSku: "白色", rateDate: "2026-07-12", pics: ["//img.alicdn.com/bao/uploaded/i1/a-0-rate.jpg"], videoList: [{ cloudVideoUrl: "//cloud.video.taobao.com/play/u/null/p/1/123.mp4" }] }] });
   assert.deepEqual(items, [{ id: "123", text: "加热很快", images: ["https://img.alicdn.com/bao/uploaded/i1/a-0-rate.jpg"], videoUrls: ["https://cloud.video.taobao.com/play/u/null/p/1/123.mp4"], author: "买***家", sku: "白色", createdAt: "2026-07-12" }]);
 });
+
+test("buyerShowsFromRateDetail supports nested lists and object media fields", () => {
+  const items = buyerShowsFromRateDetail({
+    rateList: {
+      rate: [{
+        rateId: "new-1",
+        reviewContent: "主体评价",
+        images: [{ picUrl: "//img.alicdn.com/bao/uploaded/i2/new-rate.jpg" }],
+        videoInfo: { playUrl: "//cloud.video.taobao.com/play/u/123/p/1/456.mp4" },
+        appendComment: [{ commentContent: "追加评价", photos: [{ url: "//img.alicdn.com/bao/uploaded/i2/append-rate.jpg" }] }],
+      }],
+    },
+  });
+
+  assert.deepEqual(items, [{
+    id: "new-1",
+    text: "主体评价\n追加评价",
+    images: [
+      "https://img.alicdn.com/bao/uploaded/i2/new-rate.jpg",
+      "https://img.alicdn.com/bao/uploaded/i2/append-rate.jpg",
+    ],
+    videoUrls: ["https://cloud.video.taobao.com/play/u/123/p/1/456.mp4"],
+    author: "",
+    sku: "",
+    createdAt: "",
+  }]);
+});

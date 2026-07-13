@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import { BarChart3, Database, FolderTree, PauseCircle, PlayCircle, RefreshCw, Search, Settings, Sparkles } from 'lucide-react'
+import { BarChart3, CircleAlert, CircleCheck, Database, FolderTree, LoaderCircle, PauseCircle, PlayCircle, RefreshCw, Search, Settings, Sparkles } from 'lucide-react'
 import { api } from './lib/api'
 import { Button } from './components/ui/button'
 import { Badge } from './components/ui/badge'
@@ -154,6 +154,7 @@ function App() {
     } catch (err) {
       setNotice('')
       setError(err instanceof Error ? err.message : '单品抓取失败')
+      throw err
     } finally {
       setBusyProductId('')
     }
@@ -194,6 +195,7 @@ function App() {
     } catch (err) {
       setNotice('')
       setError(err instanceof Error ? err.message : '批量抓取失败')
+      throw err
     } finally {
       setBusy(false)
     }
@@ -399,8 +401,8 @@ function App() {
         </header>
 
         <div className="space-y-5 p-6">
-          {notice && <div className="rounded-md border border-emerald-100 bg-emerald-50 p-3 text-sm text-emerald-800">{notice}</div>}
-          {error && <div className="rounded-md border border-red-100 bg-red-50 p-3 text-sm text-red-700">{error}</div>}
+          {notice && <div className={`flex items-center gap-2 rounded-md border p-3 text-sm ${notice.startsWith('正在') ? 'border-sky-100 bg-sky-50 text-sky-800' : 'border-emerald-100 bg-emerald-50 text-emerald-800'}`} role="status" aria-live="polite">{notice.startsWith('正在') ? <LoaderCircle className="h-4 w-4 shrink-0 animate-spin" /> : <CircleCheck className="h-4 w-4 shrink-0" />}{notice}</div>}
+          {error && <div className="flex items-center gap-2 rounded-md border border-red-100 bg-red-50 p-3 text-sm text-red-700" role="alert"><CircleAlert className="h-4 w-4 shrink-0" />{error}</div>}
           {renderPage()}
         </div>
       </main>

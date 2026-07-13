@@ -276,6 +276,35 @@ function mergeAccountSnapshots(snapshots) {
   return merged;
 }
 
+function buyerShowKey(item) {
+  const id = String(item?.id || "");
+  if (id && !/^(?:buyer|rate)-\d+$/.test(id)) return `id:${id}`;
+  return `content:${String(item?.text || "").trim()}|${(item?.images || []).join(",")}|${(item?.videoUrls || []).join(",")}`;
+}
+
+export function mergeBuyerShowHistory(currentItems = [], previousItems = []) {
+  const merged = new Map();
+  for (const item of [...currentItems, ...previousItems].filter(Boolean)) {
+    const key = buyerShowKey(item);
+    const existing = merged.get(key);
+    if (!existing) {
+      merged.set(key, structuredClone(item));
+      continue;
+    }
+    merged.set(key, {
+      ...item,
+      ...existing,
+      text: existing.text || item.text || "",
+      author: existing.author || item.author || "",
+      sku: existing.sku || item.sku || "",
+      createdAt: existing.createdAt || item.createdAt || "",
+      images: Array.from(new Set([...(existing.images || []), ...(item.images || [])])).slice(0, 30),
+      videoUrls: Array.from(new Set([...(existing.videoUrls || []), ...(item.videoUrls || [])])).slice(0, 10),
+    });
+  }
+  return Array.from(merged.values()).slice(0, 100);
+}
+
 export function snapshotAllowsPriceAlerts(snapshot) {
   return snapshot?.accessMode !== "anonymous";
 }
@@ -378,9 +407,8 @@ export async function captureProduct(product, authSessions = [], { captureProtec
     }
     if (!snapshots.length) throw new Error(accountErrors.map((error) => `${error.accountName}：${error.message}`).join("；"));
     const snapshot = mergeAccountSnapshots(snapshots);
-    if (!snapshot.buyerShows?.length && product.lastSnapshot?.buyerShows?.length) {
-      snapshot.buyerShows = product.lastSnapshot.buyerShows;
-    }
+    snapshot.buyerShows = mergeBuyerShowHistory(snapshot.buyerShows, product.lastSnapshot?.buyerShows);
+    if (snapshot.rawSignals) snapshot.rawSignals.buyerShowCount = snapshot.buyerShows.length;
     snapshot.accountErrors = accountErrors;
     return {
       product: {

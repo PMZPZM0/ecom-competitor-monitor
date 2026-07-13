@@ -1,10 +1,11 @@
 import { useEffect, useMemo, useState } from 'react'
-import { AlertTriangle, ChevronLeft, ChevronRight, Download, Play, RotateCcw, Search, Trash2 } from 'lucide-react'
+import { AlertTriangle, CheckCircle, ChevronLeft, ChevronRight, Download, LoaderCircle, Play, RotateCcw, Search, Trash2 } from 'lucide-react'
 import { Badge } from '../../components/ui/badge'
 import { Button } from '../../components/ui/button'
 import { Card, CardContent, CardHeader, CardTitle } from '../../components/ui/card'
 import { Input } from '../../components/ui/input'
 import { currency } from '../../lib/utils'
+import { downloadFile } from '../../lib/download'
 import type { AuthSession, Overview, Product } from '../../types/domain'
 import { ImagePreview, ShopLogo, type Preview } from '../products/productDisplay'
 import { ProductMonitorCard } from '../products/ProductMonitorCard'
@@ -107,6 +108,7 @@ export function MonitorClassification({ products, monitor, onToggle, onSchedule,
   const [sortKey, setSortKey] = useState<ProductSortKey>('updated-desc')
   const [page, setPage] = useState(1)
   const [selectedIds, setSelectedIds] = useState<Set<string>>(() => new Set())
+  const [batchFeedback, setBatchFeedback] = useState<{ tone: 'progress' | 'success' | 'error'; message: string } | null>(null)
   const allGroups = useMemo(() => buildGroups(products), [products])
   const modelOptions = useMemo(() => Array.from(new Set(products.filter((product) => !shopFilter || productShopName(product) === shopFilter).map(productModel))).sort((a, b) => a.localeCompare(b, 'zh-CN')), [products, shopFilter])
   const filteredProducts = useMemo(() => {
@@ -171,12 +173,25 @@ export function MonitorClassification({ products, monitor, onToggle, onSchedule,
 
   async function captureSelected() {
     const selectedProducts = sortedProducts.filter((product) => selectedIds.has(product.id))
-    await onCaptureBatch(selectedProducts)
-    setSelectedIds(new Set())
+    setBatchFeedback({ tone: 'progress', message: `已加入 ${selectedProducts.length} 个商品，正在按队列抓取价格和素材...` })
+    try {
+      await onCaptureBatch(selectedProducts)
+      setBatchFeedback({ tone: 'success', message: `${selectedProducts.length} 个商品的批量抓取任务已完成。` })
+      setSelectedIds(new Set())
+    } catch (error) {
+      setBatchFeedback({ tone: 'error', message: error instanceof Error ? error.message : '批量抓取失败。' })
+    }
   }
 
-  function downloadSelectedBuyerShows() {
-    window.location.href = downloadBuyerShowsBatchHref(Array.from(selectedIds))
+  async function downloadSelectedBuyerShows() {
+    const count = selectedIds.size
+    setBatchFeedback({ tone: 'progress', message: `正在整理 ${count} 个商品的买家秀并生成 ZIP...` })
+    try {
+      await downloadFile(downloadBuyerShowsBatchHref(Array.from(selectedIds)), '批量买家秀.zip')
+      setBatchFeedback({ tone: 'success', message: '批量买家秀 ZIP 已生成并开始下载。' })
+    } catch (error) {
+      setBatchFeedback({ tone: 'error', message: error instanceof Error ? error.message : '批量买家秀下载失败。' })
+    }
   }
 
   useEffect(() => {
@@ -235,10 +250,11 @@ export function MonitorClassification({ products, monitor, onToggle, onSchedule,
               </select>
               <Button type="button" variant="secondary" size="sm" onClick={toggleVisibleSelection} disabled={!pageProducts.length}>{allVisibleSelected ? '取消本页全选' : '全选本页'}</Button>
               <Button type="button" size="sm" onClick={captureSelected} disabled={!selectedIds.size || selectedIds.size > 20 || batchBusy} title={selectedIds.size > 20 ? '为降低访问风险，单次最多抓取 20 个商品' : '选中商品将按顺序限速抓取'}><Play className="h-4 w-4" />{batchBusy ? '队列抓取中' : selectedIds.size > 20 ? '最多选择 20 个' : `批量抓取（${selectedIds.size}）`}</Button>
-              <Button type="button" variant="secondary" size="sm" onClick={downloadSelectedBuyerShows} disabled={!selectedIds.size} title="下载选中商品的买家秀 ZIP"><Download className="h-4 w-4" />批量下载买家秀（{selectedIds.size}）</Button>
+              <Button type="button" variant="secondary" size="sm" onClick={downloadSelectedBuyerShows} disabled={!selectedIds.size || batchFeedback?.tone === 'progress'} title="下载选中商品的买家秀 ZIP"><Download className="h-4 w-4" />{batchFeedback?.tone === 'progress' ? '任务处理中' : `批量下载买家秀（${selectedIds.size}）`}</Button>
               <Button type="button" variant="danger" size="sm" onClick={deleteSelected} disabled={!selectedIds.size}><Trash2 className="h-4 w-4" />批量删除（{selectedIds.size}）</Button>
             </div>
           </div>
+          {batchFeedback && <div className={`mt-3 flex items-center gap-2 rounded-md px-3 py-2 text-xs ${batchFeedback.tone === 'progress' ? 'bg-sky-50 text-sky-700' : batchFeedback.tone === 'success' ? 'bg-emerald-50 text-emerald-700' : 'bg-red-50 text-red-700'}`} role="status" aria-live="polite">{batchFeedback.tone === 'progress' ? <LoaderCircle className="h-4 w-4 animate-spin" /> : batchFeedback.tone === 'success' ? <CheckCircle className="h-4 w-4" /> : <AlertTriangle className="h-4 w-4" />}<span>{batchFeedback.message}</span></div>}
         </CardContent>
       </Card>
       <div className="grid gap-5 xl:grid-cols-[260px_minmax(0,1fr)]">

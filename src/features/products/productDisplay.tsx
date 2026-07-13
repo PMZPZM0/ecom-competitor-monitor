@@ -1,4 +1,4 @@
-import { Download, Play, Store, X } from 'lucide-react'
+import { Download, LoaderCircle, Play, Store, X } from 'lucide-react'
 import { Button } from '../../components/ui/button'
 import { downloadHref } from './productDisplayUtils'
 import type { BuyerShowItem } from '../../types/domain'
@@ -34,15 +34,15 @@ export function ImagePreview({ preview, onClose }: { preview: Preview | null; on
   )
 }
 
-export function BuyerShowDialog({ title, items, onClose, onDownload, onDownloadItem }: { title: string; items: BuyerShowItem[]; onClose: () => void; onDownload: () => void; onDownloadItem: (item: BuyerShowItem) => void }) {
+export function BuyerShowDialog({ title, items, onClose, onDownload, onDownloadItem, downloadBusy = false, downloadMessage = '' }: { title: string; items: BuyerShowItem[]; onClose: () => void; onDownload: () => void; onDownloadItem: (item: BuyerShowItem) => void; downloadBusy?: boolean; downloadMessage?: string }) {
   const visibleItems = items.filter((item) => item.text || item.images?.length || item.videoUrls?.length)
   if (!visibleItems.length) return null
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/70 p-4" onClick={onClose}>
       <div className="flex max-h-[90vh] w-full max-w-5xl flex-col rounded-md bg-white shadow-2xl" onClick={(event) => event.stopPropagation()}>
         <div className="flex items-center justify-between gap-3 border-b border-slate-100 px-4 py-3">
-          <div className="min-w-0"><div className="truncate text-sm font-semibold text-slate-900">买家秀预览</div><div className="truncate text-xs text-slate-500">{title} · {visibleItems.length} 条</div></div>
-          <div className="flex shrink-0 items-center gap-2"><Button type="button" size="sm" onClick={onDownload}><Download className="h-4 w-4" />下载 ZIP</Button><Button type="button" variant="ghost" size="sm" onClick={onClose} title="关闭买家秀预览"><X className="h-4 w-4" />关闭</Button></div>
+          <div className="min-w-0"><div className="truncate text-sm font-semibold text-slate-900">买家秀预览</div><div className="truncate text-xs text-slate-500">{title} · {visibleItems.length} 条</div>{downloadMessage && <div className="mt-1 flex items-center gap-1 text-xs text-sky-700" role="status" aria-live="polite">{downloadBusy && <LoaderCircle className="h-3.5 w-3.5 animate-spin" />}{downloadMessage}</div>}</div>
+          <div className="flex shrink-0 items-center gap-2"><Button type="button" size="sm" onClick={onDownload} disabled={downloadBusy}>{downloadBusy ? <LoaderCircle className="h-4 w-4 animate-spin" /> : <Download className="h-4 w-4" />}{downloadBusy ? '生成中' : '下载 ZIP'}</Button><Button type="button" variant="ghost" size="sm" onClick={onClose} title="关闭买家秀预览"><X className="h-4 w-4" />关闭</Button></div>
         </div>
         <div className="min-h-0 overflow-y-auto p-4">
           <div className="grid gap-3 md:grid-cols-2">
@@ -53,7 +53,7 @@ export function BuyerShowDialog({ title, items, onClose, onDownload, onDownloadI
                 {item.text && <p className="mb-3 whitespace-pre-wrap break-words text-sm leading-6 text-slate-700">{item.text}</p>}
                 {item.images?.length > 0 && <div className="grid grid-cols-3 gap-2">{item.images.map((src, imageIndex) => <a key={`${src}-${imageIndex}`} href={src} target="_blank" rel="noreferrer" className="aspect-square overflow-hidden rounded-md border border-slate-200 bg-white"><img src={src} alt="买家秀图片" className="h-full w-full object-cover" /></a>)}</div>}
                 {item.videoUrls?.length > 0 && <div className="mt-3 flex flex-wrap gap-2">{item.videoUrls.map((src, videoIndex) => <a key={`${src}-${videoIndex}`} href={src} target="_blank" rel="noreferrer" className="inline-flex items-center gap-1 rounded-md border border-amber-200 bg-amber-50 px-2 py-1 text-xs font-medium text-amber-700"><Play className="h-3.5 w-3.5" />视频 {videoIndex + 1}</a>)}</div>}
-                <div className="mt-3 flex justify-end border-t border-slate-200 pt-2"><Button type="button" variant="secondary" size="sm" onClick={() => onDownloadItem(item)} title={`下载买家秀 ${index + 1}`}><Download className="h-3.5 w-3.5" />下载本条</Button></div>
+                <div className="mt-3 flex justify-end border-t border-slate-200 pt-2"><Button type="button" variant="secondary" size="sm" onClick={() => onDownloadItem(item)} disabled={downloadBusy} title={`下载买家秀 ${index + 1}`}><Download className="h-3.5 w-3.5" />下载本条</Button></div>
               </article>
             ))}
           </div>

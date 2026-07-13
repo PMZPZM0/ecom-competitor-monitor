@@ -102,30 +102,52 @@ function parseTmallRateBody(body) {
   const json = source.startsWith("{") ? source : source.match(/^[^(]*\((\{[\s\S]*\})\)\s*;?$/)?.[1];
   if (!json) return null;
   try {
-    return JSON.parse(json)?.rateDetail || null;
+    const parsed = JSON.parse(json);
+    return parsed?.rateDetail || parsed?.data?.rateDetail || parsed?.data || null;
   } catch {
     return null;
   }
 }
 
 export function buyerShowsFromRateDetail(rateDetail) {
-  return (rateDetail?.rateList || []).map((rate, index) => {
-    const append = rate.appendComment || {};
-    const text = [rate.rateContent, append.content, append.rateContent].map(cleanText).filter(Boolean).join("\n").slice(0, 1200);
-    const images = Array.from(new Set([
-      ...(rate.pics || []), ...(rate.picsSmall || []), ...(append.pics || []), ...(append.picsSmall || []),
-    ].map(cleanImage).filter(isCommerceImage))).slice(0, 30);
-    const videoUrls = Array.from(new Set([
-      ...(rate.videoList || []), ...(append.videoList || []),
-    ].map((video) => cleanBuyerShowVideo(video?.cloudVideoUrl || video?.url || video)).filter(Boolean))).slice(0, 10);
+  const listCandidates = [
+    rateDetail?.rateList,
+    rateDetail?.rateList?.rate,
+    rateDetail?.rateList?.list,
+    rateDetail?.commentList,
+    rateDetail?.comments,
+    rateDetail?.data?.rateList,
+    rateDetail?.data?.commentList,
+  ];
+  const rateList = listCandidates.find(Array.isArray) || [];
+  const collectMedia = (values, keyPattern) => values
+    .flatMap((value) => payloadMediaValues(value, keyPattern))
+    .filter(Boolean);
+
+  return rateList.map((rate, index) => {
+    const appends = [rate.appendComment, rate.appendRate, rate.additionalComment].flat().filter(Boolean);
+    const text = [
+      rate.rateContent, rate.reviewContent, rate.commentContent, rate.content,
+      ...appends.flatMap((append) => [append.content, append.rateContent, append.reviewContent, append.commentContent]),
+    ].map(cleanText).filter(Boolean).join("\n").slice(0, 1200);
+    const imageValues = collectMedia([
+      rate.pics, rate.picsSmall, rate.picList, rate.pictureList, rate.images, rate.photos,
+      ...appends.flatMap((append) => [append.pics, append.picsSmall, append.picList, append.pictureList, append.images, append.photos]),
+    ], /url|src|pic|image|photo|big|small/i);
+    const videoValues = collectMedia([
+      rate.videoList, rate.videos, rate.video, rate.videoInfo,
+      ...appends.flatMap((append) => [append.videoList, append.videos, append.video, append.videoInfo]),
+    ], /url|src|video|play/i);
+    const images = Array.from(new Set(imageValues.map(cleanImage).filter(isCommerceImage))).slice(0, 30);
+    const videoUrls = Array.from(new Set(videoValues.map(cleanBuyerShowVideo).filter(Boolean))).slice(0, 10);
     return {
-      id: String(rate.id || `rate-${index + 1}`),
+      id: String(rate.id || rate.rateId || rate.commentId || `rate-${index + 1}`),
       text,
       images,
       videoUrls,
-      author: cleanText(rate.displayUserNick || ""),
-      sku: cleanText(rate.auctionSku || ""),
-      createdAt: cleanText(rate.rateDate || ""),
+      author: cleanText(rate.displayUserNick || rate.userNick || rate.author || ""),
+      sku: cleanText(rate.auctionSku || rate.skuInfo || rate.sku || ""),
+      createdAt: cleanText(rate.rateDate || rate.createTime || rate.createdAt || ""),
     };
   }).filter((item) => item.text || item.images.length || item.videoUrls.length);
 }
@@ -133,28 +155,38 @@ export function buyerShowsFromRateDetail(rateDetail) {
 async function fetchTmallBuyerShows(itemId, sellerId, cookie, referer) {
   if (!itemId || !sellerId) return [];
   const collected = [];
-  let total = 0;
-  for (let page = 1; page <= 10; page += 1) {
-    const query = new URLSearchParams({
-      itemId: String(itemId), sellerId: String(sellerId), order: "3", currentPage: String(page),
-      append: "0", content: "1", picture: "", callback: `jsonp${Date.now()}`,
-    });
-    try {
-      const response = await fetch(`https://rate.tmall.com/list_detail_rate.htm?${query}`, {
-        headers: { cookie: cookie || "", referer, "user-agent": userAgent, accept: "application/json,text/javascript,*/*" },
+  // Fetch media reviews first. A second pass fills in useful text reviews when
+  // Tmall exposes picture and content filters as separate result sets.
+  const filters = [{ picture: "1", content: "" }, { picture: "", content: "1" }];
+  for (const filter of filters) {
+    let filterCount = 0;
+    for (let page = 1; page <= 5 && collected.length < 100; page += 1) {
+      const query = new URLSearchParams({
+        itemId: String(itemId), sellerId: String(sellerId), order: "3", currentPage: String(page),
+        append: "0", content: filter.content, picture: filter.picture, callback: `jsonp${Date.now()}_${page}`,
       });
-      const detail = parseTmallRateBody(await response.text());
-      const items = buyerShowsFromRateDetail(detail);
-      if (!items.length) break;
-      collected.push(...items);
-      total = Number(detail?.rateCount?.total || 0);
-      if ((total && collected.length >= total) || items.length < 10) break;
-      await new Promise((resolve) => setTimeout(resolve, 120));
-    } catch {
-      break;
+      try {
+        const response = await fetch(`https://rate.tmall.com/list_detail_rate.htm?${query}`, {
+          headers: { cookie: cookie || "", referer, "user-agent": userAgent, accept: "application/json,text/javascript,*/*" },
+          signal: AbortSignal.timeout(12_000),
+        });
+        const detail = parseTmallRateBody(await response.text());
+        const items = buyerShowsFromRateDetail(detail);
+        if (!items.length) break;
+        collected.push(...items);
+        filterCount += items.length;
+        const total = Number(detail?.rateCount?.total || detail?.rateCount || 0);
+        if ((total && filterCount >= total) || items.length < 10) break;
+        await new Promise((resolve) => setTimeout(resolve, 180));
+      } catch {
+        break;
+      }
     }
   }
-  return Array.from(new Map(collected.map((item) => [item.id, item])).values()).slice(0, 100);
+  return Array.from(new Map(collected.map((item) => [
+    item.id && !/^rate-\d+$/.test(item.id) ? `id:${item.id}` : `${item.text}|${item.images.join(",")}|${item.videoUrls.join(",")}`,
+    item,
+  ])).values()).slice(0, 100);
 }
 
 function imageKey(url) {

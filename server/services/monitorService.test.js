@@ -7,6 +7,7 @@ import {
   historicalPrimaryImages,
   historicalProductMedia,
   isFeishuAlertCoolingDown,
+  mergeBuyerShowHistory,
   nextProductScheduleAt,
   orderedCaptureCandidates,
   preserveVerifiedAccountPrices,
@@ -126,6 +127,15 @@ test("Feishu reminder cooldown can be disabled without affecting capture schedul
   assert.equal(isFeishuAlertCoolingDown({ cooldownEnabled: true, cooldownMinutes: 120 }, logs, "p1", "s1", now), true);
   assert.equal(isFeishuAlertCoolingDown({ cooldownEnabled: false, cooldownMinutes: 120 }, logs, "p1", "s1", now), false);
   assert.equal(scheduleProduct({ id: "p1", enabled: true }, { running: true, intervalMinutes: 60 }, { now }).nextMonitorAt, "2026-07-12T09:00:00.000Z");
+});
+
+test("buyer-show history is retained when a new capture only sees sparse text", () => {
+  const previous = [{ id: "stable-1", text: "很好用", images: ["old.jpg"], videoUrls: ["old.mp4"], author: "买家" }];
+  const current = [{ id: "stable-1", text: "很好用", images: [], videoUrls: [] }, { id: "rate-1", text: "新评价", images: [], videoUrls: [] }];
+  assert.deepEqual(mergeBuyerShowHistory(current, previous), [
+    { id: "stable-1", text: "很好用", images: ["old.jpg"], videoUrls: ["old.mp4"], author: "买家", sku: "", createdAt: "" },
+    { id: "rate-1", text: "新评价", images: [], videoUrls: [] },
+  ]);
 });
 
 test("runInCaptureGroups limits concurrency to five and preserves order", async () => {

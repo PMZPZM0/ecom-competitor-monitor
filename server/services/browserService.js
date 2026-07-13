@@ -546,13 +546,18 @@ export async function getRenderedHtml(url, authSession = {}, renderOptions = {})
     cdp = await createCdp(tab.webSocketDebuggerUrl);
     await cdp.send("Network.enable");
     const priceResponses = new Map();
+    const buyerShowResponses = new Map();
     cdp.on("Network.responseReceived", ({ requestId, response, type }) => {
       const responseUrl = String(response?.url || "");
       const mimeType = String(response?.mimeType || "");
       const relevantUrl = /(?:\/h5\/mtop|mtop\.|detail|promotion|benefit|price|sku|rate|review|comment|evaluate|feed)/i.test(responseUrl);
+      const buyerShowUrl = /(?:rate|review|comment|evaluate|feed)/i.test(responseUrl);
       const dataResponse = /json/i.test(mimeType) || /XHR|Fetch/i.test(type || "");
-      if (relevantUrl && dataResponse && Number(response?.status || 0) < 400 && priceResponses.size < 40) {
-        priceResponses.set(requestId, { url: responseUrl, mimeType });
+      if (!relevantUrl || !dataResponse || Number(response?.status || 0) >= 400) return;
+      const target = buyerShowUrl ? buyerShowResponses : priceResponses;
+      const limit = buyerShowUrl ? 80 : 60;
+      if (target.size < limit) {
+        target.set(requestId, { url: responseUrl, mimeType });
       }
     });
     await cdp.send("Network.setUserAgentOverride", { userAgent: stableChromeUserAgent });
@@ -608,7 +613,19 @@ export async function getRenderedHtml(url, authSession = {}, renderOptions = {})
         })()`,
         returnByValue: true,
       }, 10000);
-      if (buyerShowTabResult.result?.value?.clicked) await new Promise((resolve) => setTimeout(resolve, 2600));
+      if (buyerShowTabResult.result?.value?.clicked) {
+        await new Promise((resolve) => setTimeout(resolve, 4200));
+        await cdp.send("Runtime.evaluate", {
+          expression: `(() => {
+            const containers = Array.from(document.querySelectorAll('[role="dialog"],[class*="rate"],[class*="review"],[class*="comment"],[class*="evaluate"]'));
+            const target = containers.sort((left, right) => right.scrollHeight - left.scrollHeight)[0];
+            if (target && target.scrollHeight > target.clientHeight) target.scrollTo(0, Math.min(target.scrollHeight, 2400));
+            return Boolean(target);
+          })()`,
+          returnByValue: true,
+        }, 10000);
+        await new Promise((resolve) => setTimeout(resolve, 2200));
+      }
     }
     await cdp.send(
       "Runtime.evaluate",
@@ -632,14 +649,17 @@ export async function getRenderedHtml(url, authSession = {}, renderOptions = {})
       returnByValue: true,
     }, 10000);
     const authState = await getTaobaoAuthState(context);
-    const bodyResults = await Promise.allSettled(Array.from(priceResponses, async ([requestId, response]) => {
+    // Buyer-show responses are read first so large price telemetry cannot use
+    // the payload budget before the delayed review requests finish.
+    const responseEntries = [...buyerShowResponses, ...priceResponses];
+    const bodyResults = await Promise.allSettled(responseEntries.map(async ([requestId, response]) => {
       const bodyResult = await cdp.send("Network.getResponseBody", { requestId }, 5000);
       return { ...response, body: String(bodyResult.body || "") };
     }));
     const networkPayloads = [];
     let networkBytes = 0;
     for (const result of bodyResults) {
-      if (result.status !== "fulfilled" || networkBytes >= 8_000_000) continue;
+      if (result.status !== "fulfilled" || networkBytes >= 12_000_000) continue;
       const payload = result.value;
       if (!payload.body || payload.body.length > 2_000_000) continue;
       networkBytes += payload.body.length;
