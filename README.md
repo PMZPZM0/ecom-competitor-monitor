@@ -2,6 +2,11 @@
 
 本项目是一个本地运行的天猫/淘宝竞品监控工作台，用于添加商品链接、抓取主图/SKU 图/SKU 价格、每 10 分钟自动监控，并生成 AI 或本地规则分析。
 
+## 使用说明
+
+- [中文使用说明书](docs/USER_GUIDE.md)
+- [Windows、macOS 安装包下载](https://github.com/PMZPZM0/ecom-competitor-monitor/releases/tag/v1.0.0)
+
 ## 界面预览
 
 以下截图已对店铺名、商品名、商品 ID、SKU ID 和商品素材等信息进行隐私处理。
