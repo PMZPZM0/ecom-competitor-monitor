@@ -14,7 +14,7 @@ export function MetricCards({ overview }: { overview: Overview }) {
   ]
 
   return (
-    <div className="grid grid-cols-4 gap-4">
+    <div className="grid grid-cols-4 gap-4 max-[950px]:grid-cols-2">
       {metrics.map((metric) => (
         <Card key={metric.label}>
           <CardContent className="flex items-center justify-between">

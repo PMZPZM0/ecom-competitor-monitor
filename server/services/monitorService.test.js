@@ -22,6 +22,17 @@ import {
   snapshotAllowsPriceAlerts,
 } from "./monitorService.js";
 
+function verifiedSku(sku, channels = ["normal"]) {
+  return {
+    ...sku,
+    resolutionStatus: "verified",
+    priceResolution: {
+      status: "verified",
+      channels: Object.fromEntries(channels.map((kind) => [kind, { status: "verified", valueCents: 1, evidenceIds: [`${kind}-evidence`] }])),
+    },
+  };
+}
+
 test("per-product schedules inherit the global interval and allow an override", () => {
   const now = Date.parse("2026-07-12T08:00:00.000Z");
   const monitor = { running: true, intervalMinutes: 60 };
@@ -100,15 +111,12 @@ test("historicalProductMedia preserves verified gallery and video assets", () =>
   });
 });
 
-test("missing account prices preserve the latest verified SKU scenario", () => {
-  const previous = { capturedAt: "2026-01-01", skuPrices: [{ skuId: "a", price: 529, normalPrice: 529, surprisePrice: 489, coinPrice: 479.91, priceCalculation: { normal: "n", surprise: "s", coin: "c" } }] };
-  const current = { capturedAt: "2026-01-02", skuPrices: [{ skuId: "a", price: 489, normalPrice: 489, surprisePrice: null, coinPrice: 479.91 }], rawSignals: {} };
-  const restored = preserveVerifiedAccountPrices(current, previous, "normal");
-  assert.equal(restored.skuPrices[0].normalPrice, 529);
-  assert.equal(restored.skuPrices[0].surprisePrice, 489);
-  assert.equal(restored.skuPrices[0].coinPrice, 479.91);
-  assert.equal(restored.rawSignals.preservedAccountPriceCount, 1);
-  assert.equal(historicalAccountPriceSnapshot([{ productId: "p", ...current }, { productId: "p", ...previous }], "p", "normal").capturedAt, "2026-01-01");
+test("a failed current capture never inherits a historical verified price", () => {
+  const previous = { productId: "p", capturedAt: "2026-01-01", skuPrices: [verifiedSku({ skuId: "a", price: 529, normalPrice: 529, surprisePrice: 489 }, ["normal", "surprise"])] };
+  const current = { productId: "p", capturedAt: "2026-01-02", skuPrices: [{ skuId: "a", price: 489, normalPrice: 489, resolutionStatus: "ambiguous" }], rawSignals: {} };
+  assert.equal(preserveVerifiedAccountPrices(current, previous, "normal"), current);
+  assert.equal(current.skuPrices[0].normalPrice, 489);
+  assert.equal(historicalAccountPriceSnapshot([previous, current], "p", "normal").capturedAt, "2026-01-01");
 });
 
 test("stale or invalid account benefits are not inherited by a new capture", () => {
@@ -121,59 +129,69 @@ test("stale or invalid account benefits are not inherited by a new capture", () 
   assert.equal(historicalAccountPriceSnapshot([{ productId: "p", capturedAt: "2026-01-03", skuPrices: [{ skuId: "a", normalPrice: 179, giftPrice: 629 }] }], "p", "gift"), null);
 });
 
-test("strong per-SKU promotion telemetry wins over a later visible-text guess", () => {
-  const strong = {
-    productId: "p",
-    capturedAt: "2026-07-12",
-    skuPrices: [
-      { skuId: "a", price: 459, normalPrice: 459, surprisePrice: 428, originalPrice: 689, surpriseStatus: "available", surpriseInference: { normalPrice: 459, source: "mobile-promotion-formula" }, priceCalculation: { normal: "普通价 459", surprise: "惊喜价 428" }, priceLayers: [{ label: "普通价（活动公式）", value: 459 }, { label: "惊喜立减价", value: 428 }] },
-      { skuId: "b", price: 409, normalPrice: 409, surprisePrice: 369, originalPrice: 609, surpriseStatus: "available", surpriseInference: { normalPrice: 409, source: "mobile-promotion-formula" }, priceCalculation: { normal: "普通价 409", surprise: "惊喜价 369" }, priceLayers: [] },
-      { skuId: "c", price: 439, normalPrice: 439, surprisePrice: 438.99, originalPrice: 669, surpriseStatus: "available", surpriseInference: { normalPrice: 439, source: "mobile-promotion-formula" }, priceCalculation: { normal: "普通价 439", surprise: "惊喜价 438.99" }, priceLayers: [{ label: "普通价（活动公式）", value: 439 }, { label: "惊喜立减价", value: 438.99 }] },
-    ],
-  };
-  const weak = {
-    productId: "p",
-    capturedAt: "2026-07-13",
-    rawSignals: {},
-    skuPrices: [
-      { skuId: "a", price: 489, normalPrice: 489, surprisePrice: 428, originalPrice: 689, surpriseInference: { normalPrice: 489, source: "visible-promotion-formula" } },
-      { skuId: "b", price: 409, normalPrice: 409, surprisePrice: 369, originalPrice: 609, surpriseInference: { normalPrice: 409, source: "visible-promotion-formula" } },
-      { skuId: "c", price: 469, normalPrice: 469, surprisePrice: 438.99, originalPrice: 669, surpriseInference: { normalPrice: 469, source: "visible-promotion-formula" } },
-    ],
-  };
-  const restored = preserveVerifiedAccountPrices(weak, strong, "normal");
-
-  assert.deepEqual(restored.skuPrices.map((sku) => sku.normalPrice), [459, 409, 439]);
-  assert.deepEqual(restored.skuPrices.map((sku) => sku.surprisePrice), [428, 369, 438.99]);
-  const partial = structuredClone(strong);
-  partial.capturedAt = "2026-07-13";
-  partial.skuPrices[2] = { skuId: "c", price: 438.99, normalPrice: 438.99, surprisePrice: null, originalPrice: 669 };
-  const historical = historicalAccountPriceSnapshot([partial, strong], "p", "normal");
-  assert.deepEqual(historical.skuPrices.map((sku) => sku.normalPrice), [459, 409, 439]);
-  assert.equal(historical.skuPrices[2].surpriseInference.source, "mobile-promotion-formula");
+test("historical lookup ignores newer unverified snapshots", () => {
+  const verified = { productId: "p", capturedAt: "2026-07-12", skuPrices: [verifiedSku({ skuId: "a", normalPrice: 459 })] };
+  const ambiguous = { productId: "p", capturedAt: "2026-07-13", skuPrices: [{ skuId: "a", normalPrice: 489, resolutionStatus: "ambiguous" }] };
+  assert.equal(historicalAccountPriceSnapshot([verified, ambiguous], "p", "normal"), verified);
 });
 
-test("normal account is the baseline and lower target-account prices become isolated benefits for every SKU", () => {
-  const snapshot = (prices) => ({
-    price: prices[0],
-    priceRange: [Math.min(...prices), Math.max(...prices)],
-    skuPrices: prices.map((normalPrice, index) => ({ skuId: `sku-${index + 1}`, price: normalPrice, normalPrice, priceLayers: [], discountItems: [], priceCalculation: { normal: `普通价 ${normalPrice}` } })),
+test("account merge accepts explicit gift evidence and never uses a bare cross-account difference", () => {
+  const normal = {
+    price: 139,
+    priceRange: [139, 159],
+    skuPrices: [139, 159].map((normalPrice, index) => verifiedSku({ skuId: `sku-${index + 1}`, price: normalPrice, normalPrice, priceLayers: [], discountItems: [] }, ["normal"])),
     rawSignals: {},
-  });
+  };
+  const gift = {
+    price: 139,
+    priceRange: [139, 159],
+    skuPrices: [126, 146].map((giftPrice, index) => verifiedSku({ skuId: `sku-${index + 1}`, price: [139, 159][index], normalPrice: [139, 159][index], giftPrice, giftStatus: "available", giftDiscountAmount: 13, priceLayers: [], discountItems: [] }, ["normal", "gift"])),
+    rawSignals: {},
+  };
   const normalSession = { id: "normal", name: "普通账号", accountType: "normal" };
   const giftSession = { id: "gift", name: "礼金账号", accountType: "gift" };
   const merged = mergeAccountSnapshots([
-    { session: giftSession, snapshot: snapshot([126, 146]) },
-    { session: normalSession, snapshot: snapshot([139, 159]) },
+    { session: giftSession, snapshot: gift },
+    { session: normalSession, snapshot: normal },
   ]);
-  const [firstSku, secondSku] = merged.skuPrices;
 
   assert.deepEqual(merged.skuPrices.map((sku) => ({ normal: sku.normalPrice, gift: sku.giftPrice })), [
     { normal: 139, gift: 126 },
     { normal: 159, gift: 146 },
   ]);
-  assert.equal(firstSku.giftInference.source, "cross-account-observation");
-  assert.equal(secondSku.giftInference.source, "cross-account-observation");
+  const guessed = mergeAccountSnapshots([
+    { session: giftSession, snapshot: { ...gift, skuPrices: [{ skuId: "sku-1", price: 126, normalPrice: 126 }] } },
+    { session: normalSession, snapshot: normal },
+  ]);
+  assert.equal(guessed.skuPrices[0].giftPrice, undefined);
+});
+
+test("account merge keeps each account's evidence isolated while adopting the target channel", () => {
+  const resolution = (accountType, giftCents) => ({
+    status: "verified",
+    accountType,
+    channels: {
+      normal: { status: "verified", valueCents: 10900, evidenceIds: [`${accountType}-normal`] },
+      gift: { status: "verified", valueCents: giftCents, evidenceIds: [`${accountType}-gift`] },
+    },
+    evidence: [
+      { id: `${accountType}-normal`, kind: "normal", valueCents: 10900 },
+      { id: `${accountType}-gift`, kind: "gift", valueCents: giftCents },
+    ],
+  });
+  const normalSku = { skuId: "sku-1", price: 109, normalPrice: 109, giftPrice: 102, resolutionStatus: "verified", priceResolution: resolution("normal", 10200), priceLayers: [{ label: "普通价", value: 109 }, { label: "礼金价", value: 102 }] };
+  const giftSku = { skuId: "sku-1", price: 109, normalPrice: 109, giftPrice: 94, resolutionStatus: "verified", priceResolution: resolution("gift", 9400), priceLayers: [{ label: "普通价", value: 109 }, { label: "礼金价", value: 94 }] };
+  const [merged] = mergeAccountSnapshots([
+    { session: { id: "normal", accountType: "normal" }, snapshot: { skuPrices: [normalSku], rawSignals: {} } },
+    { session: { id: "gift", accountType: "gift" }, snapshot: { skuPrices: [giftSku], rawSignals: {} } },
+  ]).skuPrices;
+
+  assert.equal(merged.giftPrice, 94);
+  assert.equal(merged.priceResolution.channels.gift.valueCents, 9400);
+  assert.equal(merged.accountPrices[0].priceResolution.channels.gift.valueCents, 10200);
+  assert.equal(merged.accountPrices[1].priceResolution.channels.gift.valueCents, 9400);
+  assert.deepEqual(merged.priceResolution.evidence.filter((item) => item.kind === "gift").map((item) => item.valueCents), [9400]);
+  assert.deepEqual(merged.priceLayers.filter((item) => item.label === "礼金价").map((item) => item.value), [94]);
 });
 
 test("a target account list price never replaces the observed normal-account price", () => {
@@ -197,9 +215,11 @@ test("gift and 88VIP products also capture one normal-account baseline", () => {
   ];
   assert.deepEqual(sessionsForProduct(sessions, "gift").map((session) => session.id), ["n1", "n2", "g1"]);
   assert.deepEqual(sessionsForProduct(sessions, "vip88").map((session) => session.id), ["n1", "n2", "v1"]);
-  assert.equal(hasTrustedAccountBaseline([{ session: sessions[2], snapshot: { skuPrices: [{ normalPrice: 629, originalPrice: 629 }] } }], "gift"), false);
-  assert.equal(hasTrustedAccountBaseline([{ session: sessions[2], snapshot: { skuPrices: [{ giftPrice: 629, giftInference: { normalPrice: 179 } }] } }], "gift"), false);
-  assert.equal(hasTrustedAccountBaseline([{ session: sessions[2], snapshot: { skuPrices: [{ giftPrice: 126, giftInference: { normalPrice: 179 } }] } }], "gift"), true);
+  const normal = { session: sessions[0], snapshot: { skuPrices: [verifiedSku({ skuId: "sku-1", normalPrice: 179 }, ["normal"])] } };
+  const gift = { session: sessions[2], snapshot: { skuPrices: [verifiedSku({ skuId: "sku-1", normalPrice: 179, giftPrice: 126 }, ["normal", "gift"])] } };
+  assert.equal(hasTrustedAccountBaseline([gift], "gift"), false);
+  assert.equal(hasTrustedAccountBaseline([normal, { session: sessions[2], snapshot: { skuPrices: [{ skuId: "sku-1", normalPrice: 126 }] } }], "gift"), false);
+  assert.equal(hasTrustedAccountBaseline([normal, gift], "gift"), true);
 });
 
 test("resolveCaptureProtectionMinutes prefers an account pool override", () => {
@@ -211,8 +231,9 @@ test("resolveCaptureProtectionMinutes prefers an account pool override", () => {
 });
 
 test("anonymous public-price snapshots never trigger account price alerts", () => {
-  assert.equal(snapshotAllowsPriceAlerts({ accessMode: "anonymous" }), false);
-  assert.equal(snapshotAllowsPriceAlerts({ accessMode: "authenticated" }), true);
+  assert.equal(snapshotAllowsPriceAlerts({ accessMode: "anonymous", resolutionStatus: "verified" }), false);
+  assert.equal(snapshotAllowsPriceAlerts({ accessMode: "authenticated", resolutionStatus: "legacy" }), false);
+  assert.equal(snapshotAllowsPriceAlerts({ accessMode: "authenticated", resolutionStatus: "verified" }), true);
 });
 
 test("Feishu reminder cooldown can be disabled without affecting capture scheduling", () => {

@@ -27,7 +27,7 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
 
 export const api = {
   overview: () => request<Overview>('/api/overview'),
-  addProduct: (payload: { name: string; url: string; group?: string; accountType: 'normal' | 'gift' | 'vip88' }) =>
+  addProduct: (payload: { name?: string; url: string; group?: string; accountType: 'normal' | 'gift' | 'vip88' }) =>
     request<Product>('/api/products', { method: 'POST', body: JSON.stringify(payload) }),
   addProductsBatch: (payload: { urls: string[]; group: string; accountType: 'normal' | 'gift' | 'vip88' }) =>
     request<{ total: number; created: number; skipped: number; success: number; failed: number; message: string }>('/api/products/batch', { method: 'POST', body: JSON.stringify(payload) }),

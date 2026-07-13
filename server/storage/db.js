@@ -5,8 +5,13 @@ import { fileURLToPath } from "node:url";
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const dataDir = path.resolve(process.env.ECOM_MONITOR_DATA_DIR || path.resolve(__dirname, "../data"));
 const dbPath = path.join(dataDir, "db.json");
+export const DB_SCHEMA_VERSION = 2;
+
+let readyPromise = null;
+let mutationQueue = Promise.resolve();
 
 const initialData = {
+  schemaVersion: DB_SCHEMA_VERSION,
   products: [],
   snapshots: [],
   authSessions: [],
@@ -44,13 +49,64 @@ const initialData = {
   },
 };
 
-async function ensureDb() {
+function markLegacySnapshot(snapshot) {
+  if (!snapshot || snapshot.parserVersion) return snapshot;
+  return { ...snapshot, parserVersion: "legacy", resolutionStatus: snapshot.resolutionStatus || "legacy" };
+}
+
+export function migrateDbDocument(parsed) {
+  const fromVersion = Number(parsed?.schemaVersion || 1);
+  if (fromVersion >= DB_SCHEMA_VERSION) return { data: parsed, migrated: false, fromVersion };
+  const data = {
+    ...parsed,
+    schemaVersion: DB_SCHEMA_VERSION,
+    snapshots: (parsed.snapshots || []).map(markLegacySnapshot),
+    products: (parsed.products || []).map((product) => ({
+      ...product,
+      lastSnapshot: markLegacySnapshot(product.lastSnapshot),
+    })),
+  };
+  return { data, migrated: true, fromVersion };
+}
+
+async function atomicWrite(data) {
+  const temporaryPath = `${dbPath}.${process.pid}.${Date.now()}.tmp`;
+  const handle = await fs.open(temporaryPath, "w");
+  try {
+    await handle.writeFile(JSON.stringify(data, null, 2), "utf8");
+    await handle.sync();
+  } finally {
+    await handle.close();
+  }
+  await fs.rename(temporaryPath, dbPath);
+}
+
+async function initializeDb() {
   await fs.mkdir(dataDir, { recursive: true });
   try {
     await fs.access(dbPath);
   } catch {
-    await fs.writeFile(dbPath, JSON.stringify(initialData, null, 2), "utf8");
+    await atomicWrite(initialData);
+    return;
   }
+  const parsed = JSON.parse(await fs.readFile(dbPath, "utf8"));
+  const migration = migrateDbDocument(parsed);
+  if (!migration.migrated) return;
+  const backupPath = `${dbPath}.v${migration.fromVersion}.bak`;
+  try {
+    await fs.access(backupPath);
+  } catch {
+    await fs.copyFile(dbPath, backupPath);
+  }
+  await atomicWrite(migration.data);
+}
+
+async function ensureDb() {
+  readyPromise ||= initializeDb().catch((error) => {
+    readyPromise = null;
+    throw error;
+  });
+  return readyPromise;
 }
 
 export async function readDb() {
@@ -60,6 +116,7 @@ export async function readDb() {
   return {
     ...initialData,
     ...parsed,
+    schemaVersion: DB_SCHEMA_VERSION,
     monitor: {
       ...initialData.monitor,
       ...(parsed.monitor || {}),
@@ -75,16 +132,30 @@ export async function readDb() {
   };
 }
 
-export async function writeDb(data) {
+async function writeDbNow(data) {
   await ensureDb();
-  await fs.writeFile(dbPath, JSON.stringify(data, null, 2), "utf8");
+  await atomicWrite({ ...data, schemaVersion: DB_SCHEMA_VERSION });
   return data;
 }
 
+export function writeDb(data) {
+  const operation = mutationQueue.then(() => writeDbNow(data));
+  mutationQueue = operation.then(() => undefined, () => undefined);
+  return operation;
+}
+
 export async function updateDb(mutator) {
-  const data = await readDb();
-  const next = await mutator(data);
-  return writeDb(next ?? data);
+  const operation = mutationQueue.then(async () => {
+    const data = await readDb();
+    const next = await mutator(data);
+    return writeDbNow(next ?? data);
+  });
+  mutationQueue = operation.then(() => undefined, () => undefined);
+  return operation;
+}
+
+export function dbRuntimeInfo() {
+  return { dataDir, dbPath, schemaVersion: DB_SCHEMA_VERSION };
 }
 
 export function newId(prefix) {

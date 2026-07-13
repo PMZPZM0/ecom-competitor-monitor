@@ -170,74 +170,14 @@ export function historicalProductMedia(snapshots, productId) {
 }
 
 export function historicalAccountPriceSnapshot(snapshots, productId, accountType = "normal") {
-  const candidates = snapshots
-    .filter((snapshot) => snapshot.productId === productId)
-    .sort((left, right) => new Date(right.capturedAt || 0).getTime() - new Date(left.capturedAt || 0).getTime());
-  const skuIds = Array.from(new Set(candidates.flatMap((snapshot) => (snapshot.skuPrices || []).map((sku) => String(sku.skuId)))));
-  const selected = skuIds.map((skuId) => {
-    const entries = candidates.flatMap((snapshot) => (snapshot.skuPrices || [])
-      .filter((sku) => String(sku.skuId) === skuId)
-      .map((sku) => ({ snapshot, sku })));
-    return entries.find((entry) => hasStrongAccountFormula(entry.sku, accountType))
-      || entries.find((entry) => hasVerifiedAccountPrice(entry.sku, accountType));
-  }).filter(Boolean);
-  if (!selected.length) return null;
-  const base = candidates.find((snapshot) => selected.some((entry) => entry.snapshot === snapshot));
-  return { ...base, skuPrices: selected.map((entry) => entry.sku) };
+  const kind = accountType === "normal" ? "normal" : accountType;
+  return snapshots
+    .filter((snapshot) => snapshot.productId === productId && (snapshot.skuPrices || []).some((sku) => verifiedChannel(sku, kind)))
+    .sort((left, right) => new Date(right.capturedAt || 0).getTime() - new Date(left.capturedAt || 0).getTime())[0] || null;
 }
 
-export function preserveVerifiedAccountPrices(snapshot, previousSnapshot, accountType = "normal") {
-  if (!previousSnapshot?.skuPrices?.length) return snapshot;
-  const priceField = accountType === "gift" ? "giftPrice" : accountType === "vip88" ? "vipPrice" : "surprisePrice";
-  const statusField = accountType === "gift" ? "giftStatus" : accountType === "vip88" ? "vipStatus" : "surpriseStatus";
-  const discountField = accountType === "gift" ? "giftDiscountAmount" : accountType === "vip88" ? "vipDiscountAmount" : "surpriseDiscountAmount";
-  const inferenceField = accountType === "gift" ? "giftInference" : accountType === "vip88" ? "vipInference" : "surpriseInference";
-  const previousBySku = new Map(previousSnapshot.skuPrices.map((sku) => [String(sku.skuId), sku]));
-  let preservedCount = 0;
-  const skuPrices = (snapshot.skuPrices || []).map((sku) => {
-    const previous = previousBySku.get(String(sku.skuId));
-    const displayedPrice = Number(Number(sku[priceField]) > 0 ? sku[priceField] : sku.normalPrice ?? sku.price);
-    const previousBenefitPrice = Number(previous?.[priceField]);
-    if (!previous) return sku;
-    const previousStrong = hasStrongAccountFormula(previous, accountType);
-    const currentStrong = hasStrongAccountFormula(sku, accountType);
-    const sameOriginalPrice = Number.isFinite(Number(sku.originalPrice))
-      && Number.isFinite(Number(previous.originalPrice))
-      && Math.abs(Number(sku.originalPrice) - Number(previous.originalPrice)) <= 0.05;
-    const preferPreviousFormula = previousStrong && !currentStrong && sameOriginalPrice;
-    if (hasVerifiedAccountPrice(sku, accountType) && !preferPreviousFormula) return sku;
-    const previousBenefitVerified = hasVerifiedAccountPrice(previous, accountType);
-    if (!previousBenefitVerified && !(accountType === "normal" && previousStrong)) return sku;
-    if (!Number.isFinite(displayedPrice) || Math.abs(displayedPrice - previousBenefitPrice) > 0.05) return sku;
-    const priceCalculation = previous.priceCalculation || sku.priceCalculation;
-    const priceLayers = previous.priceLayers?.length ? previous.priceLayers : sku.priceLayers;
-    preservedCount += 1;
-    return {
-      ...sku,
-      price: previous.normalPrice ?? previous.price,
-      normalPrice: previous.normalPrice ?? previous.price,
-      [priceField]: previousBenefitVerified ? previous[priceField] : null,
-      [statusField]: previousBenefitVerified ? previous[statusField] || "available" : "none",
-      [discountField]: previousBenefitVerified ? previous[discountField] ?? null : null,
-      [inferenceField]: previousBenefitVerified ? previous[inferenceField] : null,
-      coinPrice: Number(sku.coinPrice) > 0 ? sku.coinPrice : previous.coinPrice,
-      coinStatus: Number(sku.coinPrice) > 0 ? sku.coinStatus : previous.coinStatus,
-      coinDiscountAmount: Number(sku.coinPrice) > 0 ? sku.coinDiscountAmount : previous.coinDiscountAmount,
-      priceCalculation: previousBenefitVerified || accountType !== "normal" ? priceCalculation : { ...priceCalculation, surprise: "未获取惊喜立减价" },
-      priceLayers: previousBenefitVerified || accountType !== "normal" ? priceLayers : (priceLayers || []).filter((layer) => !/惊喜立减价/.test(layer.label)),
-      discountItems: previous.discountItems?.length ? previous.discountItems : sku.discountItems,
-      accountPricePreservedAt: new Date().toISOString(),
-    };
-  });
-  if (!preservedCount) return snapshot;
-  const prices = skuPrices.map((sku) => Number(sku.normalPrice ?? sku.price)).filter(Number.isFinite);
-  return {
-    ...snapshot,
-    skuPrices,
-    price: skuPrices[0]?.normalPrice ?? skuPrices[0]?.price ?? snapshot.price,
-    priceRange: prices.length ? [Math.min(...prices), Math.max(...prices)] : snapshot.priceRange,
-    rawSignals: { ...snapshot.rawSignals, preservedAccountPriceCount: preservedCount },
-  };
+export function preserveVerifiedAccountPrices(snapshot) {
+  return snapshot;
 }
 
 function buildRunRecord({ source, scope, startedAt, results, message }) {
@@ -256,21 +196,32 @@ function buildRunRecord({ source, scope, startedAt, results, message }) {
   };
 }
 
-function isVerifiedBenefitPrice(normalPrice, benefitPrice) {
-  const normal = Number(normalPrice);
-  const benefit = Number(benefitPrice);
-  return Number.isFinite(normal) && Number.isFinite(benefit) && benefit > 0 && normal > benefit;
+function verifiedChannel(sku, kind) {
+  return sku?.resolutionStatus === "verified" && sku?.priceResolution?.channels?.[kind]?.status === "verified";
 }
 
-function hasVerifiedAccountPrice(sku, accountType) {
-  const priceField = accountType === "gift" ? "giftPrice" : accountType === "vip88" ? "vipPrice" : "surprisePrice";
-  const inferenceField = accountType === "gift" ? "giftInference" : accountType === "vip88" ? "vipInference" : "surpriseInference";
-  return isVerifiedBenefitPrice(sku?.[inferenceField]?.normalPrice ?? sku?.normalPrice ?? sku?.price, sku?.[priceField]);
+function adoptVerifiedChannel(current, sku, kind) {
+  const sourceResolution = sku.priceResolution;
+  const channel = sourceResolution?.channels?.[kind];
+  if (channel?.status !== "verified") return;
+  current.priceResolution = structuredClone(current.priceResolution || { status: "verified", channels: {}, evidence: [] });
+  const replacedEvidenceIds = new Set(current.priceResolution.channels?.[kind]?.evidenceIds || []);
+  current.priceResolution.accountType = "merged";
+  current.priceResolution.channels = { ...(current.priceResolution.channels || {}), [kind]: structuredClone(channel) };
+  const evidenceIds = new Set(channel.evidenceIds || []);
+  const adoptedEvidence = (sourceResolution.evidence || []).filter((item) => evidenceIds.has(item.id));
+  const mergedEvidence = [...(current.priceResolution.evidence || []).filter((item) => !replacedEvidenceIds.has(item.id)), ...adoptedEvidence];
+  current.priceResolution.evidence = Array.from(new Map(mergedEvidence.map((item) => [item.id, item])).values());
+  current.priceEvidence = Array.from(new Map([...(current.priceEvidence || []).filter((item) => !replacedEvidenceIds.has(item.id)), ...adoptedEvidence].map((item) => [item.id, item])).values());
+  delete current.priceResolution.evidenceHash;
 }
 
-function hasStrongAccountFormula(sku, accountType) {
-  const inferenceField = accountType === "gift" ? "giftInference" : accountType === "vip88" ? "vipInference" : "surpriseInference";
-  return /^(?:mobile|network|cross-account)-/.test(String(sku?.[inferenceField]?.source || ""));
+function adoptPriceLayer(current, sku, kind, fallbackValue) {
+  const label = { surprise: "惊喜立减价", gift: "礼金价", vip88: "88VIP价", coin: "淘金币价" }[kind];
+  if (!label) return;
+  const sourceLayer = (sku.priceLayers || []).find((layer) => layer.label === label);
+  current.priceLayers = (current.priceLayers || []).filter((layer) => layer.label !== label);
+  current.priceLayers.push(structuredClone(sourceLayer || { label, value: fallbackValue, kind: "price", source: "pcdetail-adjust" }));
 }
 
 export function mergeAccountSnapshots(snapshots) {
@@ -282,64 +233,48 @@ export function mergeAccountSnapshots(snapshots) {
     const accountType = entry.session?.accountType || "normal";
     for (const sku of entry.snapshot.skuPrices || []) {
       const skuId = String(sku.skuId);
-      const current = bySkuId.get(skuId) || { ...sku, accountPrices: [] };
-      const normalPrice = Number(current.normalPrice ?? current.price);
-      const displayedPrice = Number(sku.normalPrice ?? sku.price);
+      const current = bySkuId.get(skuId) || { ...structuredClone(sku), accountPrices: [] };
       const config = accountType === "gift"
-        ? { priceField: "giftPrice", statusField: "giftStatus", discountField: "giftDiscountAmount", inferenceField: "giftInference", calculationField: "gift", label: "礼金价", discountLabel: "礼金优惠" }
+        ? { kind: "gift", priceField: "giftPrice", statusField: "giftStatus", discountField: "giftDiscountAmount", calculationField: "gift" }
         : accountType === "vip88"
-          ? { priceField: "vipPrice", statusField: "vipStatus", discountField: "vipDiscountAmount", inferenceField: "vipInference", calculationField: "vip88", label: "88VIP价", discountLabel: "88VIP优惠" }
-          : null;
-      const explicitBenefitPrice = config ? Number(sku[config.priceField]) : null;
-      const observedBenefitPrice = config && isVerifiedBenefitPrice(normalPrice, explicitBenefitPrice)
-        ? explicitBenefitPrice
-        : config && isVerifiedBenefitPrice(normalPrice, displayedPrice)
-          ? displayedPrice
-          : null;
-      if (config && observedBenefitPrice) {
-        const discountAmount = Number((normalPrice - observedBenefitPrice).toFixed(2));
-        current[config.priceField] = observedBenefitPrice;
+          ? { kind: "vip88", priceField: "vipPrice", statusField: "vipStatus", discountField: "vipDiscountAmount", calculationField: "vip88" }
+          : accountType === "normal"
+            ? { kind: "surprise", priceField: "surprisePrice", statusField: "surpriseStatus", discountField: "surpriseDiscountAmount", calculationField: "surprise" }
+            : null;
+      if (config && verifiedChannel(sku, config.kind)) {
+        current[config.priceField] = sku[config.priceField];
         current[config.statusField] = "available";
-        current[config.discountField] = Number(sku[config.discountField]) > 0 ? sku[config.discountField] : discountAmount;
-        current[config.inferenceField] = sku[config.inferenceField] || {
-          normalPrice,
-          benefitPrice: observedBenefitPrice,
-          benefitDiscountAmount: discountAmount,
-          accountType,
-          formula: `普通价 ${normalPrice.toFixed(2)} - ${config.discountLabel} ${discountAmount.toFixed(2)} = ${observedBenefitPrice.toFixed(2)}`,
-          source: "cross-account-observation",
-        };
-        current.priceCalculation = {
-          ...(current.priceCalculation || {}),
-          [config.calculationField]: current[config.inferenceField].formula,
-        };
-        current.priceLayers = [...(current.priceLayers || [])];
-        if (!current.priceLayers.some((layer) => layer.label === config.label && Number(layer.value) === observedBenefitPrice)) {
-          current.priceLayers.push({ label: config.label, value: observedBenefitPrice, kind: "price", source: "cross-account-observation" });
-        }
+        current[config.discountField] = sku[config.discountField] ?? null;
+        current.priceCalculation = { ...(current.priceCalculation || {}), [config.calculationField]: sku.priceCalculation?.[config.calculationField] };
+        adoptVerifiedChannel(current, sku, config.kind);
+        adoptPriceLayer(current, sku, config.kind, sku[config.priceField]);
       }
-      if (accountType !== "normal" && Number(sku.coinPrice) > 0) {
+      if (verifiedChannel(sku, "coin")) {
         current.coinPrice = sku.coinPrice;
         current.coinStatus = sku.coinStatus;
         current.coinDiscountAmount = sku.coinDiscountAmount;
         current.priceCalculation = { ...(current.priceCalculation || {}), coin: sku.priceCalculation?.coin || current.priceCalculation?.coin };
+        adoptVerifiedChannel(current, sku, "coin");
+        adoptPriceLayer(current, sku, "coin", sku.coinPrice);
       }
       current.accountPrices.push({
         sessionId: entry.session?.id || "guest",
         accountName: entry.session?.name || "未登录前台",
         accountType,
         price: sku.price,
-        normalPrice,
+        normalPrice: sku.normalPrice,
         surprisePrice: sku.surprisePrice,
-        giftPrice: accountType === "gift" ? observedBenefitPrice : sku.giftPrice,
-        giftDiscountAmount: accountType === "gift" && observedBenefitPrice ? Number((normalPrice - observedBenefitPrice).toFixed(2)) : sku.giftDiscountAmount,
-        vipPrice: accountType === "vip88" ? observedBenefitPrice : sku.vipPrice,
-        vipDiscountAmount: accountType === "vip88" && observedBenefitPrice ? Number((normalPrice - observedBenefitPrice).toFixed(2)) : sku.vipDiscountAmount,
+        giftPrice: verifiedChannel(sku, "gift") ? sku.giftPrice : null,
+        giftDiscountAmount: verifiedChannel(sku, "gift") ? sku.giftDiscountAmount : null,
+        vipPrice: verifiedChannel(sku, "vip88") ? sku.vipPrice : null,
+        vipDiscountAmount: verifiedChannel(sku, "vip88") ? sku.vipDiscountAmount : null,
         coinPrice: sku.coinPrice,
         originalPrice: sku.originalPrice,
-        priceCalculation: sku.priceCalculation,
-        priceLayers: sku.priceLayers || [],
-        discountItems: sku.discountItems || [],
+        resolutionStatus: sku.resolutionStatus,
+        priceResolution: structuredClone(sku.priceResolution),
+        priceCalculation: structuredClone(sku.priceCalculation || {}),
+        priceLayers: structuredClone(sku.priceLayers || []),
+        discountItems: structuredClone(sku.discountItems || []),
       });
       const discountItems = [...(current.discountItems || []), ...(sku.discountItems || [])];
       current.discountItems = Array.from(new Map(discountItems.map((item) => [
@@ -350,16 +285,33 @@ export function mergeAccountSnapshots(snapshots) {
     }
   }
   merged.skuPrices = Array.from(bySkuId.values());
+  const buyerShowCapture = snapshots
+    .map((entry) => entry.snapshot.buyerShowCapture)
+    .filter(Boolean)
+    .toSorted((left, right) => {
+      const rank = { complete: 4, partial: 3, "confirmed-empty": 2, failed: 1 };
+      return (rank[right.status] || 0) - (rank[left.status] || 0)
+        || Number(right.mediaCount || 0) - Number(left.mediaCount || 0)
+        || (right.items?.length || 0) - (left.items?.length || 0);
+    })[0];
+  if (buyerShowCapture) {
+    merged.buyerShowCapture = buyerShowCapture;
+    merged.buyerShows = buyerShowCapture.items || [];
+  }
   merged.accountCaptures = snapshots.map((entry) => ({
     sessionId: entry.session?.id || "guest",
     accountName: entry.session?.name || "未登录前台",
     accountType: entry.session?.accountType || "normal",
     price: entry.snapshot.price,
     priceRange: entry.snapshot.priceRange,
+    resolutionStatus: entry.snapshot.resolutionStatus,
   }));
   const normalPrices = merged.skuPrices.map((sku) => Number(sku.normalPrice ?? sku.price)).filter(Number.isFinite);
   merged.price = merged.skuPrices[0]?.normalPrice ?? merged.skuPrices[0]?.price ?? merged.price;
   merged.priceRange = normalPrices.length ? [Math.min(...normalPrices), Math.max(...normalPrices)] : merged.priceRange;
+  merged.resolutionStatus = merged.skuPrices.length && merged.skuPrices.every((sku) => verifiedChannel(sku, "normal"))
+    ? "verified"
+    : merged.skuPrices.some((sku) => verifiedChannel(sku, "normal")) ? "partial" : "ambiguous";
   merged.rawSignals = { ...merged.rawSignals, accountCaptureCount: snapshots.length };
   return merged;
 }
@@ -374,12 +326,13 @@ export function sessionsForProduct(activeSessions, accountType = "normal", rotat
 }
 
 export function hasTrustedAccountBaseline(snapshots, accountType = "normal") {
-  if (accountType === "normal" || snapshots.some((entry) => (entry.session?.accountType || "normal") === "normal")) return true;
-  return snapshots.some((entry) => (entry.snapshot.skuPrices || []).some((sku) => (
-    accountType === "gift"
-      ? isVerifiedBenefitPrice(sku.giftInference?.normalPrice, sku.giftPrice)
-      : isVerifiedBenefitPrice(sku.vipInference?.normalPrice, sku.vipPrice)
-  )));
+  const normalSkuIds = new Set(snapshots
+    .filter((entry) => (entry.session?.accountType || "normal") === "normal")
+    .flatMap((entry) => (entry.snapshot.skuPrices || []).filter((sku) => verifiedChannel(sku, "normal")).map((sku) => String(sku.skuId))));
+  if (accountType === "normal") return normalSkuIds.size > 0;
+  return normalSkuIds.size > 0 && snapshots
+    .filter((entry) => entry.session?.accountType === accountType)
+    .some((entry) => (entry.snapshot.skuPrices || []).some((sku) => normalSkuIds.has(String(sku.skuId)) && verifiedChannel(sku, accountType)));
 }
 
 function buyerShowKey(item) {
@@ -412,7 +365,7 @@ export function mergeBuyerShowHistory(currentItems = [], previousItems = []) {
 }
 
 export function snapshotAllowsPriceAlerts(snapshot) {
-  return snapshot?.accessMode !== "anonymous";
+  return snapshot?.accessMode !== "anonymous" && ["verified", "partial"].includes(snapshot?.resolutionStatus);
 }
 
 export function isFeishuAlertCoolingDown(feishu, notificationLogs, productId, skuId, now = Date.now()) {
@@ -482,7 +435,7 @@ export async function captureProduct(product, authSessions = [], { captureProtec
           const capturedSnapshot = await scrapeTmallProduct(product, session);
           snapshots.push({
             session,
-            snapshot: preserveVerifiedAccountPrices(capturedSnapshot, product.knownPriceSnapshot || product.lastSnapshot, session?.accountType || product.accountType || "normal"),
+            snapshot: capturedSnapshot,
           });
           if (session) {
             session.lastSuccessAt = new Date().toISOString();
@@ -509,20 +462,17 @@ export async function captureProduct(product, authSessions = [], { captureProtec
         }
       }
     }
-    if (!snapshots.length && authSessions.length) {
-      try {
-        snapshots.push({ session: null, snapshot: await scrapeTmallProduct(product, null) });
-      } catch (error) {
-        accountErrors.push({ sessionId: "anonymous", accountName: "匿名公开价", message: error.message });
-      }
-    }
     if (!snapshots.length) throw new Error(accountErrors.map((error) => `${error.accountName}：${error.message}`).join("；"));
     const targetAccountType = product.accountType || "normal";
     if (!hasTrustedAccountBaseline(snapshots, targetAccountType)) {
       throw new Error(`${targetAccountType === "gift" ? "礼金" : "88VIP"}价格缺少普通账号基准，本次结果已拒绝保存，避免把标价误当普通价。请检查普通账号登录后重试。`);
     }
     const snapshot = mergeAccountSnapshots(snapshots);
-    snapshot.buyerShows = mergeBuyerShowHistory(snapshot.buyerShows, product.lastSnapshot?.buyerShows);
+    const buyerShowSucceeded = ["complete", "partial", "confirmed-empty"].includes(snapshot.buyerShowCapture?.status);
+    snapshot.buyerShowCachedItems = buyerShowSucceeded ? [] : product.lastSnapshot?.buyerShows || [];
+    if (!buyerShowSucceeded && snapshot.buyerShowCapture && product.lastSnapshot?.buyerShowCapture?.capturedAt) {
+      snapshot.buyerShowCapture.lastSuccessfulAt = product.lastSnapshot.buyerShowCapture.capturedAt;
+    }
     if (snapshot.rawSignals) snapshot.rawSignals.buyerShowCount = snapshot.buyerShows.length;
     snapshot.accountErrors = accountErrors;
     return {
@@ -571,7 +521,6 @@ async function runMonitorUnlocked({ source = "manual", productIds = null, includ
       knownPrimaryImages: historicalPrimaryImages(data.snapshots, product.id),
       knownGalleryImages: Array.from(new Set([...(product.lastSnapshot?.gallery750Images || []), ...historicalProductMedia(data.snapshots, product.id).galleryImages])),
       knownVideoUrls: Array.from(new Set([...(product.lastSnapshot?.videoUrls || []), ...historicalProductMedia(data.snapshots, product.id).videoUrls])),
-      knownPriceSnapshot: historicalAccountPriceSnapshot(data.snapshots, product.id, product.accountType || "normal"),
     };
     const accountType = product.accountType || "normal";
     const productSessions = sessionsForProduct(activeSessions, accountType, productIndex);
@@ -607,7 +556,7 @@ async function runMonitorUnlocked({ source = "manual", productIds = null, includ
         current.snapshots.push(result.snapshot);
         const logs = await notifyBelowThreshold(current, result.product, result.snapshot, source);
         current.notificationLogs.push(...logs);
-        if (current.feishu.documentEnabled && current.feishu.documentId) {
+        if (snapshotAllowsPriceAlerts(result.snapshot) && current.feishu.documentEnabled && current.feishu.documentId) {
           try {
             await appendPriceDocument(current.feishu.documentId, result.product, result.snapshot);
             current.feishu.lastDocumentSyncAt = new Date().toISOString();
@@ -645,7 +594,6 @@ async function runProductUnlocked(productId, { source = "single-product" } = {})
     knownPrimaryImages: historicalPrimaryImages(data.snapshots, product.id),
     knownGalleryImages: Array.from(new Set([...(product.lastSnapshot?.gallery750Images || []), ...historicalProductMedia(data.snapshots, product.id).galleryImages])),
     knownVideoUrls: Array.from(new Set([...(product.lastSnapshot?.videoUrls || []), ...historicalProductMedia(data.snapshots, product.id).videoUrls])),
-    knownPriceSnapshot: historicalAccountPriceSnapshot(data.snapshots, product.id, product.accountType || "normal"),
   }, productSessions, { captureProtectionMinutes: resolveCaptureProtectionMinutes(data.monitor, accountType) });
   const runRecord = buildRunRecord({
     source,
@@ -671,7 +619,7 @@ async function runProductUnlocked(productId, { source = "single-product" } = {})
       current.snapshots.push(result.snapshot);
       const logs = await notifyBelowThreshold(current, result.product, result.snapshot, source);
       current.notificationLogs.push(...logs);
-      if (current.feishu.documentEnabled && current.feishu.documentId) {
+      if (snapshotAllowsPriceAlerts(result.snapshot) && current.feishu.documentEnabled && current.feishu.documentId) {
         try {
           await appendPriceDocument(current.feishu.documentId, result.product, result.snapshot);
           current.feishu.lastDocumentSyncAt = new Date().toISOString();

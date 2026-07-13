@@ -2,6 +2,17 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { buildPriceCard, effectivePriceForSku, publicFeishuConfig, updateFeishuConfig } from "./feishuService.js";
 
+function verifiedSku(sku, channels) {
+  return {
+    ...sku,
+    resolutionStatus: "verified",
+    priceResolution: {
+      status: "verified",
+      channels: Object.fromEntries(channels.map((kind) => [kind, { status: "verified", valueCents: Math.round(Number(kind === "normal" ? sku.normalPrice : kind === "surprise" ? sku.surprisePrice : kind === "gift" ? sku.giftPrice : kind === "vip88" ? sku.vipPrice : sku.coinPrice) * 100), evidenceIds: [`${kind}-evidence`] }])),
+    },
+  };
+}
+
 test("Feishu cooldown switch defaults on and persists an explicit off state", () => {
   assert.equal(publicFeishuConfig({}).cooldownEnabled, true);
   const updated = updateFeishuConfig({ cooldownMinutes: 120 }, { cooldownEnabled: false });
@@ -19,8 +30,8 @@ test("buildPriceCard renders every SKU and highlights triggered SKUs", () => {
       skuMonitorPrices: { sku1: 100, sku2: 200 },
       lastSnapshot: {
         skuPrices: [
-          { skuId: "sku1", name: "白色款", price: 90, normalPrice: 90, coinPrice: 88 },
-          { skuId: "sku2", name: "黑色款", price: 220, normalPrice: 220, coinPrice: null },
+          verifiedSku({ skuId: "sku1", name: "白色款", price: 90, normalPrice: 90, coinPrice: 88 }, ["normal", "coin"]),
+          verifiedSku({ skuId: "sku2", name: "黑色款", price: 220, normalPrice: 220, coinPrice: null }, ["normal"]),
         ],
       },
     },
@@ -50,7 +61,7 @@ test("price channels stay isolated to the product account type", () => {
     url: "https://detail.tmall.com/item.htm?id=2",
     lastSnapshot: {
       accountCaptures: [{ accountType: "gift", accountName: "礼金账号" }],
-      skuPrices: [{ skuId: "gift1", name: "礼金款", price: 79, normalPrice: 79, giftPrice: 69, surprisePrice: null, vipPrice: null, coinPrice: null, giftStatus: "available", surpriseStatus: "none", vipStatus: "none", coinStatus: "none" }],
+      skuPrices: [verifiedSku({ skuId: "gift1", name: "礼金款", price: 79, normalPrice: 79, giftPrice: 69, surprisePrice: null, vipPrice: null, coinPrice: null, giftStatus: "available", surpriseStatus: "none", vipStatus: "none", coinStatus: "none" }, ["normal", "gift"])],
     },
   };
   const card = buildPriceCard({ type: "manual-sync", product, price: 69, threshold: null });
@@ -61,19 +72,20 @@ test("price channels stay isolated to the product account type", () => {
   assert.match(serialized, /¥69\.00/);
   assert.match(serialized, /惊喜立减价/);
   assert.match(serialized, /不适用/);
-  assert.match(serialized, /无淘金币/);
+  assert.match(serialized, /本次未验证/);
   assert.deepEqual(effectivePriceForSku(product.lastSnapshot.skuPrices[0], "gift"), { label: "礼金价", value: 69 });
 });
 
 test("effective price follows normal to surprise to coin chain", () => {
-  const sku = { price: 529, normalPrice: 529, surprisePrice: 489, coinPrice: 479.91 };
+  const sku = verifiedSku({ price: 529, normalPrice: 529, surprisePrice: 489, coinPrice: 479.91 }, ["normal", "surprise", "coin"]);
   assert.deepEqual(effectivePriceForSku(sku, "normal"), { label: "淘金币价", value: 479.91 });
-  assert.deepEqual(effectivePriceForSku({ price: 529, normalPrice: 529, surprisePrice: 489 }, "normal"), { label: "惊喜立减价", value: 489 });
-  assert.deepEqual(effectivePriceForSku({ price: 529, normalPrice: 529 }, "normal"), { label: "普通价", value: 529 });
+  assert.deepEqual(effectivePriceForSku(verifiedSku({ price: 529, normalPrice: 529, surprisePrice: 489 }, ["normal", "surprise"]), "normal"), { label: "惊喜立减价", value: 489 });
+  assert.deepEqual(effectivePriceForSku(verifiedSku({ price: 529, normalPrice: 529 }, ["normal"]), "normal"), { label: "普通价", value: 529 });
+  assert.equal(effectivePriceForSku({ price: 1, normalPrice: 1 }, "normal"), null);
 });
 
 test("large Feishu cards keep SKUs beyond the visual price grid", () => {
-  const skuPrices = Array.from({ length: 12 }, (_, index) => ({ skuId: `sku${index + 1}`, name: `型号${index + 1}`, price: 100 + index, normalPrice: 100 + index }));
+  const skuPrices = Array.from({ length: 12 }, (_, index) => verifiedSku({ skuId: `sku${index + 1}`, name: `型号${index + 1}`, price: 100 + index, normalPrice: 100 + index }, ["normal"]));
   const card = buildPriceCard({
     type: "manual-sync",
     product: { accountType: "normal", shopName: "测试店铺", model: "MODEL", url: "https://detail.tmall.com/item.htm?id=3", lastSnapshot: { skuPrices } },

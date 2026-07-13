@@ -29,6 +29,7 @@ import {
   productShopName,
   productTitle,
   productVideos,
+  verifiedPriceChannel,
   type SkuPrice,
 } from './productDisplayUtils'
 
@@ -136,21 +137,27 @@ function SkuPricePanel({ product, snapshots, showTrend, onPreview, onSaveSkuMoni
   }
 
   return (
-    <div className="min-w-0 self-start rounded-md bg-slate-50/80 p-3">
-      <div className="grid grid-cols-[repeat(auto-fit,minmax(230px,1fr))] gap-2.5">
+    <div className="min-w-0 self-start bg-slate-50/70 p-3">
+      {showTrend && (
+        <Suspense fallback={<div className="mb-3 h-80 animate-pulse rounded-md bg-slate-100" />}>
+          <SkuPriceTrend snapshots={snapshots} product={product} />
+        </Suspense>
+      )}
+      <div className="grid grid-cols-[repeat(auto-fit,minmax(290px,1fr))] gap-2.5">
         {skuPrices.map((sku) => {
           const allLayers = priceLayersForSku(sku)
           const originalLayer = allLayers.find((layer) => layer.kind === 'original' || layer.label === '标价')
           const priceLayers = priceLayersForSku(sku, { includeOriginal: false })
-          const normalPrice = normalPriceForSku(sku)
+          const normalVerified = verifiedPriceChannel(sku, 'normal')
+          const normalPrice = normalVerified ? normalPriceForSku(sku) : null
           const accountBenefit = accountBenefitForSku(sku, product.accountType || 'normal')
           const coinBenefit = coinBenefitForSku(sku)
           const coinPrice = coinPriceForSku(sku)
           const coinPriceLabel = anonymous ? '淘金币需登录' : coinPrice ? '淘金币价' : coinBenefit.available ? '淘金币抵扣' : '无淘金币'
-          const primaryLabel = anonymous ? '匿名公开价' : '普通价'
-          const primaryClass = anonymous ? { label: 'text-slate-500', value: 'text-slate-700' } : primaryPriceClass(primaryLabel)
-          const seenPrices = new Set([normalPrice.toFixed(2), ...(accountBenefit.price ? [accountBenefit.price.toFixed(2)] : []), ...(coinPrice ? [coinPrice.toFixed(2)] : [])])
-          const additionalPrices = [
+          const primaryLabel = !normalVerified ? '价格未验证' : anonymous ? '匿名公开价' : '普通价'
+          const primaryClass = !normalVerified || anonymous ? { label: 'text-slate-500', value: 'text-slate-700' } : primaryPriceClass(primaryLabel)
+          const seenPrices = new Set([...(normalPrice != null ? [normalPrice.toFixed(2)] : []), ...(accountBenefit.price ? [accountBenefit.price.toFixed(2)] : []), ...(coinPrice ? [coinPrice.toFixed(2)] : [])])
+          const additionalPrices = normalVerified ? [
             ...priceLayers.map((layer) => ({ label: displayPriceLabel(layer.label, product.accountType), value: layer.value, kind: layer.kind })),
             ...(sku.accountPrices || []).map((accountPrice) => {
               // An account snapshot that only contains the list price is not
@@ -170,13 +177,13 @@ function SkuPricePanel({ product, snapshots, showTrend, onPreview, onSaveSkuMoni
             if (seenPrices.has(key)) return false
             seenPrices.add(key)
             return true
-          })
+          }) : []
           return (
           <div key={sku.skuId} className="rounded-md bg-white p-2.5 shadow-sm transition hover:shadow-md">
             <div className="grid grid-cols-[58px_minmax(0,1fr)] gap-2.5">
               <div className="group relative h-14 w-14 overflow-hidden rounded-md border border-slate-100 bg-slate-50">
                 <button type="button" className="h-full w-full" onClick={() => sku.image && onPreview({ src: sku.image, title: sku.name })}>
-                  {sku.image ? <img src={sku.image} alt="" className="h-full w-full object-contain" /> : <span className="flex h-full items-center justify-center text-[10px] text-slate-400">无图</span>}
+                  {sku.image ? <img src={sku.image} alt="" loading="lazy" decoding="async" className="h-full w-full object-contain" /> : <span className="flex h-full items-center justify-center text-[10px] text-slate-400">无图</span>}
                 </button>
                 {sku.image && (
                   <a href={downloadHref(sku.image, `${sku.skuId}_${sku.name}_SKU图`)} className="absolute bottom-0 right-0 inline-flex h-5 w-5 items-center justify-center rounded-tl bg-slate-950/75 text-white hover:bg-emerald-600" title="下载 SKU 图（JPG）">
@@ -223,7 +230,7 @@ function SkuPricePanel({ product, snapshots, showTrend, onPreview, onSaveSkuMoni
               </div>
               <div className={`flex min-h-10 min-w-0 flex-col items-start justify-center gap-0.5 rounded px-1.5 py-1 ${!anonymous && accountBenefit.available ? product.accountType === 'gift' ? 'bg-orange-50' : product.accountType === 'vip88' ? 'bg-violet-50' : 'bg-rose-50' : 'bg-slate-50'}`}>
                   <span className={`shrink-0 whitespace-nowrap text-[10px] font-medium ${!anonymous && accountBenefit.available ? product.accountType === 'gift' ? 'text-orange-600' : product.accountType === 'vip88' ? 'text-violet-600' : 'text-rose-600' : 'text-slate-400'}`}>
-                    {anonymous ? `${accountBenefit.label}需登录` : accountBenefit.available ? accountBenefit.label : `未获取${accountBenefit.label}`}
+                    {!normalVerified ? '等待明确证据' : anonymous ? `${accountBenefit.label}需登录` : accountBenefit.available ? accountBenefit.label : `未获取${accountBenefit.label}`}
                   </span>
                   {anonymous ? (
                     <span className="whitespace-nowrap text-[10px] text-slate-400">个性价不可用</span>
@@ -234,7 +241,7 @@ function SkuPricePanel({ product, snapshots, showTrend, onPreview, onSaveSkuMoni
                   )}
                 </div>
               <div className={`flex min-h-10 min-w-0 flex-col items-start justify-center gap-0.5 rounded px-1.5 py-1 ${!anonymous && coinBenefit.available ? 'bg-amber-50' : 'bg-slate-50'}`}>
-                <span className={`shrink-0 whitespace-nowrap text-[10px] font-medium ${!anonymous && coinBenefit.available ? 'text-amber-600' : 'text-slate-400'}`}>{coinPriceLabel}</span>
+                <span className={`shrink-0 whitespace-nowrap text-[10px] font-medium ${!anonymous && coinBenefit.available ? 'text-amber-600' : 'text-slate-400'}`}>{normalVerified ? coinPriceLabel : '等待明确证据'}</span>
                 {anonymous ? (
                   <span className="whitespace-nowrap text-[10px] text-slate-400">个性价不可用</span>
                 ) : coinPrice ? (
@@ -270,11 +277,6 @@ function SkuPricePanel({ product, snapshots, showTrend, onPreview, onSaveSkuMoni
         })}
         {skuPrices.length === 0 && <div className="rounded-md border border-dashed border-slate-200 p-5 text-center text-sm text-slate-400">暂无 SKU 数据，点击抓取后更新。</div>}
       </div>
-      {showTrend && (
-        <Suspense fallback={<div className="mt-3 h-32 animate-pulse rounded-md bg-slate-50" />}>
-          <SkuPriceTrend snapshots={snapshots} product={product} />
-        </Suspense>
-      )}
       <DiscountDetailDialog
         sku={detailSku}
         accountType={product.accountType || 'normal'}
@@ -325,7 +327,15 @@ export function ProductMonitorCard({ product, monitor, onToggle, onSchedule, onC
   const { primary, gallery } = productImages(product)
   const detailImages = productDetailImages(product)
   const videos = productVideos(product)
-  const buyerShows = (product.lastSnapshot?.buyerShows || []).filter((item) => item.text || item.images?.length || item.videoUrls?.length)
+  const buyerShowCapture = product.lastSnapshot?.buyerShowCapture
+  const currentBuyerShows = (product.lastSnapshot?.buyerShows || []).filter((item) => item.text || item.images?.length || item.videoUrls?.length)
+  const usingBuyerShowCache = buyerShowCapture?.status === 'failed' && currentBuyerShows.length === 0
+  const buyerShows = (usingBuyerShowCache ? product.lastSnapshot?.buyerShowCachedItems || [] : currentBuyerShows).filter((item) => item.text || item.images?.length || item.videoUrls?.length)
+  const buyerShowStatusText = usingBuyerShowCache
+    ? '本次抓取失败，展示上次成功缓存'
+    : buyerShowCapture?.status === 'complete' ? '本次完整抓取'
+      : buyerShowCapture?.status === 'partial' ? `本次部分抓取 · ${buyerShowCapture.mediaCount} 个媒体`
+        : buyerShowCapture?.status === 'confirmed-empty' ? '本次确认无买家秀' : ''
   const skuDisplayImages = Array.from(new Map((product.lastSnapshot?.skuPrices || [])
     .filter((sku) => sku.image)
     .map((sku) => [sku.image as string, { src: sku.image as string, title: sku.name }])).values())
@@ -334,7 +344,7 @@ export function ProductMonitorCard({ product, monitor, onToggle, onSchedule, onC
   const shopLogo = product.shopLogo || product.lastSnapshot?.shopLogo || ''
   const model = productModel(product)
   const itemId = productItemId(product)
-  const coinSkuCount = (product.lastSnapshot?.skuPrices || []).filter((sku) => coinBenefitForSku(sku).available).length
+  const coinSkuCount = (product.lastSnapshot?.skuPrices || []).filter((sku) => verifiedPriceChannel(sku, 'coin') && coinBenefitForSku(sku).available).length
   const accountTypeLabel = product.accountType === 'gift' ? '礼金账号' : product.accountType === 'vip88' ? '88VIP账号' : '普通账号'
   const accountTypeClass = product.accountType === 'gift'
     ? 'border-amber-200 bg-amber-50 text-amber-700'
@@ -556,7 +566,34 @@ export function ProductMonitorCard({ product, monitor, onToggle, onSchedule, onC
         </div>
       </div>
 
-      <div className="mt-4 grid grid-cols-[330px_minmax(0,1fr)] gap-4">
+      <div className="mt-3 flex flex-wrap items-center gap-2 border-y border-slate-100 py-2.5">
+        <CaptureButton busy={busy} captureProtectionUntil={captureProtectionUntil} onCapture={captureNow} />
+        <Button type="button" variant="ghost" onClick={toggleMonitoring} disabled={togglingMonitor}>
+          {product.enabled ? <PauseCircle className="h-4 w-4" /> : <PlayCircle className="h-4 w-4" />}
+          {togglingMonitor ? '更新中' : product.enabled ? '暂停监控' : '启用监控'}
+        </Button>
+        <Button type="button" variant="secondary" onClick={syncFeishu} disabled={syncingFeishu || !product.lastSnapshot}>
+          <BellRing className="h-4 w-4" />{syncingFeishu ? '同步中' : '同步飞书'}
+        </Button>
+        <Button type="button" variant="danger" onClick={() => onDelete(product)} title="删除商品"><Trash2 className="h-4 w-4" /></Button>
+        <div className="ml-auto flex flex-wrap items-center justify-end gap-2">
+          <Button type="button" variant="secondary" onClick={() => setBuyerShowOpen(true)} disabled={!buyerShows.length} title={buyerShows.length ? `预览 ${buyerShows.length} 条有效买家秀` : '当前快照暂无有效买家秀，请重新抓取商品'}>
+            <Images className="h-4 w-4" />买家秀{buyerShows.length ? `（${buyerShows.length}）` : ''}
+          </Button>
+          {buyerShows.length > 0 && <Button type="button" variant="secondary" onClick={() => runDownload('buyer-shows', '正在整理买家秀图片、视频和文案并生成 ZIP...', downloadBuyerShowsHref(product.id), `${title}_买家秀.zip`)} disabled={operation?.tone === 'progress'}><Download className="h-4 w-4" />{operation?.key === 'buyer-shows' && operation.tone === 'progress' ? '生成中' : '下载买家秀'}</Button>}
+          <Button type="button" onClick={() => runDownload('media', '正在整理主图、SKU 图、详情图和视频并生成素材包...', downloadMediaBundleHref(product.id), `${title}_素材包.zip`)} disabled={operation?.tone === 'progress'}>
+            <Download className="h-4 w-4" />{operation?.key === 'media' && operation.tone === 'progress' ? '生成中' : '下载素材包'}
+          </Button>
+        </div>
+      </div>
+      {(operation || busy) && (
+        <div className={`mt-2 flex items-center gap-2 rounded-md px-3 py-2 text-xs ${(operation?.tone === 'progress' || busy) ? 'bg-blue-50 text-blue-700' : operation?.tone === 'success' ? 'bg-emerald-50 text-emerald-700' : 'bg-red-50 text-red-700'}`} role="status" aria-live="polite">
+          {(operation?.tone === 'progress' || busy) ? <LoaderCircle className="h-4 w-4 shrink-0 animate-spin" /> : operation?.tone === 'success' ? <CircleCheck className="h-4 w-4 shrink-0" /> : <CircleAlert className="h-4 w-4 shrink-0" />}
+          <span>{operation?.message || '正在抓取价格、素材和买家秀，请保持软件运行。'}</span>
+        </div>
+      )}
+
+      <div className="mt-4 grid grid-cols-[310px_minmax(0,1fr)] gap-4 max-[1280px]:grid-cols-1">
         <div className="min-w-0 space-y-3">
           <div className="rounded-md bg-slate-50 p-2">
             <div className="mb-2 flex items-center justify-between">
@@ -645,42 +682,7 @@ export function ProductMonitorCard({ product, monitor, onToggle, onSchedule, onC
         </div>
       </div>
 
-      <div className="mt-2 flex flex-wrap items-center gap-2">
-        <CaptureButton busy={busy} captureProtectionUntil={captureProtectionUntil} onCapture={captureNow} />
-        <Button type="button" variant="ghost" onClick={toggleMonitoring} disabled={togglingMonitor}>
-          {product.enabled ? <PauseCircle className="h-4 w-4" /> : <PlayCircle className="h-4 w-4" />}
-          {togglingMonitor ? '更新中' : product.enabled ? '暂停监控' : '启用监控'}
-        </Button>
-        <Button type="button" variant="secondary" onClick={syncFeishu} disabled={syncingFeishu || !product.lastSnapshot}>
-          <BellRing className="h-4 w-4" />{syncingFeishu ? '同步中' : '同步飞书'}
-        </Button>
-        <Button type="button" variant="danger" onClick={() => onDelete(product)}>
-          <Trash2 className="h-4 w-4" />
-          删除商品
-        </Button>
-        <div className="ml-auto flex flex-wrap items-center justify-end gap-2">
-          <Button type="button" variant="secondary" onClick={() => setBuyerShowOpen(true)} disabled={!buyerShows.length} title={buyerShows.length ? `预览 ${buyerShows.length} 条有效买家秀` : '当前快照暂无有效买家秀，请重新抓取商品'}>
-            <Images className="h-4 w-4" />买家秀预览{buyerShows.length ? `（${buyerShows.length}）` : ''}
-          </Button>
-          {buyerShows.length > 0 && <Button type="button" variant="secondary" onClick={() => runDownload('buyer-shows', '正在整理买家秀图片、视频和文案并生成 ZIP...', downloadBuyerShowsHref(product.id), `${title}_买家秀.zip`)} disabled={operation?.tone === 'progress'} className="border-amber-200 bg-amber-50 text-amber-700 hover:bg-amber-100"><Download className="h-4 w-4" />{operation?.key === 'buyer-shows' && operation.tone === 'progress' ? '生成中' : '买家秀下载'}</Button>}
-          <Button type="button" onClick={() => runDownload('media', '正在整理主图、SKU 图、详情图和视频并生成素材包...', downloadMediaBundleHref(product.id), `${title}_素材包.zip`)} disabled={operation?.tone === 'progress'}>
-            <Download className="h-4 w-4" />{operation?.key === 'media' && operation.tone === 'progress' ? '生成中' : '一键下载素材包'}
-          </Button>
-        </div>
-      </div>
-      {(operation || busy) && (
-        <div
-          className={`mt-2 flex items-center gap-2 rounded-md px-3 py-2 text-xs ${
-            (operation?.tone === 'progress' || busy) ? 'bg-sky-50 text-sky-700' : operation?.tone === 'success' ? 'bg-emerald-50 text-emerald-700' : 'bg-red-50 text-red-700'
-          }`}
-          role="status"
-          aria-live="polite"
-        >
-          {(operation?.tone === 'progress' || busy) ? <LoaderCircle className="h-4 w-4 shrink-0 animate-spin" /> : operation?.tone === 'success' ? <CircleCheck className="h-4 w-4 shrink-0" /> : <CircleAlert className="h-4 w-4 shrink-0" />}
-          <span>{operation?.message || '正在抓取价格、素材和买家秀，请保持软件运行。'}</span>
-        </div>
-      )}
-      {buyerShowOpen && <BuyerShowDialog title={title} items={buyerShows} onClose={() => setBuyerShowOpen(false)} downloadBusy={operation?.tone === 'progress' && operation.key.startsWith('buyer-show')} downloadMessage={operation?.key.startsWith('buyer-show') ? operation.message : ''} onDownload={() => runDownload('buyer-shows', '正在整理全部买家秀并生成 ZIP...', downloadBuyerShowsHref(product.id), `${title}_买家秀.zip`)} onDownloadItem={(item) => runDownload(`buyer-show-item:${item.id}`, '正在整理这条买家秀并生成 ZIP...', downloadBuyerShowItemHref(product.id, item.id), `${title}_买家秀.zip`)} />}
+      {buyerShowOpen && <BuyerShowDialog title={title} items={buyerShows} statusText={buyerShowStatusText} onClose={() => setBuyerShowOpen(false)} downloadBusy={operation?.tone === 'progress' && operation.key.startsWith('buyer-show')} downloadMessage={operation?.key.startsWith('buyer-show') ? operation.message : ''} onDownload={() => runDownload('buyer-shows', '正在整理全部买家秀并生成 ZIP...', downloadBuyerShowsHref(product.id), `${title}_买家秀.zip`)} onDownloadItem={(item) => runDownload(`buyer-show-item:${item.id}`, '正在整理这条买家秀并生成 ZIP...', downloadBuyerShowItemHref(product.id, item.id), `${title}_买家秀.zip`)} />}
     </article>
   )
 }

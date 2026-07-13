@@ -13,7 +13,7 @@ export type Preview = {
 export function ShopLogo({ src }: { src?: string }) {
   return (
     <div className="flex h-10 w-10 shrink-0 items-center justify-center overflow-hidden rounded-md border border-slate-100 bg-white">
-      {src && !/tmall|taobao|avatar|user/i.test(src) ? <img src={src} alt="" className="h-full w-full object-contain" /> : <Store className="h-4 w-4 text-slate-400" />}
+      {src && !/tmall|taobao|avatar|user/i.test(src) ? <img src={src} alt="" loading="lazy" decoding="async" className="h-full w-full object-contain" /> : <Store className="h-4 w-4 text-slate-400" />}
     </div>
   )
 }
@@ -36,7 +36,7 @@ export function ImagePreview({ preview, onClose }: { preview: Preview | null; on
   )
 }
 
-export function BuyerShowDialog({ title, items, onClose, onDownload, onDownloadItem, downloadBusy = false, downloadMessage = '' }: { title: string; items: BuyerShowItem[]; onClose: () => void; onDownload: () => void; onDownloadItem: (item: BuyerShowItem) => void; downloadBusy?: boolean; downloadMessage?: string }) {
+export function BuyerShowDialog({ title, items, statusText = '', onClose, onDownload, onDownloadItem, downloadBusy = false, downloadMessage = '' }: { title: string; items: BuyerShowItem[]; statusText?: string; onClose: () => void; onDownload: () => void; onDownloadItem: (item: BuyerShowItem) => void; downloadBusy?: boolean; downloadMessage?: string }) {
   const visibleItems = items.filter((item) => item.text || item.images?.length || item.videoUrls?.length)
   const [page, setPage] = useState(0)
   const pageSize = 8
@@ -62,7 +62,7 @@ export function BuyerShowDialog({ title, items, onClose, onDownload, onDownloadI
     <div className="fixed inset-0 z-[100] flex items-center justify-center overflow-hidden bg-slate-950/70 p-3 sm:p-6" role="presentation" onMouseDown={onClose}>
       <div role="dialog" aria-modal="true" aria-labelledby="buyer-show-dialog-title" className="flex h-[calc(100dvh-1.5rem)] max-h-[880px] w-full max-w-5xl flex-col overflow-hidden rounded-md bg-white shadow-2xl sm:h-[calc(100dvh-3rem)]" onMouseDown={(event) => event.stopPropagation()}>
         <div className="flex shrink-0 items-center justify-between gap-3 border-b border-slate-100 px-4 py-3">
-          <div className="min-w-0"><div id="buyer-show-dialog-title" className="truncate text-sm font-semibold text-slate-900">买家秀预览</div><div className="truncate text-xs text-slate-500">{title} · 共 {visibleItems.length} 条</div>{downloadMessage && <div className="mt-1 flex items-center gap-1 text-xs text-sky-700" role="status" aria-live="polite">{downloadBusy && <LoaderCircle className="h-3.5 w-3.5 animate-spin" />}{downloadMessage}</div>}</div>
+          <div className="min-w-0"><div id="buyer-show-dialog-title" className="truncate text-sm font-semibold text-slate-900">买家秀预览</div><div className="truncate text-xs text-slate-500">{title} · 共 {visibleItems.length} 条{statusText ? ` · ${statusText}` : ''}</div>{downloadMessage && <div className="mt-1 flex items-center gap-1 text-xs text-sky-700" role="status" aria-live="polite">{downloadBusy && <LoaderCircle className="h-3.5 w-3.5 animate-spin" />}{downloadMessage}</div>}</div>
           <div className="flex shrink-0 items-center gap-2"><Button type="button" size="sm" onClick={onDownload} disabled={downloadBusy}>{downloadBusy ? <LoaderCircle className="h-4 w-4 animate-spin" /> : <Download className="h-4 w-4" />}{downloadBusy ? '生成中' : '下载 ZIP'}</Button><Button type="button" variant="ghost" size="sm" onClick={onClose} title="关闭买家秀预览"><X className="h-4 w-4" />关闭</Button></div>
         </div>
         <div className="min-h-0 flex-1 overflow-y-auto p-4">
@@ -121,7 +121,7 @@ export function ImageThumb({
   return (
     <div className={`group relative overflow-hidden rounded-md border border-slate-100 bg-slate-50 ${className}`}>
       <button type="button" className={`block aspect-[4/3] w-full ${imageClassName}`} onClick={() => onPreview({ src, title })}>
-        <img src={src} alt="" className="h-full w-full object-contain" />
+        <img src={src} alt="" loading="lazy" decoding="async" className="h-full w-full object-contain" />
       </button>
       <div className="absolute inset-x-0 bottom-0 flex items-center justify-between bg-slate-950/65 px-2 py-1 text-[11px] text-white">
         <span>{label}</span>

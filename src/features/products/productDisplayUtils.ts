@@ -3,6 +3,10 @@ import type { Product } from '../../types/domain'
 
 export type SkuPrice = NonNullable<Product['lastSnapshot']>['skuPrices'][number]
 
+export function verifiedPriceChannel(sku: SkuPrice, channel: 'normal' | 'surprise' | 'gift' | 'vip88' | 'coin') {
+  return sku.resolutionStatus === 'verified' && sku.priceResolution?.channels?.[channel]?.status === 'verified'
+}
+
 export function displayPriceLabel(rawLabel = '', accountType?: Product['accountType']) {
   if (/惊喜立减|惊喜价/.test(rawLabel)) return '惊喜立减价'
   if (/淘金币|金币/.test(rawLabel)) return '淘金币价'
@@ -28,16 +32,19 @@ export function normalPriceForSku(sku: SkuPrice) {
 }
 
 export function coinPriceForSku(sku: SkuPrice) {
+  if (!verifiedPriceChannel(sku, 'coin')) return null
   if (sku.coinPrice) return sku.coinPrice
   return sku.priceLayers?.find((layer) => /淘金币|金币/i.test(layer.label))?.value || null
 }
 
 export function surprisePriceForSku(sku: SkuPrice) {
+  if (!verifiedPriceChannel(sku, 'surprise')) return null
   if (sku.surprisePrice) return sku.surprisePrice
   return sku.priceLayers?.find((layer) => /惊喜立减|惊喜价/i.test(layer.label))?.value || null
 }
 
 export function surpriseBenefitForSku(sku: SkuPrice) {
+  if (!verifiedPriceChannel(sku, 'surprise')) return { available: false, price: null, discountAmount: null }
   const price = surprisePriceForSku(sku)
   const normalPrice = normalPriceForSku(sku)
   const discountAmount = Number(sku.surpriseDiscountAmount) > 0
@@ -50,6 +57,7 @@ export function surpriseBenefitForSku(sku: SkuPrice) {
 
 export function accountBenefitForSku(sku: SkuPrice, accountType: Product['accountType']) {
   if (accountType === 'gift') {
+    if (!verifiedPriceChannel(sku, 'gift')) return { label: '礼金价', available: false, price: null, discountAmount: null }
     const price = sku.giftPrice || sku.accountPrices?.find((item) => item.accountType === 'gift')?.giftPrice || null
     const normalPrice = normalPriceForSku(sku)
     const discountAmount = Number(sku.giftDiscountAmount) > 0
@@ -58,6 +66,7 @@ export function accountBenefitForSku(sku: SkuPrice, accountType: Product['accoun
     return { label: '礼金价', available: sku.giftStatus === 'available' || Boolean(price), price, discountAmount }
   }
   if (accountType === 'vip88') {
+    if (!verifiedPriceChannel(sku, 'vip88')) return { label: '88VIP价', available: false, price: null, discountAmount: null }
     const price = sku.vipPrice || sku.accountPrices?.find((item) => item.accountType === 'vip88')?.vipPrice || null
     const normalPrice = normalPriceForSku(sku)
     const discountAmount = Number(sku.vipDiscountAmount) > 0
@@ -69,6 +78,7 @@ export function accountBenefitForSku(sku: SkuPrice, accountType: Product['accoun
 }
 
 export function coinBenefitForSku(sku: SkuPrice) {
+  if (!verifiedPriceChannel(sku, 'coin')) return { available: false, price: null, discountAmount: null, items: [] }
   const price = coinPriceForSku(sku)
   const items = (sku.discountItems || []).filter((item) => /淘金币|金币/i.test(`${item.label} ${item.text}`))
   const layerExists = (sku.priceLayers || []).some((layer) => /淘金币|金币/i.test(layer.label))

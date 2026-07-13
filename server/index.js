@@ -2,20 +2,50 @@ import express from "express";
 import cors from "cors";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { execFileSync } from "node:child_process";
+import fs from "node:fs";
 import { z } from "zod";
 import JSZip from "jszip";
 import sharp from "sharp";
 import { loadEnv } from "./utils/env.js";
-import { newId, readDb, updateDb } from "./storage/db.js";
+import { dbRuntimeInfo, newId, readDb, updateDb } from "./storage/db.js";
 import { analyzeData } from "./services/analysisService.js";
 import { buildTaobaoOAuthUrl, maskSecret } from "./services/authService.js";
 import { rescheduleMonitor, resolveCaptureProtectionMinutes, runMonitorOnce, runProductOnce, scheduleProduct, startScheduler, stopScheduler } from "./services/monitorService.js";
 import { createNotificationLog, effectivePriceForSku, publicFeishuConfig, sendFeishuNotification, updateFeishuConfig } from "./services/feishuService.js";
 import { appendPriceDocument, cliStatus, createPriceDocument, readAuthQr, startCliLogin, startCliSetup } from "./services/larkCliService.js";
-import { checkTaobaoSession, closeAccountBrowser, getTaobaoAuthState, isTaobaoLoginUrl, keepAccountBrowserWarm, minimizeAccountBrowser, openProductInAccountChrome, openTaobaoLogin } from "./services/browserService.js";
+import { browserRuntimeInfo, checkTaobaoSession, closeAccountBrowser, getTaobaoAuthState, isTaobaoLoginUrl, keepAccountBrowserWarm, minimizeAccountBrowser, openProductInAccountChrome, openTaobaoLogin } from "./services/browserService.js";
+import { SCRAPER_VERSION } from "./services/tmallScraper.js";
 import { normalizeProductUrl } from "./utils/productUrl.js";
 
 loadEnv();
+
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+const projectRoot = path.resolve(__dirname, "..");
+const packageInfo = JSON.parse(fs.readFileSync(path.join(projectRoot, "package.json"), "utf8"));
+const startedAt = new Date().toISOString();
+
+function resolveBuildCommit() {
+  if (process.env.ECOM_MONITOR_BUILD_COMMIT) return process.env.ECOM_MONITOR_BUILD_COMMIT;
+  try {
+    return execFileSync("git", ["rev-parse", "HEAD"], { cwd: projectRoot, encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] }).trim();
+  } catch {
+    return packageInfo.buildCommit || "packaged-unknown";
+  }
+}
+
+function runtimeInfo() {
+  return {
+    version: packageInfo.version,
+    buildCommit: resolveBuildCommit(),
+    scraperVersion: SCRAPER_VERSION,
+    startedAt,
+    processId: process.pid,
+    mode: process.versions.electron ? "desktop" : "development",
+    ...dbRuntimeInfo(),
+    ...browserRuntimeInfo(),
+  };
+}
 
 export const app = express();
 const pendingScans = new Map();
@@ -31,7 +61,7 @@ app.use(cors());
 app.use(express.json({ limit: "2mb" }));
 
 const productSchema = z.object({
-  name: z.string().min(1),
+  name: z.string().trim().optional().default(""),
   url: z.string().url(),
   group: z.string().optional().default("默认分组"),
   accountType: z.enum(["normal", "gift", "vip88"]).default("normal"),
@@ -83,15 +113,33 @@ function extensionFromContentType(contentType, fallbackUrl) {
   return match?.[1] || "jpg";
 }
 
-async function fetchRemoteMedia(urlValue) {
+export async function fetchRemoteMedia(urlValue) {
   if (!urlValue) return false;
-  const url = new URL(cleanMediaUrl(urlValue));
-  if (!isAllowedMediaHost(url)) return false;
-  const response = await fetch(url.toString(), { headers: { "user-agent": "Mozilla/5.0" } });
+  let url = new URL(cleanMediaUrl(urlValue));
+  let response;
+  for (let redirects = 0; redirects <= 3; redirects += 1) {
+    if (!isAllowedMediaHost(url)) return false;
+    response = await fetch(url.toString(), {
+      headers: { "user-agent": "Mozilla/5.0", referer: "https://detail.tmall.com/" },
+      redirect: "manual",
+      signal: AbortSignal.timeout(20_000),
+    });
+    if (response.status < 300 || response.status >= 400) break;
+    const location = response.headers.get("location");
+    if (!location || redirects === 3) return false;
+    url = new URL(location, url);
+  }
+  if (!response) return false;
+  const finalUrl = response.url ? new URL(response.url) : url;
+  if (!isAllowedMediaHost(finalUrl)) return false;
   if (!response.ok) return false;
   const contentType = response.headers.get("content-type") || "";
+  const contentLength = Number(response.headers.get("content-length") || 0);
+  const allowedType = /^(?:image\/(?:jpeg|png|webp|gif)|video\/mp4|application\/(?:octet-stream|vnd\.apple\.mpegurl|x-mpegurl))/i.test(contentType);
+  if (!allowedType || contentLength > 120_000_000) return false;
   const data = Buffer.from(await response.arrayBuffer());
-  return { url, contentType, data };
+  if (!data.length || data.length > 120_000_000) return false;
+  return { url: finalUrl, contentType, data };
 }
 
 async function addRemoteMedia(zip, folder, urlValue, filenameBase, { convertImageToJpeg = false } = {}) {
@@ -107,37 +155,48 @@ async function addRemoteMedia(zip, folder, urlValue, filenameBase, { convertImag
   return true;
 }
 
-function validBuyerShows(snapshot) {
-  return (snapshot?.buyerShows || []).filter((item) => item && (item.text || item.images?.length || item.videoUrls?.length));
+export function validBuyerShows(snapshot) {
+  const source = snapshot?.buyerShowCapture?.status === "failed" && !(snapshot?.buyerShows || []).length
+    ? snapshot?.buyerShowCachedItems || []
+    : snapshot?.buyerShows || [];
+  return source.filter((item) => item && (item.text || item.images?.length || item.videoUrls?.length));
 }
 
-async function addBuyerShowsToZip(zip, snapshot, folderPrefix = "买家秀") {
+export async function addBuyerShowsToZip(zip, snapshot, folderPrefix = "买家秀") {
   const items = validBuyerShows(snapshot);
-  let downloaded = 0;
+  const tasks = [];
   for (const [index, item] of items.entries()) {
     const folder = `${folderPrefix}/${String(index + 1).padStart(3, "0")}`;
     if (item.text) zip.folder(folder).file("文案.txt", String(item.text));
     for (const [imageIndex, url] of (item.images || []).map(cleanMediaUrl).filter(Boolean).entries()) {
-      try {
-        if (await addRemoteMedia(zip, folder, url, `${String(imageIndex + 1).padStart(2, "0")}_图片`, { convertImageToJpeg: true })) downloaded += 1;
-      } catch {
-        // Skip one unavailable buyer-show asset without failing the whole ZIP.
-      }
+      tasks.push({ folder, url, filename: `${String(imageIndex + 1).padStart(2, "0")}_图片`, convertImageToJpeg: true, itemId: item.id });
     }
     for (const [videoIndex, url] of (item.videoUrls || []).map(cleanMediaUrl).filter(Boolean).entries()) {
-      try {
-        if (await addRemoteMedia(zip, folder, url, `${String(videoIndex + 1).padStart(2, "0")}_视频`)) downloaded += 1;
-      } catch {
-        // Skip one unavailable buyer-show asset without failing the whole ZIP.
-      }
+      tasks.push({ folder, url, filename: `${String(videoIndex + 1).padStart(2, "0")}_视频`, convertImageToJpeg: false, itemId: item.id });
     }
   }
-  return { count: items.length, downloaded };
+  let nextTask = 0;
+  let downloaded = 0;
+  const failures = [];
+  const worker = async () => {
+    while (nextTask < tasks.length) {
+      const task = tasks[nextTask++];
+      try {
+        const ok = await addRemoteMedia(zip, task.folder, task.url, task.filename, { convertImageToJpeg: task.convertImageToJpeg });
+        if (ok) downloaded += 1;
+        else failures.push({ buyerShowId: task.itemId, url: task.url, reason: "媒体不可用或格式不受支持" });
+      } catch (error) {
+        failures.push({ buyerShowId: task.itemId, url: task.url, reason: error.message || "下载失败" });
+      }
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(4, tasks.length) }, worker));
+  return { count: items.length, requested: tasks.length, downloaded, failures };
 }
 
 app.get("/api/health", async (_req, res) => {
   const db = await readDb();
-  res.json({ ok: true, monitor: db.monitor, time: new Date().toISOString() });
+  res.json({ ok: true, monitor: db.monitor, runtime: runtimeInfo(), time: new Date().toISOString() });
 });
 
 app.get("/api/overview", async (_req, res) => {
@@ -158,12 +217,14 @@ app.get("/api/overview", async (_req, res) => {
     feishu: publicFeishuConfig(db.feishu),
     notificationLogs: db.notificationLogs.slice(-80).reverse(),
     monitor: db.monitor,
+    runtime: runtimeInfo(),
   });
 });
 
 app.post("/api/products", async (req, res) => {
   const parsed = productSchema.parse(req.body);
   parsed.url = normalizeProductUrl(parsed.url);
+  parsed.name ||= `待识别商品 ${itemIdFromUrl(parsed.url)}`;
   const product = {
     id: newId("prod"),
     ...parsed,
@@ -1002,7 +1063,7 @@ app.get("/api/products/:id/download-buyer-shows", async (req, res) => {
   const zip = new JSZip();
   const title = safeFilename(snapshot.title || product.name || product.id);
   const result = await addBuyerShowsToZip(zip, snapshot);
-  zip.file("买家秀清单.json", JSON.stringify({ productId: product.id, title: snapshot.title, capturedAt: snapshot.capturedAt, items: validBuyerShows(snapshot), downloaded: result.downloaded }, null, 2));
+  zip.file("买家秀清单.json", JSON.stringify({ productId: product.id, title: snapshot.title, capturedAt: snapshot.capturedAt, capture: snapshot.buyerShowCapture, items: validBuyerShows(snapshot), requested: result.requested, downloaded: result.downloaded, failures: result.failures }, null, 2));
   const buffer = await zip.generateAsync({ type: "nodebuffer", compression: "DEFLATE" });
   res.setHeader("content-type", "application/zip");
   res.setHeader("content-disposition", `attachment; filename*=UTF-8''${encodeURIComponent(`${title}_买家秀.zip`)}`);
@@ -1023,7 +1084,7 @@ app.get("/api/products/:id/download-buyer-shows/:buyerShowId", async (req, res) 
   const zip = new JSZip();
   const title = safeFilename(snapshot.title || product.name || product.id);
   const result = await addBuyerShowsToZip(zip, { ...snapshot, buyerShows: [item] });
-  zip.file("买家秀清单.json", JSON.stringify({ productId: product.id, title: snapshot.title, capturedAt: snapshot.capturedAt, item, downloaded: result.downloaded }, null, 2));
+  zip.file("买家秀清单.json", JSON.stringify({ productId: product.id, title: snapshot.title, capturedAt: snapshot.capturedAt, item, requested: result.requested, downloaded: result.downloaded, failures: result.failures }, null, 2));
   const buffer = await zip.generateAsync({ type: "nodebuffer", compression: "DEFLATE" });
   res.setHeader("content-type", "application/zip");
   res.setHeader("content-disposition", `attachment; filename*=UTF-8''${encodeURIComponent(`${title}_买家秀_${String(itemIndex + 1).padStart(2, "0")}.zip`)}`);
@@ -1043,7 +1104,7 @@ app.get("/api/products/buyer-shows/download", async (req, res) => {
   for (const [index, product] of products.entries()) {
     const title = safeFilename(product.lastSnapshot.title || product.name || product.id);
     const result = await addBuyerShowsToZip(zip, product.lastSnapshot, `${String(index + 1).padStart(2, "0")}_${title}`);
-    manifest.push({ productId: product.id, title: product.lastSnapshot.title, count: result.count, downloaded: result.downloaded });
+    manifest.push({ productId: product.id, title: product.lastSnapshot.title, count: result.count, requested: result.requested, downloaded: result.downloaded, failures: result.failures });
   }
   zip.file("买家秀清单.json", JSON.stringify({ products: manifest, generatedAt: new Date().toISOString() }, null, 2));
   const buffer = await zip.generateAsync({ type: "nodebuffer", compression: "DEFLATE" });
@@ -1103,6 +1164,7 @@ export async function startServer({ host = "127.0.0.1", port = Number(process.en
   const address = server.address();
   const actualPort = typeof address === "object" && address ? address.port : port;
   console.log(`电商竞品监控服务已启动：http://${host}:${actualPort}`);
+  console.log("[runtime]", runtimeInfo());
   const eagerBrowserWarmup = process.env.ECOM_MONITOR_EAGER_BROWSER_WARMUP === "1"
     || (process.env.ECOM_MONITOR_EAGER_BROWSER_WARMUP !== "0" && process.platform !== "darwin");
   if (eagerBrowserWarmup) {

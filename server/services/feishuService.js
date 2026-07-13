@@ -116,16 +116,22 @@ export function accountPriceContext(product, snapshot = product?.lastSnapshot ||
 
 export function effectivePriceForSku(sku, accountType = "normal") {
   const account = accountLabels[accountType] || accountLabels.normal;
+  const verified = (kind) => sku?.resolutionStatus === "verified" && sku?.priceResolution?.channels?.[kind]?.status === "verified";
   const options = [
-    { label: "普通价", value: Number(sku.normalPrice ?? sku.price) },
-    { label: account.benefit, value: Number(sku[account.field]) },
-    { label: "淘金币价", value: Number(sku.coinPrice) },
-  ].filter((item) => Number.isFinite(item.value) && item.value > 0);
+    verified("normal") ? { label: "普通价", value: Number(sku.normalPrice) } : null,
+    verified(accountType === "normal" ? "surprise" : accountType) ? { label: account.benefit, value: Number(sku[account.field]) } : null,
+    verified("coin") ? { label: "淘金币价", value: Number(sku.coinPrice) } : null,
+  ].filter((item) => item && Number.isFinite(item.value) && item.value > 0);
   return options.reduce((lowest, item) => (!lowest || item.value < lowest.value ? item : lowest), null);
 }
 
 function channelValue(sku, channel, { anonymous, accountType }) {
   if (anonymous) return "需登录";
+  const kind = channel === "normal" ? "normal" : channel === "gift" ? "gift" : channel === "vip88" ? "vip88" : channel;
+  if (sku?.resolutionStatus !== "verified" || sku?.priceResolution?.channels?.[kind]?.status !== "verified") {
+    if (channel !== "normal" && channel !== "coin" && channelLabels[channel]?.accountType !== accountType) return "不适用";
+    return "本次未验证";
+  }
   if (channel === "coin") {
     if (Number.isFinite(Number(sku.coinPrice)) && Number(sku.coinPrice) > 0) return priceText(Number(sku.coinPrice));
     if (Number(sku.coinDiscountAmount) > 0) return `抵扣 ${priceText(Number(sku.coinDiscountAmount))}`;

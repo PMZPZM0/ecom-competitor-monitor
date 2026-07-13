@@ -25,10 +25,63 @@ export type Product = {
   updatedAt: string
 }
 
+export type PriceResolutionStatus = 'verified' | 'partial' | 'ambiguous' | 'unavailable' | 'legacy'
+
+export type PriceChannelResolution = {
+  status: 'verified' | 'ambiguous' | 'unavailable' | 'stale'
+  valueCents: number | null
+  formula?: string
+  reason?: string
+  evidenceIds: string[]
+}
+
+export type PriceResolution = {
+  status: PriceResolutionStatus
+  reason?: string
+  parserVersion?: string
+  evidenceHash?: string
+  channels?: Partial<Record<'normal' | 'surprise' | 'gift' | 'vip88' | 'coin', PriceChannelResolution>>
+}
+
+export type PriceEvidence = {
+  id: string
+  itemId: string
+  skuId: string
+  accountType: 'normal' | 'gift' | 'vip88'
+  kind: 'list' | 'normal' | 'surprise' | 'gift' | 'vip88' | 'coin'
+  valueCents: number
+  source: 'api-explicit' | 'api-formula' | 'selected-dom'
+  endpoint: string
+  sourcePath: string
+  promotionCodes: string[]
+  selectedSkuVerified: boolean
+  capturedAt: string
+  formula?: string
+}
+
+export type BuyerShowCapture = {
+  status: 'complete' | 'partial' | 'confirmed-empty' | 'failed'
+  source: 'observed-network' | 'legacy-rate-api' | 'verified-dom' | 'cache'
+  failureCode?: string
+  itemId: string
+  sellerId?: string
+  accountSessionId?: string
+  reportedTotal: number
+  pageCount: number
+  requestCount: number
+  items: BuyerShowItem[]
+  mediaCount: number
+  textOnlyCount: number
+  capturedAt: string
+  lastSuccessfulAt?: string
+}
+
 export type Snapshot = {
   id: string
   productId: string
   capturedAt: string
+  parserVersion?: string
+  resolutionStatus?: PriceResolutionStatus
   title: string
   shopName?: string
   shopLogo?: string
@@ -42,6 +95,8 @@ export type Snapshot = {
   detailImages?: string[]
   videoUrls?: string[]
   buyerShows?: BuyerShowItem[]
+  buyerShowCapture?: BuyerShowCapture
+  buyerShowCachedItems?: BuyerShowItem[]
   skuImages: string[]
   skuPrices: Array<{
     skuId: string
@@ -87,11 +142,17 @@ export type Snapshot = {
     quantity?: number
     quantityText?: string
     quantitySource?: 'buyer-page'
+    parserVersion?: string
+    resolutionStatus?: PriceResolutionStatus
+    priceResolution?: PriceResolution
+    priceEvidence?: PriceEvidence[]
     accountPrices?: Array<{
       sessionId: string
       accountName: string
       accountType: 'normal' | 'gift' | 'vip88'
       price: number
+      resolutionStatus?: PriceResolutionStatus
+      priceResolution?: PriceResolution
       normalPrice?: number
       surprisePrice?: number | null
       giftPrice?: number | null
@@ -198,6 +259,19 @@ export type Overview = {
   analyses: Analysis[]
   authSessions: AuthSession[]
   runs: RunRecord[]
+  runtime: {
+    version: string
+    buildCommit: string
+    scraperVersion: string
+    startedAt: string
+    processId: number
+    mode: 'desktop' | 'development'
+    dataDir: string
+    dbPath: string
+    schemaVersion: number
+    profileDir: string
+    captureBrowserIdleMs: number
+  }
   modelConfig: {
     baseUrl: string
     apiKey: string

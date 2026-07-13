@@ -26,19 +26,11 @@ const priceModes = [
 
 type PriceMode = (typeof priceModes)[number]['value']
 
-function priceForMode(sku: Snapshot['skuPrices'][number], mode: PriceMode, accountType: Product['accountType']) {
-  if (mode === 'normalPrice') {
-    const value = sku.normalPrice ?? sku.price
-    const accountBenefitMissing = accountType === 'gift' ? !sku.giftPrice : accountType === 'vip88' ? !sku.vipPrice : false
-    if (accountBenefitMissing && sku.originalPrice === value) return null
-    return value
-  }
-  const direct = sku[mode]
-  if (typeof direct === 'number') return direct
-  const targetAccountType = mode === 'giftPrice' ? 'gift' : mode === 'vipPrice' ? 'vip88' : null
-  if (!targetAccountType) return null
-  const accountPrice = sku.accountPrices?.find((item) => item.accountType === targetAccountType)
-  return mode === 'giftPrice' ? accountPrice?.giftPrice ?? accountPrice?.price ?? null : accountPrice?.vipPrice ?? accountPrice?.price ?? null
+function priceForMode(sku: Snapshot['skuPrices'][number], mode: PriceMode) {
+  const channel = mode === 'normalPrice' ? 'normal' : mode === 'surprisePrice' ? 'surprise' : mode === 'giftPrice' ? 'gift' : mode === 'vipPrice' ? 'vip88' : 'coin'
+  if (sku.resolutionStatus !== 'verified' || sku.priceResolution?.channels?.[channel]?.status !== 'verified') return null
+  const value = mode === 'normalPrice' ? sku.normalPrice : sku[mode]
+  return typeof value === 'number' ? value : null
 }
 
 export function SkuPriceTrend({ snapshots, product }: { snapshots: Snapshot[]; product: Product }) {
@@ -70,7 +62,7 @@ export function SkuPriceTrend({ snapshots, product }: { snapshots: Snapshot[]; p
       time: capturedAt.toLocaleString('zh-CN', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' }),
     }
     for (const sku of snapshot.skuPrices || []) {
-      const value = priceForMode(sku, priceMode, product.accountType)
+      const value = priceForMode(sku, priceMode)
       if (typeof value === 'number') point[sku.skuId] = value
     }
     return point
@@ -78,7 +70,7 @@ export function SkuPriceTrend({ snapshots, product }: { snapshots: Snapshot[]; p
   const selectedModeLabel = priceModes.find((mode) => mode.value === priceMode)?.label || '价格'
 
   return (
-    <section className="mt-3 min-w-0 border-t border-slate-100 pt-3">
+    <section className="mb-3 min-w-0 border-b border-slate-200 pb-3">
       <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
         <div className="flex items-center gap-2">
           <span className="inline-flex h-8 w-8 items-center justify-center rounded-md bg-sky-50 text-sky-700">
@@ -106,7 +98,7 @@ export function SkuPriceTrend({ snapshots, product }: { snapshots: Snapshot[]; p
       </div>
 
       {orderedSnapshots.length >= 2 && visibleSkus.length > 0 ? (
-        <div className="h-60 min-w-0 w-full rounded-md bg-slate-50/60 px-2 pb-1 pt-3">
+        <div className="h-[320px] min-w-0 w-full rounded-md bg-white px-2 pb-1 pt-3">
           <ResponsiveContainer width="100%" height="100%">
             <LineChart data={chartData} margin={{ top: 5, right: 12, left: 0, bottom: 0 }}>
               <CartesianGrid stroke="#e2e8f0" strokeDasharray="3 3" vertical={false} />
@@ -141,7 +133,7 @@ export function SkuPriceTrend({ snapshots, product }: { snapshots: Snapshot[]; p
                   strokeWidth={2}
                   dot={chartData.length <= 16 ? { r: 2.5 } : false}
                   activeDot={{ r: 4 }}
-                  connectNulls
+                  connectNulls={false}
                   isAnimationActive={false}
                 />
               ))}

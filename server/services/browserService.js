@@ -16,6 +16,43 @@ const browserStartPromises = new Map();
 const browserUsage = new Map();
 const browserModes = new Map();
 
+export function browserRuntimeInfo() {
+  return { profileDir: accountProfilesDir, captureBrowserIdleMs };
+}
+
+export function skuIdFromNetworkUrl(value) {
+  try {
+    const parsed = new URL(value);
+    const data = JSON.parse(parsed.searchParams.get("data") || "{}");
+    const exParams = typeof data.exParams === "string" ? JSON.parse(data.exParams) : data.exParams || {};
+    return String(exParams.skuId || data.skuId || data.selectSkuId || "");
+  } catch {
+    return "";
+  }
+}
+
+function parseNetworkBody(body) {
+  const source = String(body || "").trim();
+  const json = source.startsWith("{") ? source : source.match(/^[^(]*\((\{[\s\S]*\})\)\s*;?$/)?.[1];
+  if (!json) return null;
+  try {
+    return JSON.parse(json);
+  } catch {
+    return null;
+  }
+}
+
+export function skuIdFromNetworkBody(body) {
+  const value = parseNetworkBody(body)?.data?.componentsVO?.xsRedPacketParamVO?.trackParams;
+  if (!value) return "";
+  try {
+    const trackParams = typeof value === "string" ? JSON.parse(value) : value;
+    return String(trackParams?.skuId || "");
+  } catch {
+    return "";
+  }
+}
+
 export function canReuseBrowser(runtimeHeadless, requestedHeadless) {
   return requestedHeadless || !runtimeHeadless;
 }
@@ -545,9 +582,14 @@ export async function getRenderedHtml(url, authSession = {}, renderOptions = {})
     await minimizeBrowserForCapture(context);
     cdp = await createCdp(tab.webSocketDebuggerUrl);
     await cdp.send("Network.enable");
+    await cdp.send("Network.setCacheDisabled", { cacheDisabled: true });
+    await cdp.send("Network.setBypassServiceWorker", { bypass: true });
     const priceResponses = new Map();
     const buyerShowResponses = new Map();
-    const priceResponseLimit = Array.isArray(renderOptions.selectSkuNames) ? 240 : 60;
+    const skuWaiters = new Map();
+    const requestedSelections = Array.isArray(renderOptions.selectSkus) ? renderOptions.selectSkus : [];
+    if (requestedSelections.length) await cdp.send("Network.clearBrowserCache");
+    const priceResponseLimit = requestedSelections.length || Array.isArray(renderOptions.selectSkuNames) ? 240 : 60;
     cdp.on("Network.responseReceived", ({ requestId, response, type }) => {
       const responseUrl = String(response?.url || "");
       const mimeType = String(response?.mimeType || "");
@@ -558,7 +600,12 @@ export async function getRenderedHtml(url, authSession = {}, renderOptions = {})
       const target = buyerShowUrl ? buyerShowResponses : priceResponses;
       const limit = buyerShowUrl ? 80 : priceResponseLimit;
       if (target.size < limit) {
-        target.set(requestId, { url: responseUrl, mimeType });
+        const skuId = buyerShowUrl ? "" : skuIdFromNetworkUrl(responseUrl);
+        target.set(requestId, { url: responseUrl, mimeType, skuId, responseKind: buyerShowUrl ? "buyer-show" : "price" });
+        if (/mtop\.taobao\.pcdetail\.data\.adjust/i.test(responseUrl) && skuId && skuWaiters.has(skuId)) {
+          skuWaiters.get(skuId)({ requestId, url: responseUrl });
+          skuWaiters.delete(skuId);
+        }
       }
     });
     await cdp.send("Network.setUserAgentOverride", { userAgent: stableChromeUserAgent });
@@ -569,6 +616,48 @@ export async function getRenderedHtml(url, authSession = {}, renderOptions = {})
     const selectSkuNames = Array.isArray(renderOptions.selectSkuNames)
       ? renderOptions.selectSkuNames.filter(Boolean)
       : renderOptions.selectSkuName ? [renderOptions.selectSkuName] : [];
+    const selectionResults = [];
+    for (const selection of requestedSelections) {
+      const skuId = String(selection?.skuId || "");
+      const valueIds = Array.from(new Set((selection?.valueIds || []).map(String).filter(Boolean)));
+      if (!skuId || !valueIds.length) {
+        selectionResults.push({ skuId, selected: false, responseObserved: false, reason: "missing-selection-ids" });
+        continue;
+      }
+      let waiterTimer;
+      const responseWaiter = new Promise((resolve) => {
+        skuWaiters.set(skuId, resolve);
+        waiterTimer = setTimeout(() => {
+          if (skuWaiters.has(skuId)) skuWaiters.delete(skuId);
+          resolve(null);
+        }, 8000);
+      });
+      const selectionResult = await cdp.send("Runtime.evaluate", {
+        expression: `(() => {
+          const valueIds = ${JSON.stringify(valueIds)};
+          const clicked = [];
+          for (const valueId of valueIds) {
+            const target = document.querySelector('#skuOptionsArea [data-vid="' + valueId + '"]');
+            if (!target || target.getAttribute('data-disabled') === 'true') return { selected: false, clicked, missing: valueId };
+            target.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, view: window }));
+            clicked.push(valueId);
+          }
+          return { selected: clicked.length === valueIds.length, clicked };
+        })()`,
+        returnByValue: true,
+      }, 10000);
+      const observedResponse = selectionResult.result?.value?.selected ? await responseWaiter : null;
+      clearTimeout(waiterTimer);
+      if (skuWaiters.has(skuId)) skuWaiters.delete(skuId);
+      selectionResults.push({
+        skuId,
+        selected: Boolean(selectionResult.result?.value?.selected),
+        responseObserved: Boolean(observedResponse),
+        clicked: selectionResult.result?.value?.clicked || [],
+        reason: selectionResult.result?.value?.missing ? `missing-value:${selectionResult.result.value.missing}` : observedResponse ? "verified" : "response-timeout",
+      });
+      if (observedResponse) await new Promise((resolve) => setTimeout(resolve, 600));
+    }
     for (const selectSkuName of selectSkuNames) {
       const selectionResult = await cdp.send("Runtime.evaluate", {
         expression: `(() => {
@@ -658,22 +747,50 @@ export async function getRenderedHtml(url, authSession = {}, renderOptions = {})
     const responseEntries = [...buyerShowResponses, ...priceResponses];
     const bodyResults = await Promise.allSettled(responseEntries.map(async ([requestId, response]) => {
       const bodyResult = await cdp.send("Network.getResponseBody", { requestId }, 5000);
-      return { ...response, body: String(bodyResult.body || "") };
+      const body = String(bodyResult.body || "");
+      const responseSkuId = skuIdFromNetworkBody(body);
+      return {
+        ...response,
+        requestSkuId: response.skuId,
+        responseSkuId,
+        skuId: responseSkuId || response.skuId,
+        body,
+      };
     }));
     const networkPayloads = [];
     let networkBytes = 0;
     for (const result of bodyResults) {
-      const networkByteLimit = selectSkuNames.length > 1 ? 24_000_000 : 12_000_000;
+      const networkByteLimit = requestedSelections.length > 1 || selectSkuNames.length > 1 ? 24_000_000 : 12_000_000;
       if (result.status !== "fulfilled" || networkBytes >= networkByteLimit) continue;
       const payload = result.value;
       if (!payload.body || payload.body.length > 2_000_000) continue;
       networkBytes += payload.body.length;
       networkPayloads.push(payload);
     }
+    const skuNetworkPayloads = Object.fromEntries(Array.from(new Set(networkPayloads.map((payload) => payload.skuId).filter(Boolean))).map((skuId) => [
+      skuId,
+      networkPayloads.filter((payload) => payload.skuId === skuId),
+    ]));
+    const verifiedResponseSkuIds = new Set(networkPayloads
+      .filter((payload) => /mtop\.taobao\.pcdetail\.data\.adjust/i.test(payload.url || "") && payload.responseSkuId)
+      .map((payload) => payload.responseSkuId));
+    const verifiedSelectionResults = selectionResults.map((selection) => ({
+      ...selection,
+      responseObserved: verifiedResponseSkuIds.has(selection.skuId),
+      reason: verifiedResponseSkuIds.has(selection.skuId)
+        ? "verified-body"
+        : selection.selected ? "response-body-missing" : selection.reason,
+    }));
+    const buyerShowPayloads = networkPayloads.filter((payload) => payload.responseKind === "buyer-show");
+    const priceNetworkPayloads = networkPayloads.filter((payload) => payload.responseKind === "price");
     return {
       html: result.result?.value || "",
       visibleText: visibleTextResult.result?.value || "",
       networkPayloads,
+      buyerShowPayloads,
+      priceNetworkPayloads,
+      skuNetworkPayloads,
+      selectionResults: verifiedSelectionResults,
       finalUrl: locationResult.result?.value || tab.url,
       statusCode: 200,
       source: "browser",

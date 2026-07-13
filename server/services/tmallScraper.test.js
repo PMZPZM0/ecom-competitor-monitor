@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { applyAppliedCoinDiscount, applyNetworkPromoData, applyVisibleDiscountItems, applyVisibleSurprisePrice, buyerShowsFromRateDetail, calculateAccountPriceScenario, calculatePriceScenarios, collectDiscountItems, collectDiscountItemsFromText, collectProductProgramItems, collectVisibleSurprisePrices, extractBuyerShowItems, extractSelectedSkuId, filterProductVideoUrls, resolveCoinBenefit, resolveSkuPrices, selectGalleryImages, selectSquareMainImage } from "./tmallScraper.js";
+import { applyAppliedCoinDiscount, applyNetworkPromoData, applyVisibleDiscountItems, applyVisibleSurprisePrice, buyerShowCaptureFromNetwork, buyerShowsFromRateDetail, calculateAccountPriceScenario, calculatePriceScenarios, collectDiscountItems, collectDiscountItemsFromText, collectProductProgramItems, collectVisibleSurprisePrices, extractBuyerShowItems, extractSelectedSkuId, filterProductVideoUrls, resolveCoinBenefit, resolveSkuPrices, selectGalleryImages, selectSquareMainImage } from "./tmallScraper.js";
 
 test("selectSquareMainImage prefers the mobile 1:1 main image over PC gallery images", () => {
   const square = "https://img.alicdn.com/imgextra/i2/2807173571/O1CN01ZQDGET1cFZV4baq16_!!4611686018427384259-0-item_pic.jpg";
@@ -492,6 +492,24 @@ test("extractBuyerShowItems keeps only review content with real media or copy", 
     images: ["https://img.alicdn.com/imgextra/i1/1234567890/a.jpg"],
     videoUrls: ["https://cloud.video.taobao.com/play/u/1234567890/p/2/123456789.mp4"],
   }]);
+});
+
+test("extractBuyerShowItems rejects rating summaries that are not review cards", () => {
+  const html = `<div class="rate-item"><p>近3个月好评率高达98.8%</p></div><div class="review"><p>好评率98.4%</p></div>`;
+  assert.deepEqual(extractBuyerShowItems(html), []);
+});
+
+test("buyerShowCaptureFromNetwork accepts only a known review endpoint and schema", () => {
+  const body = `jsonp1(${JSON.stringify({ rateDetail: { rateCount: { total: 1 }, rateList: [{ id: "real-1", rateContent: "真实评价内容", pics: ["//img.alicdn.com/bao/uploaded/i1/real.jpg"] }] } })})`;
+  const capture = buyerShowCaptureFromNetwork([{ url: "https://rate.tmall.com/list_detail_rate.htm?itemId=1", body }], { itemId: "1", accountSessionId: "normal" });
+  assert.equal(capture.status, "partial");
+  assert.equal(capture.items.length, 1);
+  assert.equal(capture.mediaCount, 1);
+  assert.equal(capture.accountSessionId, "normal");
+
+  const unknown = buyerShowCaptureFromNetwork([{ url: "https://h5api.m.tmall.com/h5/mtop.taobao.review.unknown/1.0/", body: JSON.stringify({ data: { feed: [] } }) }], { itemId: "1" });
+  assert.equal(unknown.status, "failed");
+  assert.equal(unknown.failureCode, "SCHEMA_CHANGED");
 });
 
 test("buyerShowsFromRateDetail keeps each Tmall review with its own pictures and videos", () => {

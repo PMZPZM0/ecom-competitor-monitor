@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import { BarChart3, CircleAlert, CircleCheck, Database, FolderTree, LoaderCircle, PauseCircle, PlayCircle, RefreshCw, Search, Settings, Sparkles } from 'lucide-react'
+import { BarChart3, CircleAlert, CircleCheck, Database, FolderTree, LoaderCircle, PauseCircle, PlayCircle, RefreshCw, Search, Settings, Sparkles, Type } from 'lucide-react'
 import { api } from './lib/api'
 import { Button } from './components/ui/button'
 import { Badge } from './components/ui/badge'
@@ -27,6 +27,7 @@ const navItems = [
 ] as const
 
 type PageId = (typeof navItems)[number]['id']
+type FontSize = 'small' | 'standard' | 'large'
 
 function App() {
   const [overview, setOverview] = useState<Overview | null>(null)
@@ -40,6 +41,7 @@ function App() {
   const [analysisBusy, setAnalysisBusy] = useState(false)
   const [error, setError] = useState('')
   const [notice, setNotice] = useState('')
+  const [fontSize, setFontSize] = useState<FontSize>(() => (window.localStorage.getItem('ecommerce-monitor-font-size') as FontSize) || 'standard')
 
   async function refresh() {
     setOverview(await api.overview())
@@ -62,7 +64,12 @@ function App() {
     window.localStorage.setItem('tmall-monitor-active-page', activePage)
   }, [activePage])
 
-  async function handleAdd(payload: { name: string; url: string; group?: string; accountType: 'normal' | 'gift' | 'vip88' }) {
+  useEffect(() => {
+    document.documentElement.dataset.fontSize = fontSize
+    window.localStorage.setItem('ecommerce-monitor-font-size', fontSize)
+  }, [fontSize])
+
+  async function handleAdd(payload: { name?: string; url: string; group?: string; accountType: 'normal' | 'gift' | 'vip88' }) {
     setError('')
     setNotice('正在添加商品，并立即抓取主图、SKU 图和价格...')
     try {
@@ -263,7 +270,7 @@ function App() {
   }
 
   if (!overview) {
-    return <div className="flex min-h-screen items-center justify-center bg-[#f4fbf8] text-slate-500">正在加载本地监控工作台...</div>
+    return <div className="flex min-h-screen items-center justify-center bg-[#f6f8fa] text-slate-500">正在加载本地监控工作台...</div>
   }
 
   const data = overview
@@ -337,11 +344,11 @@ function App() {
       <>
         <MetricCards overview={data} />
         <div className="space-y-5">
-          <MonitorSettings monitor={data.monitor} feishu={data.feishu} onSave={saveMonitorSettings} />
-          <div className="grid grid-cols-[minmax(420px,560px)_minmax(0,1fr)] items-stretch gap-5">
+          <div className="grid grid-cols-2 items-stretch gap-4 max-[1180px]:grid-cols-1">
             {productForm}
             <BatchCaptureCard sessions={data.authSessions} busy={busy} onRun={addProductsBatch} />
           </div>
+          <MonitorSettings monitor={data.monitor} feishu={data.feishu} onSave={saveMonitorSettings} />
           {productTable}
         </div>
       </>
@@ -349,15 +356,15 @@ function App() {
   }
 
   return (
-    <div className="min-h-screen bg-[#f4fbf8]">
-      <aside className="fixed inset-y-0 left-0 w-64 border-r border-emerald-100 bg-white">
-        <div className="flex h-16 items-center gap-3 border-b border-emerald-100 px-5">
-          <div className="flex h-9 w-9 items-center justify-center rounded-md bg-emerald-600 text-white">
+    <div className="min-h-screen bg-[#f6f8fa]">
+      <aside className="app-sidebar fixed inset-y-0 left-0 w-64 border-r border-slate-200 bg-white">
+        <div className="flex h-16 items-center gap-3 border-b border-slate-200 px-5">
+          <div className="flex h-9 w-9 items-center justify-center rounded-md bg-blue-600 text-white">
             <Search className="h-5 w-5" />
           </div>
-          <div>
-            <div className="font-semibold text-slate-950">天猫竞品监控</div>
-            <div className="text-xs text-slate-400">Local Intelligence</div>
+          <div className="brand-copy">
+            <div className="font-semibold text-slate-950">电商竞品监控</div>
+            <div className="text-xs text-slate-400">本地工作台</div>
           </div>
         </div>
         <nav className="space-y-1 p-3">
@@ -366,24 +373,26 @@ function App() {
               key={item.label}
               onClick={() => setActivePage(item.id)}
               className={`flex h-10 w-full items-center gap-3 rounded-md px-3 text-sm ${
-                activePage === item.id ? 'bg-emerald-50 text-emerald-700' : 'text-slate-600 hover:bg-slate-50'
+                activePage === item.id ? 'bg-blue-50 text-blue-700' : 'text-slate-600 hover:bg-slate-50'
               }`}
               type="button"
             >
               <item.icon className="h-4 w-4" />
-              {item.label}
+              <span className="nav-label">{item.label}</span>
             </button>
           ))}
         </nav>
       </aside>
 
-      <main className="ml-64 min-h-screen">
-        <header className="sticky top-0 z-10 flex h-16 items-center justify-between border-b border-emerald-100 bg-[#f4fbf8]/90 px-6 backdrop-blur">
+      <main className="app-main ml-64 min-h-screen">
+        <header className="sticky top-0 z-10 flex min-h-16 items-center justify-between gap-4 border-b border-slate-200 bg-white/95 px-6 py-2 backdrop-blur">
           <div>
             <h1 className="text-xl font-semibold text-slate-950">{currentPage.title}</h1>
             <p className="text-sm text-slate-500">{currentPage.subtitle}</p>
           </div>
-          {(activePage === 'overview' || activePage === 'categories') && <div className="flex items-center gap-3">
+          <div className="flex items-center gap-2">
+            <label className="flex h-9 items-center gap-2 rounded-md border border-slate-200 bg-white px-2 text-xs text-slate-500" title="调整界面文字大小"><Type className="h-4 w-4" /><select value={fontSize} onChange={(event) => setFontSize(event.target.value as FontSize)} className="bg-transparent text-xs text-slate-700 outline-none" aria-label="界面文字大小"><option value="small">小字</option><option value="standard">标准</option><option value="large">大字</option></select></label>
+          {(activePage === 'overview' || activePage === 'categories') && <>
             <Badge>
               {data.monitor.running
                 ? `下次运行：${data.monitor.nextRunAt ? new Date(data.monitor.nextRunAt).toLocaleTimeString() : '等待首次运行'}`
@@ -397,12 +406,12 @@ function App() {
               {data.monitor.running ? <PauseCircle className="h-4 w-4" /> : <PlayCircle className="h-4 w-4" />}
               {monitorToggleBusy ? '处理中' : data.monitor.running ? '停止监控' : '恢复监控'}
             </Button>
-          </div>}
+          </>}
+          </div>
         </header>
 
         <div className="space-y-5 p-6">
-          {notice && <div className={`flex items-center gap-2 rounded-md border p-3 text-sm ${notice.startsWith('正在') ? 'border-sky-100 bg-sky-50 text-sky-800' : 'border-emerald-100 bg-emerald-50 text-emerald-800'}`} role="status" aria-live="polite">{notice.startsWith('正在') ? <LoaderCircle className="h-4 w-4 shrink-0 animate-spin" /> : <CircleCheck className="h-4 w-4 shrink-0" />}{notice}</div>}
-          {error && <div className="flex items-center gap-2 rounded-md border border-red-100 bg-red-50 p-3 text-sm text-red-700" role="alert"><CircleAlert className="h-4 w-4 shrink-0" />{error}</div>}
+          {(notice || error) && <div className={`fixed right-6 top-20 z-50 flex max-w-md items-center gap-2 rounded-md border p-3 text-sm shadow-lg ${error ? 'border-red-200 bg-white text-red-700' : notice.startsWith('正在') ? 'border-blue-200 bg-white text-blue-800' : 'border-emerald-200 bg-white text-emerald-800'}`} role={error ? 'alert' : 'status'} aria-live="polite">{error ? <CircleAlert className="h-4 w-4 shrink-0" /> : notice.startsWith('正在') ? <LoaderCircle className="h-4 w-4 shrink-0 animate-spin" /> : <CircleCheck className="h-4 w-4 shrink-0" />}{error || notice}</div>}
           {renderPage()}
         </div>
       </main>

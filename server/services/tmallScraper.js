@@ -1,6 +1,9 @@
 import * as cheerio from "cheerio";
 import crypto from "node:crypto";
 import { getRenderedHtml } from "./browserService.js";
+import { applyPriceResolution, PRICE_PARSER_VERSION, resolveSkuPriceEvidence } from "./priceResolver.js";
+
+export const SCRAPER_VERSION = "2.0.0";
 
 const userAgent =
   "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126 Safari/537.36";
@@ -152,12 +155,53 @@ export function buyerShowsFromRateDetail(rateDetail) {
   }).filter((item) => item.text || item.images.length || item.videoUrls.length);
 }
 
-async function fetchTmallBuyerShows(itemId, sellerId, cookie, referer) {
-  if (!itemId || !sellerId) return [];
+function buyerShowCaptureResult({ status, source, failureCode = "", itemId, sellerId = "", accountSessionId = "", reportedTotal = 0, pageCount = 0, requestCount = 0, items = [], capturedAt = new Date().toISOString() }) {
+  return {
+    status,
+    source,
+    failureCode,
+    itemId: String(itemId || ""),
+    sellerId: String(sellerId || ""),
+    accountSessionId: String(accountSessionId || ""),
+    reportedTotal,
+    pageCount,
+    requestCount,
+    items,
+    mediaCount: items.reduce((sum, item) => sum + (item.images?.length || 0) + (item.videoUrls?.length || 0), 0),
+    textOnlyCount: items.filter((item) => item.text && !item.images?.length && !item.videoUrls?.length).length,
+    capturedAt,
+  };
+}
+
+function isKnownRateDetail(value) {
+  return Boolean(value && typeof value === "object" && (
+    value.rateCount !== undefined
+    || value.rateList !== undefined
+    || value.commentList !== undefined
+    || value.comments !== undefined
+    || value.data?.rateList !== undefined
+    || value.data?.commentList !== undefined
+  ));
+}
+
+function bestBuyerShowCapture(captures) {
+  const statusRank = { complete: 4, partial: 3, "confirmed-empty": 2, failed: 1 };
+  return captures.filter(Boolean).toSorted((left, right) =>
+    (statusRank[right.status] || 0) - (statusRank[left.status] || 0)
+    || right.mediaCount - left.mediaCount
+    || right.items.length - left.items.length)[0];
+}
+
+async function fetchTmallBuyerShows(itemId, sellerId, cookie, referer, accountSessionId = "") {
+  if (!itemId) return buyerShowCaptureResult({ status: "failed", source: "legacy-rate-api", failureCode: "ITEM_ID_MISSING", itemId, sellerId, accountSessionId });
+  if (!sellerId) return buyerShowCaptureResult({ status: "failed", source: "legacy-rate-api", failureCode: "SELLER_ID_UNVERIFIED", itemId, sellerId, accountSessionId });
   const collected = [];
-  // Fetch media reviews first. A second pass fills in useful text reviews when
-  // Tmall exposes picture and content filters as separate result sets.
+  const seen = new Set();
   const filters = [{ picture: "1", content: "" }, { picture: "", content: "1" }];
+  let requestCount = 0;
+  let pageCount = 0;
+  let reportedTotal = 0;
+  let failureCode = "";
   for (const filter of filters) {
     let filterCount = 0;
     for (let page = 1; page <= 5 && collected.length < 100; page += 1) {
@@ -166,27 +210,50 @@ async function fetchTmallBuyerShows(itemId, sellerId, cookie, referer) {
         append: "0", content: filter.content, picture: filter.picture, callback: `jsonp${Date.now()}_${page}`,
       });
       try {
+        requestCount += 1;
         const response = await fetch(`https://rate.tmall.com/list_detail_rate.htm?${query}`, {
           headers: { cookie: cookie || "", referer, "user-agent": userAgent, accept: "application/json,text/javascript,*/*" },
           signal: AbortSignal.timeout(12_000),
         });
+        if (!response.ok) {
+          failureCode = `HTTP_${response.status}`;
+          break;
+        }
         const detail = parseTmallRateBody(await response.text());
+        if (!isKnownRateDetail(detail)) {
+          failureCode = "SCHEMA_CHANGED";
+          break;
+        }
+        pageCount += 1;
         const items = buyerShowsFromRateDetail(detail);
-        if (!items.length) break;
-        collected.push(...items);
-        filterCount += items.length;
         const total = Number(detail?.rateCount?.total || detail?.rateCount || 0);
-        if ((total && filterCount >= total) || items.length < 10) break;
+        if (Number.isFinite(total) && total > 0) reportedTotal = Math.max(reportedTotal, total);
+        let added = 0;
+        for (const item of items) {
+          const key = item.id && !/^rate-\d+$/.test(item.id) ? `id:${item.id}` : `${item.text}|${item.images.join(",")}|${item.videoUrls.join(",")}`;
+          if (seen.has(key)) continue;
+          seen.add(key);
+          collected.push(item);
+          added += 1;
+        }
+        filterCount += added;
+        if (!items.length || !added || (total > 0 && filterCount >= total)) break;
         await new Promise((resolve) => setTimeout(resolve, 180));
-      } catch {
+      } catch (error) {
+        failureCode = error?.name === "TimeoutError" ? "TIMEOUT" : "HTTP_ERROR";
         break;
       }
     }
   }
-  return Array.from(new Map(collected.map((item) => [
-    item.id && !/^rate-\d+$/.test(item.id) ? `id:${item.id}` : `${item.text}|${item.images.join(",")}|${item.videoUrls.join(",")}`,
-    item,
-  ])).values()).slice(0, 100);
+  const items = collected.slice(0, 100);
+  if (items.length) {
+    const complete = !failureCode && (!reportedTotal || items.length >= Math.min(reportedTotal, 100));
+    return buyerShowCaptureResult({ status: complete ? "complete" : "partial", source: "legacy-rate-api", failureCode, itemId, sellerId, accountSessionId, reportedTotal, pageCount, requestCount, items });
+  }
+  if (!failureCode && pageCount > 0 && reportedTotal === 0) {
+    return buyerShowCaptureResult({ status: "confirmed-empty", source: "legacy-rate-api", itemId, sellerId, accountSessionId, reportedTotal, pageCount, requestCount, items });
+  }
+  return buyerShowCaptureResult({ status: "failed", source: "legacy-rate-api", failureCode: failureCode || "UNVERIFIED_EMPTY", itemId, sellerId, accountSessionId, reportedTotal, pageCount, requestCount, items });
 }
 
 function imageKey(url) {
@@ -196,16 +263,11 @@ function imageKey(url) {
     .toLowerCase();
 }
 
-function extractSellerId(html, images = []) {
+function extractSellerId(html) {
   const source = String(html || "").replace(/&quot;|&#34;/gi, '"');
   const direct = source.match(/["']sellerId["']\s*[:=]\s*["']?(\d{6,16})/i)?.[1]
     || source.match(/sellerId\\?"?\s*[:=]\s*\\?["']?(\d{6,16})/i)?.[1];
-  if (direct) return direct;
-  for (const image of images) {
-    const owner = String(image || "").match(/\/i\d\/(\d{6,16})\//i)?.[1];
-    if (owner && !owner.startsWith("600000")) return owner;
-  }
-  return "";
+  return direct || "";
 }
 
 function unique(values) {
@@ -255,46 +317,34 @@ function payloadMediaValues(value, keyPattern, depth = 0) {
     : payloadMediaValues(item, keyPattern, depth + 1));
 }
 
-function payloadTextValue(value) {
-  if (!value || typeof value !== "object") return "";
-  const keys = ["rateContent", "reviewContent", "commentContent", "appendContent", "content", "text", "desc"];
-  for (const key of keys) {
-    if (typeof value[key] === "string" && cleanText(value[key]).length > 2) return cleanText(value[key]).slice(0, 800);
-  }
-  return "";
-}
-
-function extractBuyerShowPayloadItems(payloads = []) {
-  const results = [];
+export function buyerShowCaptureFromNetwork(networkPayloads = [], options = {}) {
+  const itemId = String(options.itemId || "");
+  const accountSessionId = String(options.accountSessionId || "");
+  const collected = [];
   const seen = new Set();
-  const visit = (value, depth = 0) => {
-    if (depth > 7 || value == null) return;
-    if (Array.isArray(value)) {
-      value.forEach((item) => visit(item, depth + 1));
-      return;
+  let requestCount = 0;
+  let reportedTotal = 0;
+  let schemaMismatchCount = 0;
+  for (const payload of networkPayloads) {
+    if (!/(?:list_detail_rate|mtop\.[^/]*(?:rate|review|comment|evaluate))/i.test(String(payload?.url || ""))) continue;
+    requestCount += 1;
+    const detail = parseTmallRateBody(payload?.body);
+    if (!isKnownRateDetail(detail)) {
+      schemaMismatchCount += 1;
+      continue;
     }
-    if (typeof value !== "object") return;
-    const keys = Object.keys(value);
-    const marker = keys.some((key) => /rate|review|comment|append|pic|video/i.test(key));
-    if (marker) {
-      const text = payloadTextValue(value);
-      const images = Array.from(new Set(payloadMediaValues(value, /pics?|images?|photos?|pictures?|img/i).map(cleanImage).filter(isCommerceImage))).slice(0, 20);
-      const videoUrls = Array.from(new Set(payloadMediaValues(value, /videos?|videoUrl|videoSrc/i).map(cleanBuyerShowVideo).filter(Boolean))).slice(0, 6);
-      if ((text && !/账号管理|退出|倍速|播放|收藏|分享/i.test(text)) || images.length || videoUrls.length) {
-        const key = `${text}|${images.join(",")}|${videoUrls.join(",")}`;
-        if (!seen.has(key)) {
-          seen.add(key);
-          results.push({ id: `buyer-${results.length + 1}`, text, images, videoUrls });
-        }
-      }
+    const total = Number(detail?.rateCount?.total || detail?.rateCount || 0);
+    if (Number.isFinite(total) && total > 0) reportedTotal = Math.max(reportedTotal, total);
+    for (const item of buyerShowsFromRateDetail(detail)) {
+      const key = item.id && !/^rate-\d+$/.test(item.id) ? `id:${item.id}` : `${item.text}|${item.images.join(",")}|${item.videoUrls.join(",")}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      collected.push(item);
     }
-    Object.values(value).forEach((item) => visit(item, depth + 1));
-  };
-  for (const payload of payloads) {
-    const parsed = typeof payload === "string" ? parseNetworkPayload(payload) : parseNetworkPayload(payload?.body);
-    if (parsed) visit(parsed);
   }
-  return results.slice(0, 100);
+  if (collected.length) return buyerShowCaptureResult({ status: "partial", source: "observed-network", itemId, accountSessionId, reportedTotal, pageCount: 1, requestCount, items: collected.slice(0, 100) });
+  if (requestCount && !schemaMismatchCount && reportedTotal === 0) return buyerShowCaptureResult({ status: "confirmed-empty", source: "observed-network", itemId, accountSessionId, requestCount });
+  return buyerShowCaptureResult({ status: "failed", source: "observed-network", failureCode: schemaMismatchCount ? "SCHEMA_CHANGED" : "REVIEW_REQUEST_NOT_OBSERVED", itemId, accountSessionId, requestCount });
 }
 
 export function extractBuyerShowItems(html, networkPayloads = []) {
@@ -302,8 +352,7 @@ export function extractBuyerShowItems(html, networkPayloads = []) {
   const selectors = [
     "[class*='rate-item']", "[class*='review-item']", "[class*='comment-item']",
     "[class*='evaluation-item']", "[class*='晒单-item']", "[class*='买家秀-item']",
-    "[class*='rate']", "[class*='review']", "[class*='comment']", "[class*='evaluation']",
-    "[class*='晒单']", "[class*='买家秀']", "[id*='rate']", "[id*='review']", "[id*='comment']",
+    "[data-rate-id]", "[data-review-id]", "[data-comment-id]",
   ].join(",");
   const results = [];
   const seen = new Set();
@@ -313,7 +362,7 @@ export function extractBuyerShowItems(html, networkPayloads = []) {
     const videos = Array.from(new Set(current.find("video,source,[data-video],[data-video-url]").map((_, media) => cleanBuyerShowVideo($(media).attr("src") || $(media).attr("data-src") || $(media).attr("data-video") || $(media).attr("data-video-url") || "")).get().filter(Boolean))).slice(0, 6);
     const text = cleanText(current.find("[class*='content'],[class*='text'],[class*='desc'],p").first().text() || current.text()).slice(0, 800);
     if (!images.length && !videos.length && (!text || text.length < 8)) continue;
-    if (/账号管理|退出|倍速|播放|收藏|分享/i.test(text)) continue;
+    if (/账号管理|退出|倍速|播放|收藏|分享|好评率|近\s*3\s*个月|全部评价|评价总数|默认好评/i.test(text)) continue;
     if ((current.text() || "").length > 5000) continue;
     const key = `${text}|${images.join(",")}|${videos.join(",")}`;
     if (seen.has(key)) continue;
@@ -321,7 +370,7 @@ export function extractBuyerShowItems(html, networkPayloads = []) {
     results.push({ id: `buyer-${results.length + 1}`, text, images, videoUrls: videos });
     if (results.length >= 50) break;
   }
-  const payloadItems = extractBuyerShowPayloadItems(networkPayloads);
+  const payloadItems = buyerShowCaptureFromNetwork(networkPayloads).items;
   const merged = [...results, ...payloadItems];
   return Array.from(new Map(merged.map((item) => [`${item.text}|${item.images.join(",")}|${item.videoUrls.join(",")}`, item])).values()).slice(0, 100);
 }
@@ -1321,13 +1370,39 @@ export function applyNetworkPromoData(skuPrices, networkPayloads = [], options =
 }
 
 async function fetchMobilePromotionPayloads(itemId, skuPrices, authSession) {
-  if (authSession?.source !== "taobao-browser") return [];
+  if (authSession?.source !== "taobao-browser") return { networkPayloads: [], skuNetworkPayloads: {}, selectionResults: [] };
   const desktopProductUrl = `https://detail.tmall.com/item.htm?id=${encodeURIComponent(itemId)}`;
   try {
-    const page = await getRenderedHtml(desktopProductUrl, authSession, { selectSkuNames: skuPrices.map((sku) => sku.name) });
-    return page.networkPayloads || [];
+    const first = await getRenderedHtml(desktopProductUrl, authSession, {
+      selectSkus: skuPrices.map((sku) => ({ skuId: sku.skuId, valueIds: sku.selectionValueIds || [] })),
+    });
+    const missingSkuIds = new Set(first.selectionResults.filter((item) => !item.responseObserved).map((item) => String(item.skuId)));
+    if (!missingSkuIds.size) return first;
+    const retrySkus = skuPrices.filter((sku) => missingSkuIds.has(String(sku.skuId)) && sku.selectionValueIds?.length);
+    if (!retrySkus.length) return first;
+    let retry;
+    try {
+      retry = await getRenderedHtml(desktopProductUrl, authSession, {
+        selectSkus: retrySkus.map((sku) => ({ skuId: sku.skuId, valueIds: sku.selectionValueIds })),
+      });
+    } catch {
+      return first;
+    }
+    const networkPayloads = [...first.networkPayloads, ...retry.networkPayloads];
+    const skuNetworkPayloads = {};
+    for (const payload of networkPayloads) {
+      if (!payload.skuId) continue;
+      (skuNetworkPayloads[payload.skuId] ||= []).push(payload);
+    }
+    const retrySelections = new Map(retry.selectionResults.map((item) => [String(item.skuId), item]));
+    return {
+      ...first,
+      networkPayloads,
+      skuNetworkPayloads,
+      selectionResults: first.selectionResults.map((item) => retrySelections.get(String(item.skuId))?.responseObserved ? retrySelections.get(String(item.skuId)) : item),
+    };
   } catch {
-    return [];
+    return { networkPayloads: [], skuNetworkPayloads: {}, selectionResults: [] };
   }
 }
 
@@ -1538,7 +1613,7 @@ export function calculateAccountPriceScenario(sku, accountType = "normal") {
   };
 }
 
-function extractStructuredSku(html) {
+export function extractStructuredSku(html) {
   const skuBase = extractObjectByKey(html, "skuBase");
   const skuCore = extractObjectByKey(html, "skuCore");
   const sku2info = skuCore?.sku2info || {};
@@ -1571,6 +1646,8 @@ function extractStructuredSku(html) {
     if (details.image) skuImages.push(details.image);
     skuPrices.push({
       skuId: String(sku.skuId),
+      propPath: String(sku.propPath || ""),
+      selectionValueIds: String(sku.propPath || "").split(";").map((part) => part.split(":")[1]).filter(Boolean),
       name: details.name || `SKU ${skuPrices.length + 1}`,
       image: details.image,
       price: resolvedPrices.normalPrice,
@@ -1645,8 +1722,7 @@ export async function scrapeTmallProduct(product, authSession) {
   }
   const structuredSku = extractStructuredSku(html);
   const accountType = authSession?.accountType || "normal";
-  structuredSku.skuPrices = applyNetworkPromoData(structuredSku.skuPrices, page.networkPayloads, { accountType });
-  const mobilePromotionPayloads = await fetchMobilePromotionPayloads(itemId, structuredSku.skuPrices, authSession);
+  const mobilePromotionCapture = await fetchMobilePromotionPayloads(itemId, structuredSku.skuPrices, authSession);
   const visibleText = page.visibleText || cheerio.load(html)("body").text();
   const visibleDiscountItems = collectDiscountItemsFromText(visibleText);
   structuredSku.skuPrices = applyVisibleDiscountItems(structuredSku.skuPrices, visibleDiscountItems);
@@ -1658,8 +1734,23 @@ export async function scrapeTmallProduct(product, authSession) {
   );
   structuredSku.skuPrices = applyProductProgramItems(structuredSku.skuPrices, collectProductProgramItems(html));
   structuredSku.skuPrices = structuredSku.skuPrices.map((sku) => calculateAccountPriceScenario(applyAppliedCoinDiscount(sku), accountType));
-  structuredSku.skuPrices = applyNetworkPromoData(structuredSku.skuPrices, mobilePromotionPayloads, { accountType: authSession?.accountType || "normal" })
-    .map((sku) => calculateAccountPriceScenario(sku, accountType));
+  structuredSku.skuPrices = structuredSku.skuPrices.map((sku) => {
+    const skuPayloads = [
+      ...(page.skuNetworkPayloads?.[sku.skuId] || []),
+      ...(mobilePromotionCapture.skuNetworkPayloads?.[sku.skuId] || []),
+    ];
+    const selection = mobilePromotionCapture.selectionResults.find((item) => String(item.skuId) === String(sku.skuId));
+    const resolution = resolveSkuPriceEvidence(skuPayloads, {
+      itemId,
+      skuId: sku.skuId,
+      accountType,
+      selectedSkuVerified: Boolean(selection?.responseObserved),
+      capturedAt: startedAt,
+    });
+    if (resolution.matched) return applyPriceResolution(sku, resolution);
+    const [resolved] = applyNetworkPromoData([sku], skuPayloads, { accountType: authSession?.accountType || "normal" });
+    return calculateAccountPriceScenario(resolved, accountType);
+  });
   const shopName = extractShopName(html, jsonData, domData);
   const shopLogo = extractShopLogo(html, jsonData, domData);
   const model = extractModel(html, jsonData, domData);
@@ -1674,8 +1765,11 @@ export async function scrapeTmallProduct(product, authSession) {
     cookie: page.cookieHeader || authSession?.cookie || "",
   }, product.url);
   if (mobileDetailData) {
-    structuredSku.skuPrices = applyNetworkPromoData(structuredSku.skuPrices, [JSON.stringify(mobileDetailData)], { accountType })
-      .map((sku) => calculateAccountPriceScenario(sku, accountType));
+    structuredSku.skuPrices = structuredSku.skuPrices.map((sku) => {
+      if (sku.resolutionStatus === "verified") return sku;
+      const [resolved] = applyNetworkPromoData([sku], [JSON.stringify(mobileDetailData)], { accountType });
+      return calculateAccountPriceScenario(resolved, accountType);
+    });
   }
   const knownPrimaryImages = [
     ...(product.knownPrimaryImages || []),
@@ -1693,9 +1787,15 @@ export async function scrapeTmallProduct(product, authSession) {
     product.knownGalleryImages || [],
     product.knownVideoUrls || [],
   );
-  const sellerId = extractSellerId(html, [media.mainImage800, ...media.mainImages, ...skuImages]);
-  const buyerShows = await fetchTmallBuyerShows(itemId, sellerId, page.cookieHeader || authSession?.cookie || "", product.url);
-  if (buyerShows.length) media.buyerShows = buyerShows;
+  const sellerId = extractSellerId(html);
+  const accountSessionId = authSession?.id || "guest";
+  const observedBuyerShows = buyerShowCaptureFromNetwork(page.buyerShowPayloads || [], { itemId, accountSessionId });
+  const directBuyerShows = await fetchTmallBuyerShows(itemId, sellerId, page.cookieHeader || authSession?.cookie || "", product.url, accountSessionId);
+  const domBuyerShows = media.buyerShows.length
+    ? buyerShowCaptureResult({ status: "partial", source: "verified-dom", itemId, sellerId, accountSessionId, pageCount: 1, items: media.buyerShows })
+    : buyerShowCaptureResult({ status: "failed", source: "verified-dom", failureCode: "REVIEW_UI_NOT_FOUND", itemId, sellerId, accountSessionId });
+  const buyerShowCapture = bestBuyerShowCapture([observedBuyerShows, directBuyerShows, domBuyerShows]);
+  media.buyerShows = buyerShowCapture.items;
   const mainImages = media.mainImages;
   const rawSkuPrices = structuredSku.skuPrices.length
     ? structuredSku.skuPrices
@@ -1710,6 +1810,7 @@ export async function scrapeTmallProduct(product, authSession) {
         priceLayers: [{ label: "普通价", value: price, kind: "price", source: "fallback" }],
       }));
   const skuPrices = rawSkuPrices.map((sku) => {
+    if (sku.resolutionStatus === "verified") return { ...sku, ...resolveCoinBenefit(sku) };
     const calculated = calculateAccountPriceScenario(applyAppliedCoinDiscount(sku), accountType);
     return { ...calculated, ...resolveCoinBenefit(calculated) };
   });
@@ -1721,6 +1822,10 @@ export async function scrapeTmallProduct(product, authSession) {
   const title = cleanTitle(jsonData.title || domData.title || product.name || "未识别商品标题");
 
   return {
+    parserVersion: PRICE_PARSER_VERSION,
+    resolutionStatus: skuPrices.length && skuPrices.every((sku) => sku.resolutionStatus === "verified")
+      ? "verified"
+      : skuPrices.some((sku) => sku.resolutionStatus === "verified") ? "partial" : "legacy",
     capturedAt: startedAt,
     statusCode: page.statusCode,
     finalUrl: page.finalUrl,
@@ -1738,6 +1843,7 @@ export async function scrapeTmallProduct(product, authSession) {
     mainImages,
     detailImages: media.detailImages,
     buyerShows: media.buyerShows,
+    buyerShowCapture,
     videoUrls: media.videoUrls,
     skuImages,
     skuPrices,
@@ -1753,7 +1859,11 @@ export async function scrapeTmallProduct(product, authSession) {
       priceCount: allPrices.length,
       highResImageCount: mainImages.length + media.detailImages.length,
       networkPriceResponseCount: page.networkPayloads?.length || 0,
-      mobilePromotionResponseCount: mobilePromotionPayloads.length,
+      mobilePromotionResponseCount: mobilePromotionCapture.networkPayloads.length,
+      verifiedSkuSelectionCount: mobilePromotionCapture.selectionResults.filter((item) => item.responseObserved).length,
+      skuSelectionCount: mobilePromotionCapture.selectionResults.length,
+      skuSelectionResults: mobilePromotionCapture.selectionResults,
+      verifiedPriceSkuCount: skuPrices.filter((sku) => sku.resolutionStatus === "verified").length,
     },
   };
 }

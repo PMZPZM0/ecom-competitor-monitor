@@ -16,6 +16,7 @@ export const productSortOptions: Array<{ value: ProductSortKey; label: string }>
 
 function minimumPrice(product: Product) {
   const prices = product.lastSnapshot?.skuPrices
+    ?.filter((sku) => sku.resolutionStatus === 'verified' && sku.priceResolution?.channels?.normal?.status === 'verified')
     ?.map((sku) => sku.normalPrice ?? sku.price)
     .filter((price) => Number.isFinite(price) && price > 0) || []
   return prices.length ? Math.min(...prices) : null
