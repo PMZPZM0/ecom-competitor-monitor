@@ -18,7 +18,7 @@ jobs:
       - run: npm ci
       - run: npm test
       - run: npm run lint
-      - run: npm run pack:win
+      - run: npm run pack:win -- --publish never
       - uses: actions/upload-artifact@v4
         with:
           name: 电商竞品监控-Windows
@@ -38,7 +38,7 @@ jobs:
       - run: npm ci
       - run: npm test
       - run: npm run lint
-      - run: npm run pack:mac -- --${{ matrix.arch }}
+      - run: npm run pack:mac -- --${{ matrix.arch }} --publish never
       - uses: actions/upload-artifact@v4
         with:
           name: 电商竞品监控-macOS-${{ matrix.arch }}
