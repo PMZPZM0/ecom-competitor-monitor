@@ -2,6 +2,26 @@
 
 本项目是一个本地运行的天猫/淘宝竞品监控工作台，用于添加商品链接、抓取主图/SKU 图/SKU 价格、每 10 分钟自动监控，并生成 AI 或本地规则分析。
 
+## 界面预览
+
+以下截图已对店铺名、商品名、商品 ID、SKU ID 和商品素材等信息进行隐私处理。
+
+| 监控总览 | 商品抓取工作台 |
+| --- | --- |
+| ![监控总览](docs/screenshots/dashboard-home.png) | ![商品抓取工作台](docs/screenshots/product-workbench.png) |
+
+| 店铺与型号分类 | 淘宝账号授权 |
+| --- | --- |
+| ![店铺与型号分类](docs/screenshots/monitor-classification.png) | ![淘宝账号授权](docs/screenshots/account-auth.png) |
+
+| 飞书文档与机器人提醒 | SKU 价格趋势 |
+| --- | --- |
+| ![飞书文档与机器人提醒](docs/screenshots/feishu-notifications.png) | ![SKU 价格趋势](docs/screenshots/product-monitor-trend.png) |
+
+| SKU 监控概览 | SKU 监控明细 |
+| --- | --- |
+| ![SKU 监控概览](docs/screenshots/sku-monitor-overview.png) | ![SKU 监控明细](docs/screenshots/sku-monitor-detail.png) |
+
 ## 功能
 
 - 商品链接管理：录入天猫/淘宝商品链接、分组、启停监控。
