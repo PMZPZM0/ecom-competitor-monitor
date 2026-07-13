@@ -6,7 +6,9 @@ import {
   historicalAccountPriceSnapshot,
   historicalPrimaryImages,
   historicalProductMedia,
+  hasTrustedAccountBaseline,
   isFeishuAlertCoolingDown,
+  mergeAccountSnapshots,
   mergeBuyerShowHistory,
   nextProductScheduleAt,
   orderedCaptureCandidates,
@@ -16,6 +18,7 @@ import {
   riskCooldownMs,
   runInCaptureGroups,
   scheduleProduct,
+  sessionsForProduct,
   snapshotAllowsPriceAlerts,
 } from "./monitorService.js";
 
@@ -106,6 +109,65 @@ test("missing account prices preserve the latest verified SKU scenario", () => {
   assert.equal(restored.skuPrices[0].coinPrice, 479.91);
   assert.equal(restored.rawSignals.preservedAccountPriceCount, 1);
   assert.equal(historicalAccountPriceSnapshot([{ productId: "p", ...current }, { productId: "p", ...previous }], "p", "normal").capturedAt, "2026-01-01");
+});
+
+test("stale or invalid account benefits are not inherited by a new capture", () => {
+  const previous = { capturedAt: "2026-01-01", skuPrices: [{ skuId: "a", price: 179, normalPrice: 179, giftPrice: 126, giftInference: { normalPrice: 179 } }] };
+  const current = { capturedAt: "2026-01-02", skuPrices: [{ skuId: "a", price: 629, normalPrice: 629, giftPrice: null }], rawSignals: {} };
+  const restored = preserveVerifiedAccountPrices(current, previous, "gift");
+
+  assert.equal(restored.skuPrices[0].normalPrice, 629);
+  assert.equal(restored.skuPrices[0].giftPrice, null);
+  assert.equal(historicalAccountPriceSnapshot([{ productId: "p", capturedAt: "2026-01-03", skuPrices: [{ skuId: "a", normalPrice: 179, giftPrice: 629 }] }], "p", "gift"), null);
+});
+
+test("normal account is the baseline and lower target-account prices become isolated benefits for every SKU", () => {
+  const snapshot = (prices) => ({
+    price: prices[0],
+    priceRange: [Math.min(...prices), Math.max(...prices)],
+    skuPrices: prices.map((normalPrice, index) => ({ skuId: `sku-${index + 1}`, price: normalPrice, normalPrice, priceLayers: [], discountItems: [], priceCalculation: { normal: `普通价 ${normalPrice}` } })),
+    rawSignals: {},
+  });
+  const normalSession = { id: "normal", name: "普通账号", accountType: "normal" };
+  const giftSession = { id: "gift", name: "礼金账号", accountType: "gift" };
+  const merged = mergeAccountSnapshots([
+    { session: giftSession, snapshot: snapshot([126, 146]) },
+    { session: normalSession, snapshot: snapshot([139, 159]) },
+  ]);
+  const [firstSku, secondSku] = merged.skuPrices;
+
+  assert.deepEqual(merged.skuPrices.map((sku) => ({ normal: sku.normalPrice, gift: sku.giftPrice })), [
+    { normal: 139, gift: 126 },
+    { normal: 159, gift: 146 },
+  ]);
+  assert.equal(firstSku.giftInference.source, "cross-account-observation");
+  assert.equal(secondSku.giftInference.source, "cross-account-observation");
+});
+
+test("a target account list price never replaces the observed normal-account price", () => {
+  const normal = { price: 179, priceRange: [179, 179], skuPrices: [{ skuId: "sku-1", price: 179, normalPrice: 179, priceLayers: [], discountItems: [] }], rawSignals: {} };
+  const gift = { price: 629, priceRange: [629, 629], skuPrices: [{ skuId: "sku-1", price: 629, normalPrice: 629, originalPrice: 629, giftPrice: 629, giftStatus: "available", priceLayers: [{ label: "礼金价", value: 629, kind: "price" }], discountItems: [] }], rawSignals: {} };
+  const [sku] = mergeAccountSnapshots([
+    { session: { id: "gift", accountType: "gift" }, snapshot: gift },
+    { session: { id: "normal", accountType: "normal" }, snapshot: normal },
+  ]).skuPrices;
+
+  assert.equal(sku.normalPrice, 179);
+  assert.equal(sku.giftPrice, undefined);
+});
+
+test("gift and 88VIP products also capture one normal-account baseline", () => {
+  const sessions = [
+    { id: "n1", accountType: "normal" },
+    { id: "n2", accountType: "normal" },
+    { id: "g1", accountType: "gift" },
+    { id: "v1", accountType: "vip88" },
+  ];
+  assert.deepEqual(sessionsForProduct(sessions, "gift").map((session) => session.id), ["n1", "n2", "g1"]);
+  assert.deepEqual(sessionsForProduct(sessions, "vip88").map((session) => session.id), ["n1", "n2", "v1"]);
+  assert.equal(hasTrustedAccountBaseline([{ session: sessions[2], snapshot: { skuPrices: [{ normalPrice: 629, originalPrice: 629 }] } }], "gift"), false);
+  assert.equal(hasTrustedAccountBaseline([{ session: sessions[2], snapshot: { skuPrices: [{ giftPrice: 629, giftInference: { normalPrice: 179 } }] } }], "gift"), false);
+  assert.equal(hasTrustedAccountBaseline([{ session: sessions[2], snapshot: { skuPrices: [{ giftPrice: 126, giftInference: { normalPrice: 179 } }] } }], "gift"), true);
 });
 
 test("resolveCaptureProtectionMinutes prefers an account pool override", () => {

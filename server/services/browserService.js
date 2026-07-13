@@ -547,6 +547,7 @@ export async function getRenderedHtml(url, authSession = {}, renderOptions = {})
     await cdp.send("Network.enable");
     const priceResponses = new Map();
     const buyerShowResponses = new Map();
+    const priceResponseLimit = Array.isArray(renderOptions.selectSkuNames) ? 240 : 60;
     cdp.on("Network.responseReceived", ({ requestId, response, type }) => {
       const responseUrl = String(response?.url || "");
       const mimeType = String(response?.mimeType || "");
@@ -555,7 +556,7 @@ export async function getRenderedHtml(url, authSession = {}, renderOptions = {})
       const dataResponse = /json/i.test(mimeType) || /XHR|Fetch/i.test(type || "");
       if (!relevantUrl || !dataResponse || Number(response?.status || 0) >= 400) return;
       const target = buyerShowUrl ? buyerShowResponses : priceResponses;
-      const limit = buyerShowUrl ? 80 : 60;
+      const limit = buyerShowUrl ? 80 : priceResponseLimit;
       if (target.size < limit) {
         target.set(requestId, { url: responseUrl, mimeType });
       }
@@ -565,11 +566,14 @@ export async function getRenderedHtml(url, authSession = {}, renderOptions = {})
     await cdp.send("Page.enable");
     await cdp.send("Page.navigate", { url });
     await new Promise((resolve) => setTimeout(resolve, 7000));
-    if (renderOptions.selectSkuName) {
+    const selectSkuNames = Array.isArray(renderOptions.selectSkuNames)
+      ? renderOptions.selectSkuNames.filter(Boolean)
+      : renderOptions.selectSkuName ? [renderOptions.selectSkuName] : [];
+    for (const selectSkuName of selectSkuNames) {
       const selectionResult = await cdp.send("Runtime.evaluate", {
         expression: `(() => {
           const normalize = (value) => String(value || '').replace(/\\s+/g, '').replace(/[\\[\\]【】()（）]/g, '');
-          const wanted = normalize(${JSON.stringify(renderOptions.selectSkuName)});
+          const wanted = normalize(${JSON.stringify(selectSkuName)});
           const target = Array.from(document.querySelectorAll('button,[role="button"],div,span'))
             .filter((element) => {
               const rect = element.getBoundingClientRect();
@@ -584,7 +588,7 @@ export async function getRenderedHtml(url, authSession = {}, renderOptions = {})
         })()`,
         returnByValue: true,
       }, 10000);
-      if (selectionResult.result?.value?.clicked) await new Promise((resolve) => setTimeout(resolve, 3500));
+      if (selectionResult.result?.value?.clicked) await new Promise((resolve) => setTimeout(resolve, 2200));
     }
     if (renderOptions.captureVideo) {
       const videoTabResult = await cdp.send("Runtime.evaluate", {
@@ -659,7 +663,8 @@ export async function getRenderedHtml(url, authSession = {}, renderOptions = {})
     const networkPayloads = [];
     let networkBytes = 0;
     for (const result of bodyResults) {
-      if (result.status !== "fulfilled" || networkBytes >= 12_000_000) continue;
+      const networkByteLimit = selectSkuNames.length > 1 ? 24_000_000 : 12_000_000;
+      if (result.status !== "fulfilled" || networkBytes >= networkByteLimit) continue;
       const payload = result.value;
       if (!payload.body || payload.body.length > 2_000_000) continue;
       networkBytes += payload.body.length;

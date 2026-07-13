@@ -170,11 +170,10 @@ export function historicalProductMedia(snapshots, productId) {
 }
 
 export function historicalAccountPriceSnapshot(snapshots, productId, accountType = "normal") {
-  const priceField = accountType === "gift" ? "giftPrice" : accountType === "vip88" ? "vipPrice" : "surprisePrice";
   return snapshots
     .filter((snapshot) => snapshot.productId === productId)
     .sort((left, right) => new Date(right.capturedAt || 0).getTime() - new Date(left.capturedAt || 0).getTime())
-    .find((snapshot) => (snapshot.skuPrices || []).some((sku) => Number(sku[priceField]) > 0)) || null;
+    .find((snapshot) => (snapshot.skuPrices || []).some((sku) => hasVerifiedAccountPrice(sku, accountType))) || null;
 }
 
 export function preserveVerifiedAccountPrices(snapshot, previousSnapshot, accountType = "normal") {
@@ -187,7 +186,10 @@ export function preserveVerifiedAccountPrices(snapshot, previousSnapshot, accoun
   let preservedCount = 0;
   const skuPrices = (snapshot.skuPrices || []).map((sku) => {
     const previous = previousBySku.get(String(sku.skuId));
-    if (!previous || Number(sku[priceField]) > 0 || !(Number(previous[priceField]) > 0)) return sku;
+    const displayedPrice = Number(sku.normalPrice ?? sku.price);
+    const previousBenefitPrice = Number(previous?.[priceField]);
+    if (!previous || hasVerifiedAccountPrice(sku, accountType) || !hasVerifiedAccountPrice(previous, accountType)) return sku;
+    if (!Number.isFinite(displayedPrice) || Math.abs(displayedPrice - previousBenefitPrice) > 0.05) return sku;
     preservedCount += 1;
     return {
       ...sku,
@@ -233,24 +235,80 @@ function buildRunRecord({ source, scope, startedAt, results, message }) {
   };
 }
 
-function mergeAccountSnapshots(snapshots) {
+function isVerifiedBenefitPrice(normalPrice, benefitPrice) {
+  const normal = Number(normalPrice);
+  const benefit = Number(benefitPrice);
+  return Number.isFinite(normal) && Number.isFinite(benefit) && benefit > 0 && normal - benefit > 0.05;
+}
+
+function hasVerifiedAccountPrice(sku, accountType) {
+  const priceField = accountType === "gift" ? "giftPrice" : accountType === "vip88" ? "vipPrice" : "surprisePrice";
+  const inferenceField = accountType === "gift" ? "giftInference" : accountType === "vip88" ? "vipInference" : "surpriseInference";
+  return isVerifiedBenefitPrice(sku?.[inferenceField]?.normalPrice ?? sku?.normalPrice ?? sku?.price, sku?.[priceField]);
+}
+
+export function mergeAccountSnapshots(snapshots) {
   const preferred = snapshots.find((entry) => entry.session?.accountType === "normal") || snapshots[0];
   const merged = structuredClone(preferred.snapshot);
   const bySkuId = new Map();
-  for (const entry of snapshots) {
+  const ordered = [preferred, ...snapshots.filter((entry) => entry !== preferred)];
+  for (const entry of ordered) {
+    const accountType = entry.session?.accountType || "normal";
     for (const sku of entry.snapshot.skuPrices || []) {
-      const current = bySkuId.get(sku.skuId) || { ...sku, accountPrices: [] };
+      const skuId = String(sku.skuId);
+      const current = bySkuId.get(skuId) || { ...sku, accountPrices: [] };
+      const normalPrice = Number(current.normalPrice ?? current.price);
+      const displayedPrice = Number(sku.normalPrice ?? sku.price);
+      const config = accountType === "gift"
+        ? { priceField: "giftPrice", statusField: "giftStatus", discountField: "giftDiscountAmount", inferenceField: "giftInference", calculationField: "gift", label: "礼金价", discountLabel: "礼金优惠" }
+        : accountType === "vip88"
+          ? { priceField: "vipPrice", statusField: "vipStatus", discountField: "vipDiscountAmount", inferenceField: "vipInference", calculationField: "vip88", label: "88VIP价", discountLabel: "88VIP优惠" }
+          : null;
+      const explicitBenefitPrice = config ? Number(sku[config.priceField]) : null;
+      const observedBenefitPrice = config && isVerifiedBenefitPrice(normalPrice, explicitBenefitPrice)
+        ? explicitBenefitPrice
+        : config && isVerifiedBenefitPrice(normalPrice, displayedPrice)
+          ? displayedPrice
+          : null;
+      if (config && observedBenefitPrice) {
+        const discountAmount = Number((normalPrice - observedBenefitPrice).toFixed(2));
+        current[config.priceField] = observedBenefitPrice;
+        current[config.statusField] = "available";
+        current[config.discountField] = Number(sku[config.discountField]) > 0 ? sku[config.discountField] : discountAmount;
+        current[config.inferenceField] = sku[config.inferenceField] || {
+          normalPrice,
+          benefitPrice: observedBenefitPrice,
+          benefitDiscountAmount: discountAmount,
+          accountType,
+          formula: `普通价 ${normalPrice.toFixed(2)} - ${config.discountLabel} ${discountAmount.toFixed(2)} = ${observedBenefitPrice.toFixed(2)}`,
+          source: "cross-account-observation",
+        };
+        current.priceCalculation = {
+          ...(current.priceCalculation || {}),
+          [config.calculationField]: current[config.inferenceField].formula,
+        };
+        current.priceLayers = [...(current.priceLayers || [])];
+        if (!current.priceLayers.some((layer) => layer.label === config.label && Number(layer.value) === observedBenefitPrice)) {
+          current.priceLayers.push({ label: config.label, value: observedBenefitPrice, kind: "price", source: "cross-account-observation" });
+        }
+      }
+      if (accountType !== "normal" && Number(sku.coinPrice) > 0) {
+        current.coinPrice = sku.coinPrice;
+        current.coinStatus = sku.coinStatus;
+        current.coinDiscountAmount = sku.coinDiscountAmount;
+        current.priceCalculation = { ...(current.priceCalculation || {}), coin: sku.priceCalculation?.coin || current.priceCalculation?.coin };
+      }
       current.accountPrices.push({
         sessionId: entry.session?.id || "guest",
         accountName: entry.session?.name || "未登录前台",
-        accountType: entry.session?.accountType || "normal",
+        accountType,
         price: sku.price,
-        normalPrice: sku.normalPrice,
+        normalPrice,
         surprisePrice: sku.surprisePrice,
-        giftPrice: sku.giftPrice,
-        giftDiscountAmount: sku.giftDiscountAmount,
-        vipPrice: sku.vipPrice,
-        vipDiscountAmount: sku.vipDiscountAmount,
+        giftPrice: accountType === "gift" ? observedBenefitPrice : sku.giftPrice,
+        giftDiscountAmount: accountType === "gift" && observedBenefitPrice ? Number((normalPrice - observedBenefitPrice).toFixed(2)) : sku.giftDiscountAmount,
+        vipPrice: accountType === "vip88" ? observedBenefitPrice : sku.vipPrice,
+        vipDiscountAmount: accountType === "vip88" && observedBenefitPrice ? Number((normalPrice - observedBenefitPrice).toFixed(2)) : sku.vipDiscountAmount,
         coinPrice: sku.coinPrice,
         originalPrice: sku.originalPrice,
         priceCalculation: sku.priceCalculation,
@@ -262,7 +320,7 @@ function mergeAccountSnapshots(snapshots) {
         `${item.label}:${item.amount ?? ""}:${item.threshold ?? ""}:${item.text}`,
         item,
       ])).values());
-      bySkuId.set(sku.skuId, current);
+      bySkuId.set(skuId, current);
     }
   }
   merged.skuPrices = Array.from(bySkuId.values());
@@ -273,7 +331,29 @@ function mergeAccountSnapshots(snapshots) {
     price: entry.snapshot.price,
     priceRange: entry.snapshot.priceRange,
   }));
+  const normalPrices = merged.skuPrices.map((sku) => Number(sku.normalPrice ?? sku.price)).filter(Number.isFinite);
+  merged.price = merged.skuPrices[0]?.normalPrice ?? merged.skuPrices[0]?.price ?? merged.price;
+  merged.priceRange = normalPrices.length ? [Math.min(...normalPrices), Math.max(...normalPrices)] : merged.priceRange;
+  merged.rawSignals = { ...merged.rawSignals, accountCaptureCount: snapshots.length };
   return merged;
+}
+
+export function sessionsForProduct(activeSessions, accountType = "normal", rotation = 0) {
+  const rotate = (sessions) => sessions.length
+    ? [...sessions.slice(rotation % sessions.length), ...sessions.slice(0, rotation % sessions.length)]
+    : [];
+  const normal = rotate(activeSessions.filter((session) => (session.accountType || "normal") === "normal"));
+  if (accountType === "normal") return normal;
+  return [...normal, ...rotate(activeSessions.filter((session) => session.accountType === accountType))];
+}
+
+export function hasTrustedAccountBaseline(snapshots, accountType = "normal") {
+  if (accountType === "normal" || snapshots.some((entry) => (entry.session?.accountType || "normal") === "normal")) return true;
+  return snapshots.some((entry) => (entry.snapshot.skuPrices || []).some((sku) => (
+    accountType === "gift"
+      ? isVerifiedBenefitPrice(sku.giftInference?.normalPrice, sku.giftPrice)
+      : isVerifiedBenefitPrice(sku.vipInference?.normalPrice, sku.vipPrice)
+  )));
 }
 
 function buyerShowKey(item) {
@@ -366,34 +446,39 @@ export async function captureProduct(product, authSessions = [], { captureProtec
     if (!sessions.length) throw new Error("该账号池正处于本地采集保护冷却期。这是软件控制抓取频率，不代表淘宝账号被风控；请等待倒计时结束或手动解除冷却。");
     const snapshots = [];
     const accountErrors = [];
-    for (const session of sessions.slice(0, 2)) {
-      if (session) session.lastUsedAt = new Date().toISOString();
-      try {
-        const capturedSnapshot = await scrapeTmallProduct(product, session);
-        snapshots.push({
-          session,
-          snapshot: preserveVerifiedAccountPrices(capturedSnapshot, product.knownPriceSnapshot || product.lastSnapshot, session?.accountType || product.accountType || "normal"),
-        });
-        if (session) {
-          session.lastSuccessAt = new Date().toISOString();
-          session.consecutiveFailures = 0;
-          session.cooldownUntil = null;
-          session.healthStatus = "healthy";
-          session.loginStatus = "valid";
-        }
-        break;
-      } catch (error) {
-        accountErrors.push({ sessionId: session?.id || "guest", accountName: session?.name || "未登录前台", message: error.message });
-        if (session) {
-          session.lastFailureAt = new Date().toISOString();
-          session.consecutiveFailures = Number(session.consecutiveFailures || 0) + 1;
-          if (isRiskControlError(error.message)) {
-            const cooldownMs = riskCooldownMs(captureProtectionMinutes);
-            session.cooldownUntil = cooldownMs > 0 ? new Date(Date.now() + cooldownMs).toISOString() : null;
-            session.healthStatus = cooldownMs > 0 ? "cooldown" : "degraded";
-            if (/登录|验证|captcha|滑块/i.test(error.message)) session.loginStatus = "expired";
-          } else {
-            session.healthStatus = "degraded";
+    const sessionGroups = sessions[0] === null
+      ? [[null]]
+      : Array.from(Map.groupBy(sessions, (session) => session.accountType || "normal").values());
+    for (const group of sessionGroups) {
+      for (const session of group.slice(0, 2)) {
+        if (session) session.lastUsedAt = new Date().toISOString();
+        try {
+          const capturedSnapshot = await scrapeTmallProduct(product, session);
+          snapshots.push({
+            session,
+            snapshot: preserveVerifiedAccountPrices(capturedSnapshot, product.knownPriceSnapshot || product.lastSnapshot, session?.accountType || product.accountType || "normal"),
+          });
+          if (session) {
+            session.lastSuccessAt = new Date().toISOString();
+            session.consecutiveFailures = 0;
+            session.cooldownUntil = null;
+            session.healthStatus = "healthy";
+            session.loginStatus = "valid";
+          }
+          break;
+        } catch (error) {
+          accountErrors.push({ sessionId: session?.id || "guest", accountName: session?.name || "未登录前台", message: error.message });
+          if (session) {
+            session.lastFailureAt = new Date().toISOString();
+            session.consecutiveFailures = Number(session.consecutiveFailures || 0) + 1;
+            if (isRiskControlError(error.message)) {
+              const cooldownMs = riskCooldownMs(captureProtectionMinutes);
+              session.cooldownUntil = cooldownMs > 0 ? new Date(Date.now() + cooldownMs).toISOString() : null;
+              session.healthStatus = cooldownMs > 0 ? "cooldown" : "degraded";
+              if (/登录|验证|captcha|滑块/i.test(error.message)) session.loginStatus = "expired";
+            } else {
+              session.healthStatus = "degraded";
+            }
           }
         }
       }
@@ -406,6 +491,10 @@ export async function captureProduct(product, authSessions = [], { captureProtec
       }
     }
     if (!snapshots.length) throw new Error(accountErrors.map((error) => `${error.accountName}：${error.message}`).join("；"));
+    const targetAccountType = product.accountType || "normal";
+    if (!hasTrustedAccountBaseline(snapshots, targetAccountType)) {
+      throw new Error(`${targetAccountType === "gift" ? "礼金" : "88VIP"}价格缺少普通账号基准，本次结果已拒绝保存，避免把标价误当普通价。请检查普通账号登录后重试。`);
+    }
     const snapshot = mergeAccountSnapshots(snapshots);
     snapshot.buyerShows = mergeBuyerShowHistory(snapshot.buyerShows, product.lastSnapshot?.buyerShows);
     if (snapshot.rawSignals) snapshot.rawSignals.buyerShowCount = snapshot.buyerShows.length;
@@ -459,9 +548,7 @@ async function runMonitorUnlocked({ source = "manual", productIds = null, includ
       knownPriceSnapshot: historicalAccountPriceSnapshot(data.snapshots, product.id, product.accountType || "normal"),
     };
     const accountType = product.accountType || "normal";
-    const matchingSessions = activeSessions.filter((session) => (session.accountType || "normal") === accountType);
-    const rotation = matchingSessions.length ? productIndex % matchingSessions.length : 0;
-    const productSessions = [...matchingSessions.slice(rotation), ...matchingSessions.slice(0, rotation)];
+    const productSessions = sessionsForProduct(activeSessions, accountType, productIndex);
     return captureProduct(captureCandidate, productSessions, {
       captureProtectionMinutes: resolveCaptureProtectionMinutes(data.monitor, accountType),
       ignoreProtection,
@@ -526,7 +613,7 @@ async function runProductUnlocked(productId, { source = "single-product" } = {})
 
   const activeSessions = data.authSessions.filter((session) => (session.enabled ?? session.active ?? true) && session.loginStatus !== "expired");
   const accountType = product.accountType || "normal";
-  const productSessions = activeSessions.filter((session) => (session.accountType || "normal") === accountType);
+  const productSessions = sessionsForProduct(activeSessions, accountType);
   const result = await captureProduct({
     ...product,
     knownPrimaryImages: historicalPrimaryImages(data.snapshots, product.id),

@@ -218,6 +218,15 @@ test("applyNetworkPromoData maps explicit surprise prices to their response SKU"
   assert.equal(skus[1].surprisePrice, null);
 });
 
+test("applyNetworkPromoData keeps explicit gift and 88VIP prices in their own account channels", () => {
+  const base = [{ skuId: "sku-1", price: 179, normalPrice: 179, priceLayers: [], discountItems: [] }];
+  const [gift] = applyNetworkPromoData(base, [{ body: JSON.stringify({ data: { skuId: "sku-1", benefit: { title: "首单礼金价", priceText: "126" } } }) }], { accountType: "gift" });
+  const [vip] = applyNetworkPromoData(base, [{ body: JSON.stringify({ data: { skuId: "sku-1", benefit: { title: "88VIP会员价", priceText: "169" } } }) }], { accountType: "vip88" });
+
+  assert.deepEqual({ normal: gift.normalPrice, gift: gift.giftPrice, surprise: gift.surprisePrice }, { normal: 179, gift: 126, surprise: null });
+  assert.deepEqual({ normal: vip.normalPrice, vip: vip.vipPrice, gift: vip.giftPrice }, { normal: 179, vip: 169, gift: undefined });
+});
+
 test("applyNetworkPromoData reads SKU-keyed JSONP without sharing prices", () => {
   const skus = applyNetworkPromoData([
     { skuId: "a12345", normalPrice: 489, surprisePrice: null, priceLayers: [], discountItems: [] },
@@ -349,6 +358,20 @@ test("account benefit fallback restores normal price from named promotions", () 
   assert.equal(vipSku.normalPrice, 79);
   assert.equal(vipSku.vipPrice, 75);
   assert.equal(vipSku.vipDiscountAmount, 4);
+
+  const [normalSku] = applyAccountBenefitFormula([{ ...baseSku, originalPrice: 909, normalPrice: 489, price: 489, discountItems: [
+    { label: "超级立减", amount: 137, text: "超级立减137元" },
+    { label: "限时立减", amount: 243, text: "限时立减243元" },
+  ] }], "normal");
+  assert.equal(normalSku.normalPrice, 529);
+  assert.equal(normalSku.surprisePrice, 489);
+
+  const [roundingOnly] = applyAccountBenefitFormula([{ ...baseSku, originalPrice: 309, normalPrice: 178.99, price: 178.99, discountItems: [
+    { label: "超级立减", amount: 41, text: "超级立减41元" },
+    { label: "限时立减", amount: 89, text: "限时立减89元" },
+  ] }], "normal");
+  assert.equal(roundingOnly.normalPrice, 178.99);
+  assert.equal(roundingOnly.surprisePrice, undefined);
 });
 
 test("gift telemetry calculates both normal and gift prices when the page only shows list price", () => {

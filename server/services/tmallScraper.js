@@ -1203,10 +1203,10 @@ function collectSkuScopedPromoData(value, knownSkuIds) {
   };
   const record = (skuId, node) => {
     const target = ensure(skuId);
-    for (const layer of collectPromoPriceLayers(node).filter((layer) => /惊喜立减|惊喜价/i.test(layer.label))) {
+    for (const layer of collectPromoPriceLayers(node)) {
       pushPriceLayer(target.layers, { ...layer, source: "network-sku" });
     }
-    target.discountItems.push(...collectDiscountItems(node).filter((item) => /惊喜立减/i.test(`${item.label} ${item.text}`)));
+    target.discountItems.push(...collectDiscountItems(node));
     target.surprisePrices.push(...collectVisibleSurprisePrices(JSON.stringify(node)));
     target.surpriseInference ||= inferSurpriseScenario(node);
   };
@@ -1257,10 +1257,13 @@ export function applyNetworkPromoData(skuPrices, networkPayloads = [], options =
     const explicitPrices = Array.from(new Set(data.surprisePrices));
     const currentNormalPrice = Number(sku.normalPrice ?? sku.price);
     const accountBenefit = {
-      normal: { label: "惊喜立减", layerLabel: "惊喜立减价", priceField: "surprisePrice", statusField: "surpriseStatus", discountField: "surpriseDiscountAmount", inferenceField: "surpriseInference", benefitCodes: [/^spsd4jzjj$/] },
-      gift: { label: "礼金优惠", layerLabel: "礼金价", priceField: "giftPrice", statusField: "giftStatus", discountField: "giftDiscountAmount", inferenceField: "giftInference", benefitCodes: [/^1$/] },
-      vip88: { label: "88VIP优惠", layerLabel: "88VIP价", priceField: "vipPrice", statusField: "vipStatus", discountField: "vipDiscountAmount", inferenceField: "vipInference", benefitCodes: [/88|vip|member/i] },
+      normal: { label: "惊喜立减", layerLabel: "惊喜立减价", priceField: "surprisePrice", statusField: "surpriseStatus", discountField: "surpriseDiscountAmount", inferenceField: "surpriseInference", benefitCodes: [/^spsd4jzjj$/], layerPattern: /惊喜立减|惊喜价/i },
+      gift: { label: "礼金优惠", layerLabel: "礼金价", priceField: "giftPrice", statusField: "giftStatus", discountField: "giftDiscountAmount", inferenceField: "giftInference", benefitCodes: [/^1$/], layerPattern: /首单|礼金/i },
+      vip88: { label: "88VIP优惠", layerLabel: "88VIP价", priceField: "vipPrice", statusField: "vipStatus", discountField: "vipDiscountAmount", inferenceField: "vipInference", benefitCodes: [/88|vip|member/i], layerPattern: /88|会员|VIP/i },
     }[accountType] || null;
+    const explicitBenefitLayer = accountBenefit
+      ? priceLayers.find((layer) => accountBenefit.layerPattern.test(layer.label) && layer.kind !== "discount")
+      : null;
     const inferredPromotionPrice = Number(data.surpriseInference?.price);
     const encodedBenefitDiscount = accountBenefit
       ? Object.entries(data.surpriseInference?.reductions || {}).find(([code]) => accountBenefit.benefitCodes.some((pattern) => pattern.test(code)))?.[1]
@@ -1292,10 +1295,13 @@ export function applyNetworkPromoData(skuPrices, networkPayloads = [], options =
       `${item.label}:${item.amount ?? ""}:${item.threshold ?? ""}:${item.text}`,
       item,
     ])).values());
-    const accountFields = benefitInference ? {
-      [accountBenefit.priceField]: inferredBenefitPrice,
+    const resolvedBenefitPrice = benefitInference?.benefitPrice || explicitBenefitLayer?.value || null;
+    const resolvedBenefitDiscount = benefitInference?.benefitDiscountAmount
+      || (resolvedBenefitPrice && currentNormalPrice > resolvedBenefitPrice ? Number((currentNormalPrice - resolvedBenefitPrice).toFixed(2)) : null);
+    const accountFields = resolvedBenefitPrice && accountBenefit ? {
+      [accountBenefit.priceField]: resolvedBenefitPrice,
       [accountBenefit.statusField]: "available",
-      [accountBenefit.discountField]: benefitDiscountAmount,
+      [accountBenefit.discountField]: resolvedBenefitDiscount,
       [accountBenefit.inferenceField]: benefitInference,
     } : {};
     return {
@@ -1313,6 +1319,7 @@ export function applyNetworkPromoData(skuPrices, networkPayloads = [], options =
 
 export function applyAccountBenefitFormula(skuPrices, accountType) {
   const config = {
+    normal: { label: "惊喜立减", layerLabel: "惊喜立减价", priceField: "surprisePrice", statusField: "surpriseStatus", discountField: "surpriseDiscountAmount", inferenceField: "surpriseInference" },
     gift: { label: "礼金优惠", layerLabel: "礼金价", priceField: "giftPrice", statusField: "giftStatus", discountField: "giftDiscountAmount", inferenceField: "giftInference" },
     vip88: { label: "88VIP优惠", layerLabel: "88VIP价", priceField: "vipPrice", statusField: "vipStatus", discountField: "vipDiscountAmount", inferenceField: "vipInference" },
   }[accountType];
@@ -1330,7 +1337,7 @@ export function applyAccountBenefitFormula(skuPrices, accountType) {
     const promotionDiscount = items.reduce((sum, item) => sum + item.amount, 0);
     const normalPrice = Number((originalPrice - promotionDiscount).toFixed(2));
     const benefitDiscountAmount = Number((normalPrice - benefitPrice).toFixed(2));
-    if (!(normalPrice > benefitPrice && normalPrice <= originalPrice && benefitDiscountAmount > 0)) return sku;
+    if (!(normalPrice > benefitPrice && normalPrice <= originalPrice && benefitDiscountAmount > 0.05)) return sku;
     const normalFormula = `标价 ${originalPrice.toFixed(2)}${items.map((item) => ` - ${item.label} ${item.amount.toFixed(2)}`).join("")} = 普通价 ${normalPrice.toFixed(2)}`;
     const inference = {
       basePrice: originalPrice,
@@ -1361,21 +1368,13 @@ export function applyAccountBenefitFormula(skuPrices, accountType) {
 
 async function fetchMobilePromotionPayloads(itemId, skuPrices, authSession) {
   if (authSession?.source !== "taobao-browser") return [];
-  const payloads = [];
-  const groupSize = authSession.accountType === "normal" ? 5 : 1;
-  for (let index = 0; index < skuPrices.length; index += groupSize) {
-    const group = skuPrices.slice(index, index + groupSize);
-    const pages = await Promise.all(group.map(async (sku) => {
-      const desktopProductUrl = `https://detail.tmall.com/item.htm?id=${encodeURIComponent(itemId)}`;
-      try {
-        return await getRenderedHtml(desktopProductUrl, authSession, { selectSkuName: sku.name });
-      } catch {
-        return null;
-      }
-    }));
-    for (const page of pages.filter(Boolean)) payloads.push(...(page.networkPayloads || []));
+  const desktopProductUrl = `https://detail.tmall.com/item.htm?id=${encodeURIComponent(itemId)}`;
+  try {
+    const page = await getRenderedHtml(desktopProductUrl, authSession, { selectSkuNames: skuPrices.map((sku) => sku.name) });
+    return page.networkPayloads || [];
+  } catch {
+    return [];
   }
-  return payloads;
 }
 
 export function collectProductProgramItems(value) {
@@ -1691,7 +1690,8 @@ export async function scrapeTmallProduct(product, authSession) {
     throw new Error("当前抓到的是登录页，请在账号授权中重新同步淘宝扫码会话。");
   }
   const structuredSku = extractStructuredSku(html);
-  structuredSku.skuPrices = applyNetworkPromoData(structuredSku.skuPrices, page.networkPayloads);
+  const accountType = authSession?.accountType || "normal";
+  structuredSku.skuPrices = applyNetworkPromoData(structuredSku.skuPrices, page.networkPayloads, { accountType });
   const mobilePromotionPayloads = await fetchMobilePromotionPayloads(itemId, structuredSku.skuPrices, authSession);
   const visibleText = page.visibleText || cheerio.load(html)("body").text();
   const visibleDiscountItems = collectDiscountItemsFromText(visibleText);
@@ -1703,7 +1703,6 @@ export async function scrapeTmallProduct(product, authSession) {
     selectedSkuId,
   );
   structuredSku.skuPrices = applyProductProgramItems(structuredSku.skuPrices, collectProductProgramItems(html));
-  const accountType = authSession?.accountType || "normal";
   structuredSku.skuPrices = structuredSku.skuPrices.map((sku) => calculateAccountPriceScenario(applyAppliedCoinDiscount(sku), accountType));
   structuredSku.skuPrices = applyAccountBenefitFormula(structuredSku.skuPrices, authSession?.accountType);
   structuredSku.skuPrices = applyNetworkPromoData(structuredSku.skuPrices, mobilePromotionPayloads, { accountType: authSession?.accountType || "normal" })
@@ -1722,7 +1721,8 @@ export async function scrapeTmallProduct(product, authSession) {
     cookie: page.cookieHeader || authSession?.cookie || "",
   }, product.url);
   if (mobileDetailData) {
-    structuredSku.skuPrices = applyNetworkPromoData(structuredSku.skuPrices, [JSON.stringify(mobileDetailData)]);
+    structuredSku.skuPrices = applyNetworkPromoData(structuredSku.skuPrices, [JSON.stringify(mobileDetailData)], { accountType })
+      .map((sku) => calculateAccountPriceScenario(sku, accountType));
   }
   const knownPrimaryImages = [
     ...(product.knownPrimaryImages || []),
@@ -1800,6 +1800,7 @@ export async function scrapeTmallProduct(product, authSession) {
       priceCount: allPrices.length,
       highResImageCount: mainImages.length + media.detailImages.length,
       networkPriceResponseCount: page.networkPayloads?.length || 0,
+      mobilePromotionResponseCount: mobilePromotionPayloads.length,
     },
   };
 }

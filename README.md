@@ -5,7 +5,7 @@
 ## 使用说明
 
 - [中文使用说明书](docs/USER_GUIDE.md)
-- [Windows、macOS 安装包下载](https://github.com/PMZPZM0/ecom-competitor-monitor/releases/tag/v1.0.0)
+- [Windows、macOS 安装包下载](https://github.com/PMZPZM0/ecom-competitor-monitor/releases/latest)
 
 ## 界面预览
 
