@@ -1103,11 +1103,21 @@ export async function startServer({ host = "127.0.0.1", port = Number(process.en
   const address = server.address();
   const actualPort = typeof address === "object" && address ? address.port : port;
   console.log(`电商竞品监控服务已启动：http://${host}:${actualPort}`);
-  readDb()
-    .then((db) => Promise.allSettled(db.authSessions
-      .filter((session) => session.source === "taobao-browser" && (session.enabled ?? session.active ?? true))
-      .map((session) => keepAccountBrowserWarm(session))))
-    .catch((error) => console.error("[browser-warmup]", error));
+  const eagerBrowserWarmup = process.env.ECOM_MONITOR_EAGER_BROWSER_WARMUP === "1"
+    || (process.env.ECOM_MONITOR_EAGER_BROWSER_WARMUP !== "0" && process.platform !== "darwin");
+  if (eagerBrowserWarmup) {
+    const warmupTimer = setTimeout(() => {
+      readDb()
+        .then(async (db) => {
+          for (const session of db.authSessions.filter((item) => item.source === "taobao-browser" && (item.enabled ?? item.active ?? true))) {
+            await keepAccountBrowserWarm(session);
+            await new Promise((resolve) => setTimeout(resolve, 750));
+          }
+        })
+        .catch((error) => console.error("[browser-warmup]", error));
+    }, 3000);
+    warmupTimer.unref?.();
+  }
   return server;
 }
 

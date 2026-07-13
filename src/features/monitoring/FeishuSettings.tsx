@@ -25,7 +25,7 @@ export function FeishuAuthorization({ feishu, products, onSave }: FeishuAuthoriz
     let active = true
     const refreshCli = () => api.larkCliStatus().then((status) => { if (active) setCli(status) }).catch(() => undefined)
     refreshCli()
-    const timer = window.setInterval(refreshCli, 3000)
+    const timer = window.setInterval(refreshCli, 10_000)
     return () => { active = false; window.clearInterval(timer) }
   }, [])
 

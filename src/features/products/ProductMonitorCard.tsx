@@ -1,5 +1,5 @@
 import { BellRing, CalendarClock, Check, Coins, Copy, Download, ExternalLink, Images, PauseCircle, PlayCircle, ReceiptText, RotateCw, Save, TimerReset, Trash2 } from 'lucide-react'
-import { lazy, Suspense, useEffect, useState } from 'react'
+import { lazy, Suspense, useEffect, useRef, useState } from 'react'
 import { Badge } from '../../components/ui/badge'
 import { Button } from '../../components/ui/button'
 import { api } from '../../lib/api'
@@ -90,7 +90,7 @@ function CaptureStatus({ product }: { product: Product }) {
   )
 }
 
-function SkuPricePanel({ product, snapshots, onPreview, onSaveSkuMonitorPrice }: { product: Product; snapshots: Snapshot[]; onPreview: (preview: Preview) => void; onSaveSkuMonitorPrice: (skuId: string, value: number | null) => Promise<void> }) {
+function SkuPricePanel({ product, snapshots, showTrend, onPreview, onSaveSkuMonitorPrice }: { product: Product; snapshots: Snapshot[]; showTrend: boolean; onPreview: (preview: Preview) => void; onSaveSkuMonitorPrice: (skuId: string, value: number | null) => Promise<void> }) {
   const [copiedSkuId, setCopiedSkuId] = useState('')
   const [copiedSkuNameId, setCopiedSkuNameId] = useState('')
   const [detailSku, setDetailSku] = useState<SkuPrice | null>(null)
@@ -263,9 +263,11 @@ function SkuPricePanel({ product, snapshots, onPreview, onSaveSkuMonitorPrice }:
         })}
         {skuPrices.length === 0 && <div className="rounded-md border border-dashed border-slate-200 p-5 text-center text-sm text-slate-400">暂无 SKU 数据，点击抓取后更新。</div>}
       </div>
-      <Suspense fallback={<div className="mt-3 h-32 animate-pulse rounded-md bg-slate-50" />}>
-        <SkuPriceTrend snapshots={snapshots} product={product} />
-      </Suspense>
+      {showTrend && (
+        <Suspense fallback={<div className="mt-3 h-32 animate-pulse rounded-md bg-slate-50" />}>
+          <SkuPriceTrend snapshots={snapshots} product={product} />
+        </Suspense>
+      )}
       <DiscountDetailDialog
         sku={detailSku}
         accountType={product.accountType || 'normal'}
@@ -276,7 +278,28 @@ function SkuPricePanel({ product, snapshots, onPreview, onSaveSkuMonitorPrice }:
   )
 }
 
+function CaptureButton({ busy, captureProtectionUntil, onCapture }: { busy?: boolean; captureProtectionUntil?: string | null; onCapture: () => void }) {
+  const [clock, setClock] = useState(() => Date.now())
+  const protectionRemaining = captureProtectionUntil ? Math.max(0, new Date(captureProtectionUntil).getTime() - clock) : 0
+
+  useEffect(() => {
+    if (!captureProtectionUntil || new Date(captureProtectionUntil).getTime() <= Date.now()) return undefined
+    setClock(Date.now())
+    const timer = window.setInterval(() => setClock(Date.now()), 1000)
+    return () => window.clearInterval(timer)
+  }, [captureProtectionUntil])
+
+  return (
+    <Button type="button" variant="secondary" onClick={onCapture} disabled={busy || protectionRemaining > 0} title={protectionRemaining > 0 ? '本软件设置的采集频率保护倒计时，不代表淘宝账号触发风控。' : '抓取当前商品'}>
+      {protectionRemaining > 0 ? <TimerReset className="h-4 w-4" /> : <RotateCw className="h-4 w-4" />}
+      {busy ? '抓取中' : protectionRemaining > 0 ? `采集保护 ${formatProtectionCountdown(protectionRemaining)}` : '抓取'}
+    </Button>
+  )
+}
+
 export function ProductMonitorCard({ product, monitor, onToggle, onSchedule, onCapture, onDelete, busy, onPreview, compactContext = false, captureProtectionUntil }: Props) {
+  const cardRef = useRef<HTMLElement | null>(null)
+  const [trendVisible, setTrendVisible] = useState(false)
   const [copiedTitle, setCopiedTitle] = useState(false)
   const [copiedItemId, setCopiedItemId] = useState(false)
   const [copiedProductUrl, setCopiedProductUrl] = useState(false)
@@ -289,8 +312,6 @@ export function ProductMonitorCard({ product, monitor, onToggle, onSchedule, onC
   const [scheduleDateDraft, setScheduleDateDraft] = useState(() => scheduleInputParts(product.monitorStartAt, product.nextMonitorAt, initialIntervalMinutes).date)
   const [scheduleTimeDraft, setScheduleTimeDraft] = useState(() => scheduleInputParts(product.monitorStartAt, product.nextMonitorAt, initialIntervalMinutes).time)
   const [snapshots, setSnapshots] = useState<Snapshot[]>([])
-  const [clock, setClock] = useState(() => Date.now())
-  const protectionRemaining = captureProtectionUntil ? Math.max(0, new Date(captureProtectionUntil).getTime() - clock) : 0
   const { primary, gallery } = productImages(product)
   const detailImages = productDetailImages(product)
   const videos = productVideos(product)
@@ -312,6 +333,23 @@ export function ProductMonitorCard({ product, monitor, onToggle, onSchedule, onC
       : 'border-sky-200 bg-sky-50 text-sky-700'
 
   useEffect(() => {
+    if (trendVisible) return undefined
+    const card = cardRef.current
+    if (!card || !('IntersectionObserver' in window)) {
+      setTrendVisible(true)
+      return undefined
+    }
+    const observer = new IntersectionObserver(([entry]) => {
+      if (!entry?.isIntersecting) return
+      setTrendVisible(true)
+      observer.disconnect()
+    }, { rootMargin: '320px 0px' })
+    observer.observe(card)
+    return () => observer.disconnect()
+  }, [trendVisible])
+
+  useEffect(() => {
+    if (!trendVisible) return undefined
     let active = true
     api.productSnapshots(product.id)
       .then((history) => {
@@ -323,14 +361,7 @@ export function ProductMonitorCard({ product, monitor, onToggle, onSchedule, onC
     return () => {
       active = false
     }
-  }, [product.id, product.updatedAt])
-
-  useEffect(() => {
-    if (!captureProtectionUntil || new Date(captureProtectionUntil).getTime() <= Date.now()) return undefined
-    setClock(Date.now())
-    const timer = window.setInterval(() => setClock(Date.now()), 1000)
-    return () => window.clearInterval(timer)
-  }, [captureProtectionUntil])
+  }, [product.id, product.updatedAt, trendVisible])
 
   useEffect(() => {
     const parts = scheduleInputParts(product.monitorStartAt, product.nextMonitorAt, product.monitorIntervalMinutes ?? monitor.intervalMinutes)
@@ -410,7 +441,7 @@ export function ProductMonitorCard({ product, monitor, onToggle, onSchedule, onC
   }
 
   return (
-    <article className="rounded-md border border-slate-200/80 bg-white p-4 shadow-sm">
+    <article ref={cardRef} className="rounded-md border border-slate-200/80 bg-white p-4 shadow-sm" style={{ contentVisibility: 'auto', containIntrinsicSize: '1000px' }}>
       <div className="flex min-w-0 items-start gap-3">
         {!compactContext && <ShopLogo src={shopLogo} />}
         <div className="min-w-0 flex-1">
@@ -503,7 +534,7 @@ export function ProductMonitorCard({ product, monitor, onToggle, onSchedule, onC
           <CaptureStatus product={product} />
         </div>
 
-        <SkuPricePanel product={product} snapshots={snapshots} onPreview={onPreview} onSaveSkuMonitorPrice={saveSkuMonitorPrice} />
+        <SkuPricePanel product={product} snapshots={snapshots} showTrend={trendVisible} onPreview={onPreview} onSaveSkuMonitorPrice={saveSkuMonitorPrice} />
       </div>
 
       <div className="mt-4 flex flex-wrap items-center justify-between gap-3 border-t border-slate-100 pt-3">
@@ -557,10 +588,7 @@ export function ProductMonitorCard({ product, monitor, onToggle, onSchedule, onC
       </div>
 
       <div className="mt-2 flex flex-wrap items-center gap-2">
-        <Button type="button" variant="secondary" onClick={() => onCapture(product)} disabled={busy || protectionRemaining > 0} title={protectionRemaining > 0 ? '本软件设置的采集频率保护倒计时，不代表淘宝账号触发风控。' : '抓取当前商品'}>
-          {protectionRemaining > 0 ? <TimerReset className="h-4 w-4" /> : <RotateCw className="h-4 w-4" />}
-          {busy ? '抓取中' : protectionRemaining > 0 ? `采集保护 ${formatProtectionCountdown(protectionRemaining)}` : '抓取'}
-        </Button>
+        <CaptureButton busy={busy} captureProtectionUntil={captureProtectionUntil} onCapture={() => onCapture(product)} />
         <Button type="button" variant="ghost" onClick={() => onToggle(product)}>
           {product.enabled ? <PauseCircle className="h-4 w-4" /> : <PlayCircle className="h-4 w-4" />}
           {product.enabled ? '暂停监控' : '启用监控'}

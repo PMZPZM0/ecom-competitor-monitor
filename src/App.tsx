@@ -46,9 +46,16 @@ function App() {
   }
 
   useEffect(() => {
+    const refreshWhenVisible = () => {
+      if (document.visibilityState === 'visible') refresh().catch(() => undefined)
+    }
     refresh().catch((err) => setError(err.message))
-    const timer = window.setInterval(() => refresh().catch(() => undefined), 30_000)
-    return () => window.clearInterval(timer)
+    const timer = window.setInterval(refreshWhenVisible, 60_000)
+    document.addEventListener('visibilitychange', refreshWhenVisible)
+    return () => {
+      window.clearInterval(timer)
+      document.removeEventListener('visibilitychange', refreshWhenVisible)
+    }
   }, [])
 
   useEffect(() => {
