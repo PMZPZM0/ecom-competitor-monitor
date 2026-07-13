@@ -1,6 +1,6 @@
 appId: com.ecommerce.competitor-monitor
 productName: 电商竞品监控
-artifactName: ${productName}-${version}-${os}-${arch}.${ext}
+artifactName: EcomMonitor-${version}-${os}-${arch}.${ext}
 directories:
   output: release
 files:
