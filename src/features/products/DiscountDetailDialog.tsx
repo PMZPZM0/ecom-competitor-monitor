@@ -1,5 +1,6 @@
 import { ArrowDown, ReceiptText, X } from 'lucide-react'
 import { useEffect } from 'react'
+import { createPortal } from 'react-dom'
 import { currency } from '../../lib/utils'
 import type { Product } from '../../types/domain'
 import { accountBenefitForSku, coinBenefitForSku, displayPriceLabel, normalPriceForSku, priceLayersForSku, surpriseBenefitForSku, type SkuPrice } from './productDisplayUtils'
@@ -17,11 +18,16 @@ export function DiscountDetailDialog({
 }) {
   useEffect(() => {
     if (!sku) return
+    const previousOverflow = document.body.style.overflow
     const closeOnEscape = (event: KeyboardEvent) => {
       if (event.key === 'Escape') onClose()
     }
+    document.body.style.overflow = 'hidden'
     window.addEventListener('keydown', closeOnEscape)
-    return () => window.removeEventListener('keydown', closeOnEscape)
+    return () => {
+      document.body.style.overflow = previousOverflow
+      window.removeEventListener('keydown', closeOnEscape)
+    }
   }, [sku, onClose])
 
   if (!sku) return null
@@ -89,16 +95,16 @@ export function DiscountDetailDialog({
       .map(({ price, value }) => ({ label: displayPriceLabel('', price.accountType), value: value as number, source: `账号：${price.accountName}` })),
   ].filter((price, index, list) => list.findIndex((item) => item.label === price.label && item.value === price.value) === index)
 
-  return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/55 p-4" role="presentation" onMouseDown={onClose}>
+  return createPortal(
+    <div className="fixed inset-0 z-[100] flex items-center justify-center overflow-hidden bg-slate-950/70 p-3 sm:p-6" role="presentation" onMouseDown={onClose}>
       <section
         role="dialog"
         aria-modal="true"
         aria-labelledby={`discount-title-${sku.skuId}`}
-        className="max-h-[calc(100vh-2rem)] w-full max-w-xl overflow-y-auto rounded-md bg-white shadow-2xl"
+        className="flex h-[calc(100dvh-1.5rem)] max-h-[880px] w-full max-w-3xl flex-col overflow-hidden rounded-md bg-white shadow-2xl sm:h-[calc(100dvh-3rem)]"
         onMouseDown={(event) => event.stopPropagation()}
       >
-        <header className="flex items-start justify-between gap-4 border-b border-slate-100 px-5 py-4">
+        <header className="flex shrink-0 items-start justify-between gap-4 border-b border-slate-100 px-5 py-4">
           <div className="flex min-w-0 items-start gap-3">
             <span className="inline-flex h-9 w-9 shrink-0 items-center justify-center rounded-md bg-sky-50 text-sky-700">
               <ReceiptText className="h-4 w-4" />
@@ -114,7 +120,7 @@ export function DiscountDetailDialog({
           </button>
         </header>
 
-        <div className="px-5 py-4">
+        <div className="scrollbar-thin min-h-0 flex-1 overflow-y-auto px-5 py-4">
           <div className="mb-3 flex items-center justify-between gap-3">
             <h3 className="text-xs font-semibold text-slate-800">优惠计算层级</h3>
             {totalDiscount > 0 && <span className="text-[11px] font-medium text-emerald-700">标价差额 {currency(totalDiscount)}</span>}
@@ -211,6 +217,7 @@ export function DiscountDetailDialog({
           {totalDiscount === 0 && <div className="mt-3 text-xs text-slate-400">当前标价与到手价相同，未识别到有效优惠差额。</div>}
           </div>
       </section>
-    </div>
+    </div>,
+    document.body,
   )
 }

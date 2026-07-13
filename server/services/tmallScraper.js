@@ -130,16 +130,16 @@ export function buyerShowsFromRateDetail(rateDetail) {
   return rateList.map((rate, index) => {
     const appends = [rate.appendComment, rate.appendRate, rate.additionalComment].flat().filter(Boolean);
     const text = [
-      rate.rateContent, rate.reviewContent, rate.commentContent, rate.content,
-      ...appends.flatMap((append) => [append.content, append.rateContent, append.reviewContent, append.commentContent]),
+      rate.feedback, rate.rateContent, rate.reviewContent, rate.commentContent, rate.content,
+      ...appends.flatMap((append) => [append.feedback, append.content, append.rateContent, append.reviewContent, append.commentContent]),
     ].map(cleanText).filter(Boolean).join("\n").slice(0, 1200);
     const imageValues = collectMedia([
-      rate.pics, rate.picsSmall, rate.picList, rate.pictureList, rate.images, rate.photos,
-      ...appends.flatMap((append) => [append.pics, append.picsSmall, append.picList, append.pictureList, append.images, append.photos]),
+      rate.feedPicList, rate.feedPicPathList, rate.pics, rate.picsSmall, rate.picList, rate.pictureList, rate.images, rate.photos, rate.rateResourceList,
+      ...appends.flatMap((append) => [append.feedPicList, append.feedPicPathList, append.pics, append.picsSmall, append.picList, append.pictureList, append.images, append.photos, append.rateResourceList]),
     ], /url|src|pic|image|photo|big|small/i);
     const videoValues = collectMedia([
-      rate.videoList, rate.videos, rate.video, rate.videoInfo,
-      ...appends.flatMap((append) => [append.videoList, append.videos, append.video, append.videoInfo]),
+      rate.feedVideoList, rate.videoList, rate.videos, rate.video, rate.videoInfo, rate.rateResourceList,
+      ...appends.flatMap((append) => [append.feedVideoList, append.videoList, append.videos, append.video, append.videoInfo, append.rateResourceList]),
     ], /url|src|video|play/i);
     const images = Array.from(new Set(imageValues.map(cleanImage).filter(isCommerceImage))).slice(0, 30);
     const videoUrls = Array.from(new Set(videoValues.map(cleanBuyerShowVideo).filter(Boolean))).slice(0, 10);
@@ -148,9 +148,9 @@ export function buyerShowsFromRateDetail(rateDetail) {
       text,
       images,
       videoUrls,
-      author: cleanText(rate.displayUserNick || rate.userNick || rate.author || ""),
-      sku: cleanText(rate.auctionSku || rate.skuInfo || rate.sku || ""),
-      createdAt: cleanText(rate.rateDate || rate.createTime || rate.createdAt || ""),
+      author: cleanText(rate.reduceUserNick || rate.displayUserNick || rate.userNick || rate.author || ""),
+      sku: cleanText(rate.skuValueStr || rate.auctionSku || rate.skuInfo || rate.sku || ""),
+      createdAt: cleanText(rate.feedbackDate || rate.rateDate || rate.createTime || rate.createdAt || ""),
     };
   }).filter((item) => item.text || item.images.length || item.videoUrls.length);
 }
@@ -186,10 +186,22 @@ function isKnownRateDetail(value) {
 
 function bestBuyerShowCapture(captures) {
   const statusRank = { complete: 4, partial: 3, "confirmed-empty": 2, failed: 1 };
-  return captures.filter(Boolean).toSorted((left, right) =>
+  const validCaptures = captures.filter(Boolean);
+  const best = validCaptures.toSorted((left, right) =>
     (statusRank[right.status] || 0) - (statusRank[left.status] || 0)
     || right.mediaCount - left.mediaCount
     || right.items.length - left.items.length)[0];
+  return {
+    ...best,
+    attempts: validCaptures.map((capture) => ({
+      source: capture.source,
+      status: capture.status,
+      failureCode: capture.failureCode || "",
+      requestCount: capture.requestCount || 0,
+      itemCount: capture.items?.length || 0,
+      mediaCount: capture.mediaCount || 0,
+    })),
+  };
 }
 
 async function fetchTmallBuyerShows(itemId, sellerId, cookie, referer, accountSessionId = "") {
@@ -226,7 +238,7 @@ async function fetchTmallBuyerShows(itemId, sellerId, cookie, referer, accountSe
         }
         pageCount += 1;
         const items = buyerShowsFromRateDetail(detail);
-        const total = Number(detail?.rateCount?.total || detail?.rateCount || 0);
+        const total = Number(detail?.rateCount?.total || detail?.rateCount || detail?.total || detail?.feedAllCount || detail?.totalFuzzy || 0);
         if (Number.isFinite(total) && total > 0) reportedTotal = Math.max(reportedTotal, total);
         let added = 0;
         for (const item of items) {
@@ -333,7 +345,7 @@ export function buyerShowCaptureFromNetwork(networkPayloads = [], options = {}) 
       schemaMismatchCount += 1;
       continue;
     }
-    const total = Number(detail?.rateCount?.total || detail?.rateCount || 0);
+    const total = Number(detail?.rateCount?.total || detail?.rateCount || detail?.total || detail?.feedAllCount || detail?.totalFuzzy || 0);
     if (Number.isFinite(total) && total > 0) reportedTotal = Math.max(reportedTotal, total);
     for (const item of buyerShowsFromRateDetail(detail)) {
       const key = item.id && !/^rate-\d+$/.test(item.id) ? `id:${item.id}` : `${item.text}|${item.images.join(",")}|${item.videoUrls.join(",")}`;
@@ -342,7 +354,11 @@ export function buyerShowCaptureFromNetwork(networkPayloads = [], options = {}) 
       collected.push(item);
     }
   }
-  if (collected.length) return buyerShowCaptureResult({ status: "partial", source: "observed-network", itemId, accountSessionId, reportedTotal, pageCount: 1, requestCount, items: collected.slice(0, 100) });
+  if (collected.length) {
+    const items = collected.slice(0, 100);
+    const complete = reportedTotal > 0 && items.length >= Math.min(reportedTotal, 100);
+    return buyerShowCaptureResult({ status: complete ? "complete" : "partial", source: "observed-network", itemId, accountSessionId, reportedTotal, pageCount: 1, requestCount, items });
+  }
   if (requestCount && !schemaMismatchCount && reportedTotal === 0) return buyerShowCaptureResult({ status: "confirmed-empty", source: "observed-network", itemId, accountSessionId, requestCount });
   return buyerShowCaptureResult({ status: "failed", source: "observed-network", failureCode: schemaMismatchCount ? "SCHEMA_CHANGED" : "REVIEW_REQUEST_NOT_OBSERVED", itemId, accountSessionId, requestCount });
 }
@@ -418,6 +434,11 @@ function mediaOwnerIds(images) {
     if (suffixOwner) owners.add(suffixOwner);
   }
   return owners;
+}
+
+export function sellerIdFromProductMedia(images = []) {
+  const owners = Array.from(mediaOwnerIds(images));
+  return owners.length === 1 ? owners[0] : "";
 }
 
 export function filterProductVideoUrls(candidates, productImages = []) {
@@ -1705,6 +1726,30 @@ async function fetchHtml(product, authSession) {
   return { html, finalUrl: response.url, statusCode: response.status, source: "fetch" };
 }
 
+export async function scrapeTmallBuyerShows(product, authSession) {
+  const page = authSession?.source === "taobao-browser"
+    ? await getRenderedHtml(product.url, authSession, { captureBuyerShow: true })
+    : await fetchHtml(product, authSession);
+  const html = page.html || "";
+  const itemId = extractItemId(page.finalUrl, product.url, html);
+  const existingImages = [
+    product.lastSnapshot?.mainImage800,
+    product.lastSnapshot?.mainImage,
+    ...(product.lastSnapshot?.mainImages || []),
+    ...(product.lastSnapshot?.skuImages || []),
+  ];
+  const sellerId = extractSellerId(html) || sellerIdFromProductMedia(existingImages);
+  const accountSessionId = authSession?.id || "guest";
+  const domItems = extractBuyerShowItems(html, page.buyerShowPayloads || []);
+  const observed = buyerShowCaptureFromNetwork(page.buyerShowPayloads || [], { itemId, accountSessionId });
+  const direct = await fetchTmallBuyerShows(itemId, sellerId, page.cookieHeader || authSession?.cookie || "", product.url, accountSessionId);
+  const dom = domItems.length
+    ? buyerShowCaptureResult({ status: "partial", source: "verified-dom", itemId, sellerId, accountSessionId, pageCount: 1, items: domItems })
+    : buyerShowCaptureResult({ status: "failed", source: "verified-dom", failureCode: "REVIEW_UI_NOT_FOUND", itemId, sellerId, accountSessionId });
+  const capture = bestBuyerShowCapture([observed, direct, dom]);
+  return { capture, items: capture.items || [], interactions: page.buyerShowInteractions || [] };
+}
+
 export async function scrapeTmallProduct(product, authSession) {
   const startedAt = new Date().toISOString();
   const page = await fetchHtml(product, authSession);
@@ -1787,14 +1832,22 @@ export async function scrapeTmallProduct(product, authSession) {
     product.knownGalleryImages || [],
     product.knownVideoUrls || [],
   );
-  const sellerId = extractSellerId(html);
+  const sellerId = extractSellerId(html) || sellerIdFromProductMedia([...media.mainImages, ...skuImages]);
   const accountSessionId = authSession?.id || "guest";
   const observedBuyerShows = buyerShowCaptureFromNetwork(page.buyerShowPayloads || [], { itemId, accountSessionId });
   const directBuyerShows = await fetchTmallBuyerShows(itemId, sellerId, page.cookieHeader || authSession?.cookie || "", product.url, accountSessionId);
   const domBuyerShows = media.buyerShows.length
     ? buyerShowCaptureResult({ status: "partial", source: "verified-dom", itemId, sellerId, accountSessionId, pageCount: 1, items: media.buyerShows })
     : buyerShowCaptureResult({ status: "failed", source: "verified-dom", failureCode: "REVIEW_UI_NOT_FOUND", itemId, sellerId, accountSessionId });
-  const buyerShowCapture = bestBuyerShowCapture([observedBuyerShows, directBuyerShows, domBuyerShows]);
+  let buyerShowCapture = bestBuyerShowCapture([observedBuyerShows, directBuyerShows, domBuyerShows]);
+  let buyerShowInteractions = page.buyerShowInteractions || [];
+  if (buyerShowCapture.status === "failed" && authSession?.source === "taobao-browser") {
+    const retry = await scrapeTmallBuyerShows(product, authSession);
+    const firstAttempts = buyerShowCapture.attempts || [];
+    buyerShowCapture = bestBuyerShowCapture([buyerShowCapture, retry.capture]);
+    buyerShowCapture.attempts = [...firstAttempts, ...(retry.capture.attempts || [])];
+    buyerShowInteractions = [...buyerShowInteractions, ...retry.interactions.map((interaction) => ({ ...interaction, retry: true }))];
+  }
   media.buyerShows = buyerShowCapture.items;
   const mainImages = media.mainImages;
   const rawSkuPrices = structuredSku.skuPrices.length
@@ -1855,6 +1908,7 @@ export async function scrapeTmallProduct(product, authSession) {
       detailImageCount: media.detailImages.length,
       videoCount: media.videoUrls.length,
       buyerShowCount: media.buyerShows.length,
+      buyerShowInteractions,
       skuImageCount: skuImages.length,
       priceCount: allPrices.length,
       highResImageCount: mainImages.length + media.detailImages.length,

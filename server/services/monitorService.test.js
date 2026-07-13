@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
+  buildRunRecord,
   dueProductIds,
   earliestProductSchedule,
   historicalAccountPriceSnapshot,
@@ -10,6 +11,7 @@ import {
   isFeishuAlertCoolingDown,
   mergeAccountSnapshots,
   mergeBuyerShowHistory,
+  preserveBuyerShowHistory,
   nextProductScheduleAt,
   orderedCaptureCandidates,
   preserveVerifiedAccountPrices,
@@ -251,6 +253,51 @@ test("buyer-show history is retained when a new capture only sees sparse text", 
     { id: "stable-1", text: "很好用", images: ["old.jpg"], videoUrls: ["old.mp4"], author: "买家", sku: "", createdAt: "" },
     { id: "rate-1", text: "新评价", images: [], videoUrls: [] },
   ]);
+});
+
+test("buyer-show capture keeps same-item history and survives a later failure", () => {
+  const previous = {
+    itemId: "123",
+    capturedAt: "2026-07-12T08:00:00.000Z",
+    buyerShows: [{ id: "stable-1", text: "很好用", images: ["old.jpg"], videoUrls: [] }],
+    buyerShowCapture: { status: "partial", capturedAt: "2026-07-12T08:00:00.000Z" },
+  };
+  const partial = preserveBuyerShowHistory({
+    itemId: "123",
+    capturedAt: "2026-07-13T08:00:00.000Z",
+    buyerShows: [{ id: "rate-1", text: "新评价", images: [], videoUrls: [] }],
+    buyerShowCapture: { status: "partial", items: [], mediaCount: 0, textOnlyCount: 0, capturedAt: "2026-07-13T08:00:00.000Z" },
+  }, previous);
+  assert.equal(partial.buyerShows.length, 2);
+  assert.equal(partial.buyerShowCapture.items.length, 2);
+
+  const failed = preserveBuyerShowHistory({
+    itemId: "123",
+    buyerShows: [],
+    buyerShowCapture: { status: "failed", items: [] },
+  }, partial);
+  assert.equal(failed.buyerShowCachedItems.length, 2);
+  assert.equal(failed.buyerShowCapture.lastSuccessfulAt, "2026-07-13T08:00:00.000Z");
+});
+
+test("buyer-show history is never reused after the monitored item changes", () => {
+  const snapshot = preserveBuyerShowHistory({
+    itemId: "new",
+    buyerShows: [],
+    buyerShowCapture: { status: "failed", items: [] },
+  }, { itemId: "old", buyerShows: [{ id: "old-review", images: ["old.jpg"], videoUrls: [] }] });
+  assert.deepEqual(snapshot.buyerShowCachedItems, []);
+});
+
+test("run record is partial when price succeeds but buyer-show capture fails", () => {
+  const run = buildRunRecord({
+    source: "manual-product",
+    scope: "p1",
+    startedAt: "2026-07-13T08:00:00.000Z",
+    results: [{ snapshot: { buyerShowCapture: { status: "failed" } } }],
+  });
+  assert.equal(run.status, "partial");
+  assert.match(run.message, /买家秀本次未获取/);
 });
 
 test("runInCaptureGroups limits concurrency to five and preserves order", async () => {

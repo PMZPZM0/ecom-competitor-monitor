@@ -17,8 +17,10 @@ type Props = {
   products: Product[]
   monitor: Overview['monitor']
   onToggle: (product: Product) => Promise<void>
+  onToggleGlobal: () => Promise<void>
   onSchedule: (product: Product, intervalMinutes: number, monitorStartAt: string) => Promise<void>
-  onCapture: (product: Product) => Promise<void>
+  onCapture: (product: Product) => Promise<Product | void>
+  onRetryBuyerShows: (product: Product) => Promise<Product>
   onDelete: (product: Product) => Promise<void>
   onDeleteBatch: (products: Product[]) => Promise<void>
   onCaptureBatch: (products: Product[]) => Promise<void>
@@ -98,7 +100,7 @@ function searchableText(product: Product) {
   ].filter(Boolean).join(' ').toLocaleLowerCase('zh-CN')
 }
 
-export function MonitorClassification({ products, monitor, onToggle, onSchedule, onCapture, onDelete, onDeleteBatch, onCaptureBatch, batchBusy, busyProductId, authSessions }: Props) {
+export function MonitorClassification({ products, monitor, onToggle, onToggleGlobal, onSchedule, onCapture, onRetryBuyerShows, onDelete, onDeleteBatch, onCaptureBatch, batchBusy, busyProductId, authSessions }: Props) {
   const [preview, setPreview] = useState<Preview | null>(null)
   const [query, setQuery] = useState('')
   const [shopFilter, setShopFilter] = useState('')
@@ -338,7 +340,7 @@ export function MonitorClassification({ products, monitor, onToggle, onSchedule,
                       </div>
                       <div className="text-xs font-semibold text-emerald-700">{rangeLabel(modelGroup.products)}</div>
                     </div>
-                    <div className="space-y-3">
+                    <div className="space-y-4 bg-slate-100/70 p-3">
                       {modelGroup.products.map((product) => (
                         <div key={product.id} className="grid grid-cols-[24px_minmax(0,1fr)] items-start gap-2">
                           <label className="mt-4 flex h-6 w-6 cursor-pointer items-center justify-center" title="选择商品">
@@ -347,8 +349,10 @@ export function MonitorClassification({ products, monitor, onToggle, onSchedule,
                           <ProductMonitorCard
                             product={product}
                             onToggle={onToggle}
+                            onToggleGlobal={onToggleGlobal}
                             onSchedule={onSchedule}
                             onCapture={onCapture}
+                            onRetryBuyerShows={onRetryBuyerShows}
                             onDelete={onDelete}
                             busy={busyProductId === product.id}
                             onPreview={setPreview}

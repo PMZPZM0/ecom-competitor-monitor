@@ -1,6 +1,11 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { canReuseBrowser, isTaobaoLoginDocument, isTaobaoLoginUrl, skuIdFromNetworkBody, skuIdFromNetworkUrl } from "./browserService.js";
+import { canReuseBrowser, isBuyerShowResponseUrl, isTaobaoLoginDocument, isTaobaoLoginUrl, skuIdFromNetworkBody, skuIdFromNetworkUrl } from "./browserService.js";
+
+test("buyer-show response classifier ignores unrelated generic feeds", () => {
+  assert.equal(isBuyerShowResponseUrl("https://h5api.m.tmall.com/h5/mtop.taobao.rate.detaillist.get/6.0/"), true);
+  assert.equal(isBuyerShowResponseUrl("https://h5api.m.tmall.com/h5/mtop.taobao.social.feed.list/1.0/"), false);
+});
 
 test("background capture reuses a visible account browser without mode restart", () => {
   assert.equal(canReuseBrowser(false, true), true);

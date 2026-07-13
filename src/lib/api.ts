@@ -1,4 +1,4 @@
-import type { Analysis, AuthSession, LarkCliStatus, Overview, Product, RunRecord, Snapshot } from '../types/domain'
+import type { Analysis, AuthSession, LarkCliStatus, Overview, Product, RunRecord, Snapshot, UpdateInfo } from '../types/domain'
 
 const baseUrl = import.meta.env.VITE_API_BASE || ''
 
@@ -27,6 +27,7 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
 
 export const api = {
   overview: () => request<Overview>('/api/overview'),
+  checkUpdate: () => request<UpdateInfo>('/api/runtime/update'),
   addProduct: (payload: { name?: string; url: string; group?: string; accountType: 'normal' | 'gift' | 'vip88' }) =>
     request<Product>('/api/products', { method: 'POST', body: JSON.stringify(payload) }),
   addProductsBatch: (payload: { urls: string[]; group: string; accountType: 'normal' | 'gift' | 'vip88' }) =>
@@ -37,6 +38,7 @@ export const api = {
   deleteProductsBatch: (ids: string[]) =>
     request<{ requested: number; deleted: number }>('/api/products/batch-delete', { method: 'POST', body: JSON.stringify({ ids }) }),
   captureProduct: (id: string) => request<{ product: Product; run: RunRecord }>(`/api/products/${id}/capture`, { method: 'POST' }),
+  retryBuyerShows: (id: string) => request<{ ok: boolean; product: Product; capture: NonNullable<Snapshot['buyerShowCapture']> }>(`/api/products/${id}/buyer-shows/retry`, { method: 'POST' }),
   productSnapshots: (id: string) => request<Snapshot[]>(`/api/products/${id}/snapshots?limit=96`),
   openProduct: (id: string) => request<{ ok: boolean; url: string; accountName: string; accountType: 'normal' | 'gift' | 'vip88' }>(`/api/products/${id}/open`, { method: 'POST' }),
   captureProductsBatch: (ids: string[]) => request<{ ok: boolean; run: RunRecord }>('/api/products/batch-capture', { method: 'POST', body: JSON.stringify({ ids }) }),

@@ -11,12 +11,13 @@ import { loadEnv } from "./utils/env.js";
 import { dbRuntimeInfo, newId, readDb, updateDb } from "./storage/db.js";
 import { analyzeData } from "./services/analysisService.js";
 import { buildTaobaoOAuthUrl, maskSecret } from "./services/authService.js";
-import { rescheduleMonitor, resolveCaptureProtectionMinutes, runMonitorOnce, runProductOnce, scheduleProduct, startScheduler, stopScheduler } from "./services/monitorService.js";
+import { preserveBuyerShowHistory, rescheduleMonitor, resolveCaptureProtectionMinutes, runMonitorOnce, runProductOnce, scheduleProduct, startScheduler, stopScheduler } from "./services/monitorService.js";
 import { createNotificationLog, effectivePriceForSku, publicFeishuConfig, sendFeishuNotification, updateFeishuConfig } from "./services/feishuService.js";
 import { appendPriceDocument, cliStatus, createPriceDocument, readAuthQr, startCliLogin, startCliSetup } from "./services/larkCliService.js";
 import { browserRuntimeInfo, checkTaobaoSession, closeAccountBrowser, getTaobaoAuthState, isTaobaoLoginUrl, keepAccountBrowserWarm, minimizeAccountBrowser, openProductInAccountChrome, openTaobaoLogin } from "./services/browserService.js";
-import { SCRAPER_VERSION } from "./services/tmallScraper.js";
+import { scrapeTmallBuyerShows, SCRAPER_VERSION } from "./services/tmallScraper.js";
 import { normalizeProductUrl } from "./utils/productUrl.js";
+import { checkForUpdate } from "./services/updateService.js";
 
 loadEnv();
 
@@ -59,6 +60,15 @@ function publicAuthSession(session) {
 
 app.use(cors());
 app.use(express.json({ limit: "2mb" }));
+
+app.get("/api/runtime/update", async (_req, res) => {
+  try {
+    res.json(await checkForUpdate(packageInfo.version));
+  } catch (error) {
+    console.error("[update]", error.message);
+    res.status(502).json({ message: `无法连接 GitHub 检查更新：${error.message}` });
+  }
+});
 
 const productSchema = z.object({
   name: z.string().trim().optional().default(""),
@@ -228,7 +238,7 @@ app.post("/api/products", async (req, res) => {
   const product = {
     id: newId("prod"),
     ...parsed,
-    enabled: true,
+    enabled: false,
     mainImage: "",
     lastStatus: "pending",
     lastError: "",
@@ -263,7 +273,7 @@ app.post("/api/products/batch", async (req, res) => {
     url,
     group: parsed.group,
     accountType: parsed.accountType,
-    enabled: true,
+    enabled: false,
     mainImage: "",
     lastStatus: "pending",
     lastError: "",
@@ -482,6 +492,62 @@ app.delete("/api/products/:id", async (req, res) => {
 
 app.post("/api/products/:id/capture", async (req, res) => {
   res.json(await runProductOnce(req.params.id, { source: "manual-product" }));
+});
+
+app.post("/api/products/:id/buyer-shows/retry", async (req, res) => {
+  const db = await readDb();
+  const product = db.products.find((item) => item.id === req.params.id);
+  if (!product) return res.status(404).json({ message: "商品不存在。" });
+  if (!product.lastSnapshot) return res.status(409).json({ message: "商品还没有价格快照，请先完成首次抓取。" });
+
+  const activeSessions = db.authSessions.filter((session) => (session.enabled ?? session.active ?? true) && session.loginStatus !== "expired");
+  const accountType = product.accountType || "normal";
+  const preferredSessions = [
+    ...activeSessions.filter((item) => (item.accountType || "normal") === accountType),
+    ...activeSessions.filter((item) => (item.accountType || "normal") === "normal"),
+    ...activeSessions,
+  ];
+  const sessionCandidates = Array.from(new Map(preferredSessions.map((session) => [session.id, session])).values());
+  if (!sessionCandidates.length) return res.status(409).json({ message: "没有可用的淘宝登录账号，请先到账号授权页面登录。" });
+
+  const captures = [];
+  const interactions = [];
+  let result;
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    result = await scrapeTmallBuyerShows(product, sessionCandidates[attempt % sessionCandidates.length]);
+    captures.push(result.capture);
+    interactions.push(...result.interactions.map((interaction) => ({ ...interaction, retryAttempt: attempt + 1 })));
+    if (result.capture.status !== "failed") break;
+    await new Promise((resolve) => setTimeout(resolve, 800));
+  }
+  result.capture.attempts = captures.flatMap((capture) => capture.attempts || []);
+  result.interactions = interactions;
+  const nextSnapshot = preserveBuyerShowHistory({
+    ...structuredClone(product.lastSnapshot),
+    buyerShowCapture: result.capture,
+    buyerShows: result.items,
+    rawSignals: {
+      ...(product.lastSnapshot.rawSignals || {}),
+      buyerShowCount: result.items.length,
+      buyerShowInteractions: result.interactions,
+    },
+  }, product.lastSnapshot);
+  nextSnapshot.rawSignals.buyerShowCount = nextSnapshot.buyerShows?.length || 0;
+  let updatedProduct;
+  await updateDb((current) => {
+    const productIndex = current.products.findIndex((item) => item.id === product.id);
+    if (productIndex >= 0) {
+      updatedProduct = { ...current.products[productIndex], lastSnapshot: nextSnapshot, updatedAt: new Date().toISOString() };
+      current.products[productIndex] = updatedProduct;
+    }
+    for (let index = current.snapshots.length - 1; index >= 0; index -= 1) {
+      if (current.snapshots[index].productId !== product.id) continue;
+      current.snapshots[index] = { ...current.snapshots[index], ...nextSnapshot };
+      break;
+    }
+    return current;
+  });
+  res.json({ ok: result.capture.status !== "failed", product: updatedProduct, capture: nextSnapshot.buyerShowCapture });
 });
 
 app.post("/api/products/:id/open", async (req, res) => {

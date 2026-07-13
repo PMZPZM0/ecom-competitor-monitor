@@ -70,25 +70,25 @@ export function SkuPriceTrend({ snapshots, product }: { snapshots: Snapshot[]; p
   const selectedModeLabel = priceModes.find((mode) => mode.value === priceMode)?.label || '价格'
 
   return (
-    <section className="mb-3 min-w-0 border-b border-slate-200 pb-3">
+    <section className="product-price-trend mb-3 min-w-0 border-b border-slate-200 pb-3">
       <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
         <div className="flex items-center gap-2">
           <span className="inline-flex h-8 w-8 items-center justify-center rounded-md bg-sky-50 text-sky-700">
             <TrendingUp className="h-4 w-4" />
           </span>
           <div>
-            <div className="text-xs font-semibold text-slate-800">SKU 价格趋势</div>
-            <div className="text-[11px] text-slate-400">最近 {orderedSnapshots.length} 次监控记录</div>
+            <div className="text-sm font-semibold text-slate-800">SKU 价格趋势</div>
+            <div className="text-xs text-slate-400">最近 {orderedSnapshots.length} 次监控记录</div>
           </div>
         </div>
         <div className="flex min-w-0 items-center gap-2">
-          <select value={priceMode} onChange={(event) => setPriceMode(event.target.value as PriceMode)} className="h-8 w-[132px] rounded-md border border-slate-200 bg-white px-2 text-xs text-slate-700 outline-none focus:border-sky-400" aria-label="选择价格口径">
+          <select value={priceMode} onChange={(event) => setPriceMode(event.target.value as PriceMode)} className="h-9 w-[145px] rounded-md border border-slate-200 bg-white px-2 text-sm text-slate-700 outline-none focus:border-sky-400" aria-label="选择价格口径">
             {priceModes.map((mode) => <option key={mode.value} value={mode.value}>{mode.label}</option>)}
           </select>
           <select
             value={selectedSku}
             onChange={(event) => setSelectedSku(event.target.value)}
-            className="h-8 max-w-[260px] rounded-md border border-slate-200 bg-white px-2 text-xs text-slate-700 outline-none focus:border-sky-400"
+            className="h-9 max-w-[300px] rounded-md border border-slate-200 bg-white px-2 text-sm text-slate-700 outline-none focus:border-sky-400"
             aria-label="选择趋势图 SKU"
           >
             <option value="all">全部 SKU</option>
@@ -102,9 +102,9 @@ export function SkuPriceTrend({ snapshots, product }: { snapshots: Snapshot[]; p
           <ResponsiveContainer width="100%" height="100%">
             <LineChart data={chartData} margin={{ top: 5, right: 12, left: 0, bottom: 0 }}>
               <CartesianGrid stroke="#e2e8f0" strokeDasharray="3 3" vertical={false} />
-              <XAxis dataKey="time" tick={{ fill: '#64748b', fontSize: 10 }} tickLine={false} axisLine={false} minTickGap={36} />
+              <XAxis dataKey="time" tick={{ fill: '#64748b', fontSize: '0.75rem' }} tickLine={false} axisLine={false} minTickGap={42} />
               <YAxis
-                tick={{ fill: '#64748b', fontSize: 10 }}
+                tick={{ fill: '#64748b', fontSize: '0.75rem' }}
                 tickLine={false}
                 axisLine={false}
                 width={52}
@@ -114,9 +114,9 @@ export function SkuPriceTrend({ snapshots, product }: { snapshots: Snapshot[]; p
               <Tooltip
                 formatter={(value, name) => [currency(Number(value)), String(name)]}
                 labelFormatter={(_, payload) => payload?.[0]?.payload?.capturedAt ? new Date(payload[0].payload.capturedAt).toLocaleString('zh-CN') : ''}
-                contentStyle={{ borderRadius: 6, borderColor: '#cbd5e1', fontSize: 12 }}
+                contentStyle={{ borderRadius: 6, borderColor: '#cbd5e1', fontSize: '0.75rem' }}
               />
-              {visibleSkus.length > 1 && <Legend wrapperStyle={{ fontSize: 11, paddingTop: 8 }} />}
+              {visibleSkus.length > 1 && <Legend wrapperStyle={{ fontSize: '0.75rem', paddingTop: 8 }} />}
               {visibleSkus.map((sku, index) => {
                 const threshold = product.skuMonitorPrices?.[sku.id]
                 return typeof threshold === 'number' && threshold > 0 ? (

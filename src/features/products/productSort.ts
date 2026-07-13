@@ -22,10 +22,14 @@ function minimumPrice(product: Product) {
   return prices.length ? Math.min(...prices) : null
 }
 
+export function productCaptureTime(product: Product) {
+  return new Date(product.lastSnapshot?.capturedAt || product.createdAt).getTime()
+}
+
 export function sortProducts(products: Product[], sortKey: ProductSortKey) {
   return [...products].sort((left, right) => {
     if (sortKey === 'updated-desc' || sortKey === 'updated-asc') {
-      const difference = new Date(left.updatedAt).getTime() - new Date(right.updatedAt).getTime()
+      const difference = productCaptureTime(left) - productCaptureTime(right)
       return sortKey === 'updated-desc' ? -difference : difference
     }
     if (sortKey === 'name-asc') return left.name.localeCompare(right.name, 'zh-CN')

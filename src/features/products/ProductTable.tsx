@@ -11,15 +11,17 @@ type Props = {
   products: Product[]
   totalProducts?: number
   onToggle: (product: Product) => Promise<void>
+  onToggleGlobal: () => Promise<void>
   onSchedule: (product: Product, intervalMinutes: number, monitorStartAt: string) => Promise<void>
-  onCapture: (product: Product) => Promise<void>
+  onCapture: (product: Product) => Promise<Product | void>
+  onRetryBuyerShows: (product: Product) => Promise<Product>
   onDelete: (product: Product) => Promise<void>
   busyProductId?: string
   authSessions: AuthSession[]
   monitor: Overview['monitor']
 }
 
-export function ProductTable({ products, totalProducts = products.length, onToggle, onSchedule, onCapture, onDelete, busyProductId, authSessions, monitor }: Props) {
+export function ProductTable({ products, totalProducts = products.length, onToggle, onToggleGlobal, onSchedule, onCapture, onRetryBuyerShows, onDelete, busyProductId, authSessions, monitor }: Props) {
   const [preview, setPreview] = useState<Preview | null>(null)
   const [sortKey, setSortKey] = useState<ProductSortKey>('updated-desc')
   const [page, setPage] = useState(1)
@@ -57,14 +59,16 @@ export function ProductTable({ products, totalProducts = products.length, onTogg
             <Badge className="border-sky-100 bg-sky-50 text-sky-700">第 {page} / {totalPages} 页 · {cappedProducts.length} 个</Badge>
           </div>
         </div>
-        <div className="space-y-4">
+        <div className="space-y-5 bg-slate-100/70 p-3">
           {visibleProducts.map((product) => (
             <ProductMonitorCard
               key={product.id}
               product={product}
               onToggle={onToggle}
+              onToggleGlobal={onToggleGlobal}
               onSchedule={onSchedule}
               onCapture={onCapture}
+              onRetryBuyerShows={onRetryBuyerShows}
               onDelete={onDelete}
               busy={busyProductId === product.id}
               onPreview={setPreview}

@@ -74,6 +74,14 @@ export type BuyerShowCapture = {
   textOnlyCount: number
   capturedAt: string
   lastSuccessfulAt?: string
+  attempts?: Array<{
+    source: BuyerShowCapture['source']
+    status: BuyerShowCapture['status']
+    failureCode?: string
+    requestCount: number
+    itemCount: number
+    mediaCount: number
+  }>
 }
 
 export type Snapshot = {
@@ -324,4 +332,19 @@ export type LarkCliStatus = {
   message?: string
   setup: { status: 'idle' | 'running' | 'completed' | 'failed'; url: string; message: string; startedAt: string | null }
   login: { status: 'idle' | 'waiting' | 'completed' | 'failed'; url: string; message: string; startedAt: string | null }
+}
+
+export type UpdateInfo = {
+  currentVersion: string
+  latestVersion: string
+  updateAvailable: boolean
+  releaseName: string
+  notes: string
+  publishedAt: string | null
+  releaseUrl: string
+  downloadUrl: string
+  assetName: string
+  platform: string
+  arch: string
+  checkedAt: string
 }

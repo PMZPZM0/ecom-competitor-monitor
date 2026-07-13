@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react'
 import { createPortal } from 'react-dom'
-import { ChevronLeft, ChevronRight, Download, LoaderCircle, Play, Store, X } from 'lucide-react'
+import { ChevronLeft, ChevronRight, Download, LoaderCircle, Play, RotateCw, Store, X } from 'lucide-react'
 import { Button } from '../../components/ui/button'
 import { downloadHref } from './productDisplayUtils'
 import type { BuyerShowItem } from '../../types/domain'
@@ -19,10 +19,24 @@ export function ShopLogo({ src }: { src?: string }) {
 }
 
 export function ImagePreview({ preview, onClose }: { preview: Preview | null; onClose: () => void }) {
+  useEffect(() => {
+    if (!preview) return
+    const previousOverflow = document.body.style.overflow
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') onClose()
+    }
+    document.body.style.overflow = 'hidden'
+    window.addEventListener('keydown', handleKeyDown)
+    return () => {
+      document.body.style.overflow = previousOverflow
+      window.removeEventListener('keydown', handleKeyDown)
+    }
+  }, [preview, onClose])
+
   if (!preview) return null
-  return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/70 p-6" onClick={onClose}>
-      <div className="max-h-full max-w-5xl rounded-md bg-white p-3 shadow-2xl" onClick={(event) => event.stopPropagation()}>
+  return createPortal(
+    <div className="fixed inset-0 z-[100] flex items-center justify-center overflow-hidden bg-slate-950/70 p-3 sm:p-6" role="presentation" onMouseDown={onClose}>
+      <div role="dialog" aria-modal="true" aria-label={preview.title} className="flex max-h-full max-w-5xl flex-col overflow-hidden rounded-md bg-white p-3 shadow-2xl" onMouseDown={(event) => event.stopPropagation()}>
         <div className="mb-3 flex items-center justify-between gap-4">
           <div className="line-clamp-1 text-sm font-medium text-slate-800">{preview.title}</div>
           <Button type="button" variant="ghost" size="sm" onClick={onClose}>
@@ -30,13 +44,14 @@ export function ImagePreview({ preview, onClose }: { preview: Preview | null; on
             关闭
           </Button>
         </div>
-        <img src={preview.src} alt="" className="max-h-[78vh] max-w-full rounded-md object-contain" />
+        <div className="min-h-0 flex-1 overflow-auto"><img src={preview.src} alt="" className="max-h-[78vh] max-w-full rounded-md object-contain" /></div>
       </div>
-    </div>
+    </div>,
+    document.body,
   )
 }
 
-export function BuyerShowDialog({ title, items, statusText = '', onClose, onDownload, onDownloadItem, downloadBusy = false, downloadMessage = '' }: { title: string; items: BuyerShowItem[]; statusText?: string; onClose: () => void; onDownload: () => void; onDownloadItem: (item: BuyerShowItem) => void; downloadBusy?: boolean; downloadMessage?: string }) {
+export function BuyerShowDialog({ title, items, statusText = '', onClose, onDownload, onDownloadItem, onRetry, downloadBusy = false, retryBusy = false, downloadMessage = '' }: { title: string; items: BuyerShowItem[]; statusText?: string; onClose: () => void; onDownload: () => void; onDownloadItem: (item: BuyerShowItem) => void; onRetry?: () => void; downloadBusy?: boolean; retryBusy?: boolean; downloadMessage?: string }) {
   const visibleItems = items.filter((item) => item.text || item.images?.length || item.videoUrls?.length)
   const [page, setPage] = useState(0)
   const pageSize = 8
@@ -63,7 +78,7 @@ export function BuyerShowDialog({ title, items, statusText = '', onClose, onDown
       <div role="dialog" aria-modal="true" aria-labelledby="buyer-show-dialog-title" className="flex h-[calc(100dvh-1.5rem)] max-h-[880px] w-full max-w-5xl flex-col overflow-hidden rounded-md bg-white shadow-2xl sm:h-[calc(100dvh-3rem)]" onMouseDown={(event) => event.stopPropagation()}>
         <div className="flex shrink-0 items-center justify-between gap-3 border-b border-slate-100 px-4 py-3">
           <div className="min-w-0"><div id="buyer-show-dialog-title" className="truncate text-sm font-semibold text-slate-900">买家秀预览</div><div className="truncate text-xs text-slate-500">{title} · 共 {visibleItems.length} 条{statusText ? ` · ${statusText}` : ''}</div>{downloadMessage && <div className="mt-1 flex items-center gap-1 text-xs text-sky-700" role="status" aria-live="polite">{downloadBusy && <LoaderCircle className="h-3.5 w-3.5 animate-spin" />}{downloadMessage}</div>}</div>
-          <div className="flex shrink-0 items-center gap-2"><Button type="button" size="sm" onClick={onDownload} disabled={downloadBusy}>{downloadBusy ? <LoaderCircle className="h-4 w-4 animate-spin" /> : <Download className="h-4 w-4" />}{downloadBusy ? '生成中' : '下载 ZIP'}</Button><Button type="button" variant="ghost" size="sm" onClick={onClose} title="关闭买家秀预览"><X className="h-4 w-4" />关闭</Button></div>
+          <div className="flex shrink-0 items-center gap-2">{onRetry && <Button type="button" variant="secondary" size="sm" onClick={onRetry} disabled={retryBusy || downloadBusy} title="仅重新抓取买家秀，价格和素材不变"><RotateCw className={`h-4 w-4 ${retryBusy ? 'animate-spin' : ''}`} />{retryBusy ? '重试中' : '重试买家秀'}</Button>}<Button type="button" size="sm" onClick={onDownload} disabled={downloadBusy || retryBusy}>{downloadBusy ? <LoaderCircle className="h-4 w-4 animate-spin" /> : <Download className="h-4 w-4" />}{downloadBusy ? '生成中' : '下载 ZIP'}</Button><Button type="button" variant="ghost" size="sm" onClick={onClose} title="关闭买家秀预览"><X className="h-4 w-4" />关闭</Button></div>
         </div>
         <div className="min-h-0 flex-1 overflow-y-auto p-4">
           <div className="grid gap-3 md:grid-cols-2">

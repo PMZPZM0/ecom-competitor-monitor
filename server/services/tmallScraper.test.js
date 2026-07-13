@@ -1,6 +1,13 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { applyAppliedCoinDiscount, applyNetworkPromoData, applyVisibleDiscountItems, applyVisibleSurprisePrice, buyerShowCaptureFromNetwork, buyerShowsFromRateDetail, calculateAccountPriceScenario, calculatePriceScenarios, collectDiscountItems, collectDiscountItemsFromText, collectProductProgramItems, collectVisibleSurprisePrices, extractBuyerShowItems, extractSelectedSkuId, filterProductVideoUrls, resolveCoinBenefit, resolveSkuPrices, selectGalleryImages, selectSquareMainImage } from "./tmallScraper.js";
+import { applyAppliedCoinDiscount, applyNetworkPromoData, applyVisibleDiscountItems, applyVisibleSurprisePrice, buyerShowCaptureFromNetwork, buyerShowsFromRateDetail, calculateAccountPriceScenario, calculatePriceScenarios, collectDiscountItems, collectDiscountItemsFromText, collectProductProgramItems, collectVisibleSurprisePrices, extractBuyerShowItems, extractSelectedSkuId, filterProductVideoUrls, resolveCoinBenefit, resolveSkuPrices, selectGalleryImages, selectSquareMainImage, sellerIdFromProductMedia } from "./tmallScraper.js";
+
+test("sellerIdFromProductMedia recovers a seller id from verified product assets", () => {
+  assert.equal(
+    sellerIdFromProductMedia(["https://gw.alicdn.com/bao/uploaded/i2/2218161169404/O1CN01pfzaZa2JL5cupxxQJ_!!2218161169404.jpg"]),
+    "2218161169404",
+  );
+});
 
 test("selectSquareMainImage prefers the mobile 1:1 main image over PC gallery images", () => {
   const square = "https://img.alicdn.com/imgextra/i2/2807173571/O1CN01ZQDGET1cFZV4baq16_!!4611686018427384259-0-item_pic.jpg";
@@ -502,7 +509,7 @@ test("extractBuyerShowItems rejects rating summaries that are not review cards",
 test("buyerShowCaptureFromNetwork accepts only a known review endpoint and schema", () => {
   const body = `jsonp1(${JSON.stringify({ rateDetail: { rateCount: { total: 1 }, rateList: [{ id: "real-1", rateContent: "真实评价内容", pics: ["//img.alicdn.com/bao/uploaded/i1/real.jpg"] }] } })})`;
   const capture = buyerShowCaptureFromNetwork([{ url: "https://rate.tmall.com/list_detail_rate.htm?itemId=1", body }], { itemId: "1", accountSessionId: "normal" });
-  assert.equal(capture.status, "partial");
+  assert.equal(capture.status, "complete");
   assert.equal(capture.items.length, 1);
   assert.equal(capture.mediaCount, 1);
   assert.equal(capture.accountSessionId, "normal");
@@ -541,5 +548,29 @@ test("buyerShowsFromRateDetail supports nested lists and object media fields", (
     author: "",
     sku: "",
     createdAt: "",
+  }]);
+});
+
+test("buyerShowsFromRateDetail supports the current Tmall feedback and feedPic fields", () => {
+  const items = buyerShowsFromRateDetail({
+    total: "1",
+    rateList: [{
+      id: "new-rate-1",
+      feedback: "操作简单，做工不错。",
+      feedPicList: ["//img.alicdn.com/bao/uploaded/i1/new-rate-1.jpg"],
+      feedPicPathList: ["//img.alicdn.com/bao/uploaded/i1/new-rate-1.jpg"],
+      reduceUserNick: "买**家",
+      skuValueStr: "白色；温热",
+      feedbackDate: "2026年7月8日",
+    }],
+  });
+  assert.deepEqual(items, [{
+    id: "new-rate-1",
+    text: "操作简单，做工不错。",
+    images: ["https://img.alicdn.com/bao/uploaded/i1/new-rate-1.jpg"],
+    videoUrls: [],
+    author: "买**家",
+    sku: "白色；温热",
+    createdAt: "2026年7月8日",
   }]);
 });

@@ -180,19 +180,20 @@ export function preserveVerifiedAccountPrices(snapshot) {
   return snapshot;
 }
 
-function buildRunRecord({ source, scope, startedAt, results, message }) {
+export function buildRunRecord({ source, scope, startedAt, results, message }) {
   const summary = summarizeResults(results);
+  const buyerShowFailures = results.filter((result) => result.snapshot?.buyerShowCapture?.status === "failed").length;
   return {
     id: newId("run"),
     source,
     scope,
-    status: summary.failed > 0 ? (summary.success > 0 ? "partial" : "failed") : "success",
+    status: summary.failed > 0 ? (summary.success > 0 ? "partial" : "failed") : buyerShowFailures > 0 ? "partial" : "success",
     startedAt,
     finishedAt: new Date().toISOString(),
     ...summary,
     message:
       message ||
-      `抓取 ${summary.total} 个商品，成功 ${summary.success} 个，失败 ${summary.failed} 个。`,
+      `抓取 ${summary.total} 个商品，成功 ${summary.success} 个，失败 ${summary.failed} 个。${buyerShowFailures ? ` 其中 ${buyerShowFailures} 个商品的买家秀本次未获取，价格与素材已正常更新。` : ""}`,
   };
 }
 
@@ -364,6 +365,32 @@ export function mergeBuyerShowHistory(currentItems = [], previousItems = []) {
   return Array.from(merged.values()).slice(0, 100);
 }
 
+export function preserveBuyerShowHistory(snapshot, previousSnapshot) {
+  const sameItem = previousSnapshot && String(previousSnapshot.itemId || "") === String(snapshot.itemId || "");
+  const previousItems = sameItem
+    ? (previousSnapshot.buyerShows?.length ? previousSnapshot.buyerShows : previousSnapshot.buyerShowCachedItems || [])
+    : [];
+  const capture = snapshot.buyerShowCapture;
+  const succeeded = ["complete", "partial"].includes(capture?.status);
+
+  if (succeeded) {
+    snapshot.buyerShows = mergeBuyerShowHistory(snapshot.buyerShows || capture.items || [], previousItems);
+    capture.items = snapshot.buyerShows;
+    capture.mediaCount = snapshot.buyerShows.reduce((sum, item) => sum + (item.images?.length || 0) + (item.videoUrls?.length || 0), 0);
+    capture.textOnlyCount = snapshot.buyerShows.filter((item) => item.text && !item.images?.length && !item.videoUrls?.length).length;
+    snapshot.buyerShowCachedItems = [];
+    return snapshot;
+  }
+
+  snapshot.buyerShowCachedItems = previousItems;
+  if (capture && previousItems.length) {
+    capture.lastSuccessfulAt = previousSnapshot.buyerShowCapture?.lastSuccessfulAt
+      || previousSnapshot.buyerShowCapture?.capturedAt
+      || previousSnapshot.capturedAt;
+  }
+  return snapshot;
+}
+
 export function snapshotAllowsPriceAlerts(snapshot) {
   return snapshot?.accessMode !== "anonymous" && ["verified", "partial"].includes(snapshot?.resolutionStatus);
 }
@@ -465,14 +492,11 @@ export async function captureProduct(product, authSessions = [], { captureProtec
     if (!snapshots.length) throw new Error(accountErrors.map((error) => `${error.accountName}：${error.message}`).join("；"));
     const targetAccountType = product.accountType || "normal";
     if (!hasTrustedAccountBaseline(snapshots, targetAccountType)) {
+      if (targetAccountType === "normal") throw new Error("普通价格缺少可验证的 SKU 证据，本次结果已拒绝保存，避免把标价误当普通价。请重试抓取；若持续失败，请检查普通账号登录状态。");
       throw new Error(`${targetAccountType === "gift" ? "礼金" : "88VIP"}价格缺少普通账号基准，本次结果已拒绝保存，避免把标价误当普通价。请检查普通账号登录后重试。`);
     }
     const snapshot = mergeAccountSnapshots(snapshots);
-    const buyerShowSucceeded = ["complete", "partial", "confirmed-empty"].includes(snapshot.buyerShowCapture?.status);
-    snapshot.buyerShowCachedItems = buyerShowSucceeded ? [] : product.lastSnapshot?.buyerShows || [];
-    if (!buyerShowSucceeded && snapshot.buyerShowCapture && product.lastSnapshot?.buyerShowCapture?.capturedAt) {
-      snapshot.buyerShowCapture.lastSuccessfulAt = product.lastSnapshot.buyerShowCapture.capturedAt;
-    }
+    preserveBuyerShowHistory(snapshot, product.lastSnapshot);
     if (snapshot.rawSignals) snapshot.rawSignals.buyerShowCount = snapshot.buyerShows.length;
     snapshot.accountErrors = accountErrors;
     return {

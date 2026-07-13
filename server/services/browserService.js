@@ -53,6 +53,10 @@ export function skuIdFromNetworkBody(body) {
   }
 }
 
+export function isBuyerShowResponseUrl(value) {
+  return /(?:rate|review|comment|evaluate)/i.test(String(value || ""));
+}
+
 export function canReuseBrowser(runtimeHeadless, requestedHeadless) {
   return requestedHeadless || !runtimeHeadless;
 }
@@ -586,6 +590,7 @@ export async function getRenderedHtml(url, authSession = {}, renderOptions = {})
     await cdp.send("Network.setBypassServiceWorker", { bypass: true });
     const priceResponses = new Map();
     const buyerShowResponses = new Map();
+    const buyerShowInteractions = [];
     const skuWaiters = new Map();
     const requestedSelections = Array.isArray(renderOptions.selectSkus) ? renderOptions.selectSkus : [];
     if (requestedSelections.length) await cdp.send("Network.clearBrowserCache");
@@ -594,7 +599,7 @@ export async function getRenderedHtml(url, authSession = {}, renderOptions = {})
       const responseUrl = String(response?.url || "");
       const mimeType = String(response?.mimeType || "");
       const relevantUrl = /(?:\/h5\/mtop|mtop\.|detail|promotion|benefit|price|sku|rate|review|comment|evaluate|feed)/i.test(responseUrl);
-      const buyerShowUrl = /(?:rate|review|comment|evaluate|feed)/i.test(responseUrl);
+      const buyerShowUrl = isBuyerShowResponseUrl(responseUrl);
       const dataResponse = /json/i.test(mimeType) || /XHR|Fetch/i.test(type || "");
       if (!relevantUrl || !dataResponse || Number(response?.status || 0) >= 400) return;
       const target = buyerShowUrl ? buyerShowResponses : priceResponses;
@@ -693,31 +698,76 @@ export async function getRenderedHtml(url, authSession = {}, renderOptions = {})
       if (videoTabResult.result?.value?.clicked) await new Promise((resolve) => setTimeout(resolve, 2200));
     }
     if (renderOptions.captureBuyerShow) {
-      const buyerShowTabResult = await cdp.send("Runtime.evaluate", {
-        expression: `(() => {
-          const labels = ['买家秀', '晒单', '评价', '评论'];
-          const target = Array.from(document.querySelectorAll('button,a,[role="tab"],[role="button"],div,span'))
-            .map((element) => ({ element, text: String(element.textContent || '').replace(/\\s+/g, '') }))
-            .filter(({ text }) => text.length <= 12 && labels.some((label) => text === label || text.includes(label)))
-            .sort((left, right) => left.text.length - right.text.length)[0]?.element;
-          if (!target) return { clicked: false };
-          (target.closest('button,a,[role="tab"],[role="button"]') || target).dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, view: window }));
-          return { clicked: true };
-        })()`,
-        returnByValue: true,
-      }, 10000);
-      if (buyerShowTabResult.result?.value?.clicked) {
-        await new Promise((resolve) => setTimeout(resolve, 4200));
-        await cdp.send("Runtime.evaluate", {
+      for (let attempt = 0; attempt < 2 && buyerShowResponses.size === 0; attempt += 1) {
+        const buyerShowTabResult = await cdp.send("Runtime.evaluate", {
           expression: `(() => {
-            const containers = Array.from(document.querySelectorAll('[role="dialog"],[class*="rate"],[class*="review"],[class*="comment"],[class*="evaluate"]'));
-            const target = containers.sort((left, right) => right.scrollHeight - left.scrollHeight)[0];
-            if (target && target.scrollHeight > target.clientHeight) target.scrollTo(0, Math.min(target.scrollHeight, 2400));
-            return Boolean(target);
+            const priorities = ['查看全部评价', '全部评价', '用户评价', '买家秀', '晒单', '评价', '评论'];
+            const normalize = (value) => String(value || '').replace(/\\s+/g, '');
+            const candidates = Array.from(document.querySelectorAll('button,a,[role="tab"],[role="button"],div,span'))
+              .map((element) => ({ element, text: normalize(element.textContent), rect: element.getBoundingClientRect() }))
+              .filter(({ text, rect }) => rect.width > 20 && rect.height > 15 && text.length <= 16 && priorities.some((label) => text === label || text.startsWith(label)))
+              .sort((left, right) => {
+                const leftRank = priorities.findIndex((label) => left.text === label || left.text.startsWith(label));
+                const rightRank = priorities.findIndex((label) => right.text === label || right.text.startsWith(label));
+                return leftRank - rightRank || left.text.length - right.text.length || (left.rect.width * left.rect.height) - (right.rect.width * right.rect.height);
+              });
+            const candidate = candidates[${attempt}] || candidates[0];
+            if (!candidate) return { clicked: false };
+            const target = candidate.element.closest('button,a,[role="tab"],[role="button"],[class*="Button"],[class*="button"],[class*="Btn"],[class*="btn"]') || candidate.element;
+            target.scrollIntoView({ block: 'center', inline: 'nearest' });
+            for (const type of ['pointerdown', 'mousedown', 'pointerup', 'mouseup']) {
+              target.dispatchEvent(new MouseEvent(type, { bubbles: true, cancelable: true, view: window }));
+            }
+            target.click?.();
+            return {
+              clicked: true,
+              text: candidate.text,
+              candidateTag: candidate.element.tagName,
+              candidateClass: String(candidate.element.className || '').slice(0, 180),
+              targetTag: target.tagName,
+              targetClass: String(target.className || '').slice(0, 180),
+              targetRole: target.getAttribute('role') || '',
+              targetHref: target.getAttribute('href') || '',
+            };
           })()`,
           returnByValue: true,
         }, 10000);
-        await new Promise((resolve) => setTimeout(resolve, 2200));
+        buyerShowInteractions.push({ attempt: attempt + 1, ...(buyerShowTabResult.result?.value || { clicked: false }) });
+        if (buyerShowTabResult.result?.value?.clicked) await new Promise((resolve) => setTimeout(resolve, attempt === 0 ? 4800 : 3600));
+        if (buyerShowResponses.size === 0 && attempt === 0) {
+          await cdp.send("Runtime.evaluate", {
+            expression: "window.scrollTo(0, Math.min(document.body.scrollHeight, 3600)); undefined",
+            returnByValue: true,
+          }, 10000);
+          await new Promise((resolve) => setTimeout(resolve, 1000));
+        }
+      }
+      if (buyerShowResponses.size > 0) {
+        let previousResponseCount = buyerShowResponses.size;
+        let unchangedAttempts = 0;
+        for (let pageAttempt = 0; pageAttempt < 4 && unchangedAttempts < 2; pageAttempt += 1) {
+          const scrollResult = await cdp.send("Runtime.evaluate", {
+            expression: `(() => {
+              const candidates = Array.from(document.querySelectorAll('[role="dialog"],div,section,main,ul'))
+                .map((element) => ({ element, rect: element.getBoundingClientRect() }))
+                .filter(({ element, rect }) => rect.width > 280 && rect.height > 160 && rect.bottom > 0 && rect.top < innerHeight && element.scrollHeight > element.clientHeight + 80)
+                .sort((left, right) => right.element.scrollHeight - left.element.scrollHeight);
+              const scrolled = [];
+              for (const { element } of candidates.slice(0, 6)) {
+                const before = element.scrollTop;
+                element.scrollTop = Math.min(element.scrollHeight, before + Math.max(element.clientHeight * 0.85, 500));
+                if (element.scrollTop !== before) scrolled.push({ tag: element.tagName, className: String(element.className || '').slice(0, 120), before, after: element.scrollTop, height: element.scrollHeight });
+              }
+              return scrolled;
+            })()`,
+            returnByValue: true,
+          }, 10000);
+          buyerShowInteractions.push({ attempt: `scroll-${pageAttempt + 1}`, scrolled: scrollResult.result?.value || [] });
+          await new Promise((resolve) => setTimeout(resolve, 2200));
+          if (buyerShowResponses.size > previousResponseCount) unchangedAttempts = 0;
+          else unchangedAttempts += 1;
+          previousResponseCount = buyerShowResponses.size;
+        }
       }
     }
     await cdp.send(
@@ -788,6 +838,7 @@ export async function getRenderedHtml(url, authSession = {}, renderOptions = {})
       visibleText: visibleTextResult.result?.value || "",
       networkPayloads,
       buyerShowPayloads,
+      buyerShowInteractions,
       priceNetworkPayloads,
       skuNetworkPayloads,
       selectionResults: verifiedSelectionResults,
