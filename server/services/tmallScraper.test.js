@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { applyAccountBenefitFormula, applyAppliedCoinDiscount, applyNetworkPromoData, applyVisibleDiscountItems, applyVisibleSurprisePrice, buyerShowsFromRateDetail, calculateAccountPriceScenario, calculatePriceScenarios, collectDiscountItems, collectDiscountItemsFromText, collectProductProgramItems, collectVisibleSurprisePrices, extractBuyerShowItems, extractSelectedSkuId, filterProductVideoUrls, resolveCoinBenefit, resolveSkuPrices, selectGalleryImages, selectSquareMainImage } from "./tmallScraper.js";
+import { applyAppliedCoinDiscount, applyNetworkPromoData, applyVisibleDiscountItems, applyVisibleSurprisePrice, buyerShowsFromRateDetail, calculateAccountPriceScenario, calculatePriceScenarios, collectDiscountItems, collectDiscountItemsFromText, collectProductProgramItems, collectVisibleSurprisePrices, extractBuyerShowItems, extractSelectedSkuId, filterProductVideoUrls, resolveCoinBenefit, resolveSkuPrices, selectGalleryImages, selectSquareMainImage } from "./tmallScraper.js";
 
 test("selectSquareMainImage prefers the mobile 1:1 main image over PC gallery images", () => {
   const square = "https://img.alicdn.com/imgextra/i2/2807173571/O1CN01ZQDGET1cFZV4baq16_!!4611686018427384259-0-item_pic.jpg";
@@ -334,46 +334,6 @@ test("promotion inference assigns gift and 88VIP account prices after restoring 
   assert.equal(calculatePriceScenarios(vipSku).priceCalculation.vip88, "普通价 79.00 - 88VIP优惠 4.00 = 75.00");
 });
 
-test("account benefit fallback restores normal price from named promotions", () => {
-  const baseSku = {
-    skuId: "gift-sku",
-    originalPrice: 319,
-    normalPrice: 69,
-    price: 69,
-    priceLayers: [],
-    discountItems: [
-      { label: "超级立减", amount: 47, text: "超级立减47元" },
-      { label: "限时立减", amount: 193, text: "限时立减193元" },
-    ],
-  };
-  const [giftSku] = applyAccountBenefitFormula([baseSku], "gift");
-  assert.deepEqual({ normalPrice: giftSku.normalPrice, giftPrice: giftSku.giftPrice, giftDiscountAmount: giftSku.giftDiscountAmount }, {
-    normalPrice: 79,
-    giftPrice: 69,
-    giftDiscountAmount: 10,
-  });
-  assert.equal(giftSku.giftInference.normalFormula, "标价 319.00 - 超级立减 47.00 - 限时立减 193.00 = 普通价 79.00");
-
-  const [vipSku] = applyAccountBenefitFormula([{ ...baseSku, normalPrice: 75, price: 75 }], "vip88");
-  assert.equal(vipSku.normalPrice, 79);
-  assert.equal(vipSku.vipPrice, 75);
-  assert.equal(vipSku.vipDiscountAmount, 4);
-
-  const [normalSku] = applyAccountBenefitFormula([{ ...baseSku, originalPrice: 909, normalPrice: 489, price: 489, discountItems: [
-    { label: "超级立减", amount: 137, text: "超级立减137元" },
-    { label: "限时立减", amount: 243, text: "限时立减243元" },
-  ] }], "normal");
-  assert.equal(normalSku.normalPrice, 529);
-  assert.equal(normalSku.surprisePrice, 489);
-
-  const [roundingOnly] = applyAccountBenefitFormula([{ ...baseSku, originalPrice: 309, normalPrice: 178.99, price: 178.99, discountItems: [
-    { label: "超级立减", amount: 41, text: "超级立减41元" },
-    { label: "限时立减", amount: 89, text: "限时立减89元" },
-  ] }], "normal");
-  assert.equal(roundingOnly.normalPrice, 178.99);
-  assert.equal(roundingOnly.surprisePrice, undefined);
-});
-
 test("gift telemetry calculates both normal and gift prices when the page only shows list price", () => {
   const telemetry = [{
     body: JSON.stringify({
@@ -399,6 +359,32 @@ test("gift telemetry calculates both normal and gift prices when the page only s
   assert.equal(sku.giftPrice, 69);
   assert.equal(sku.giftDiscountAmount, 10);
   assert.equal(calculatePriceScenarios(sku).priceCalculation.gift, "普通价 79.00 - 礼金优惠 10.00 = 69.00");
+});
+
+test("promotion telemetry keeps a one-cent surprise benefit when the SKU formula proves it", () => {
+  const telemetry = [{
+    body: JSON.stringify({
+      data: JSON.stringify({
+        args: {
+          selectSkuId: "6198474471058",
+          price1: "669",
+          promotionType: "dp-Xinxiangliji-*-online",
+          pricedetails1: "spsd4cjmj_1_1_1_10000^spsd4plan_1_1_1_13000",
+        },
+      }),
+    }),
+  }];
+  const [sku] = applyNetworkPromoData([{
+    skuId: "6198474471058",
+    originalPrice: 669,
+    normalPrice: 438.99,
+    price: 438.99,
+    priceLayers: [],
+    discountItems: [],
+  }], telemetry, { accountType: "normal" });
+
+  assert.equal(sku.normalPrice, 439);
+  assert.equal(sku.surprisePrice, 438.99);
 });
 
 test("account price formulas stay isolated by account type", () => {

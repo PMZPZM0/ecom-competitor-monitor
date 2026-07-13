@@ -1272,7 +1272,8 @@ export function applyNetworkPromoData(skuPrices, networkPayloads = [], options =
       ? Number((inferredPromotionPrice - Number(encodedBenefitDiscount)).toFixed(2))
       : null;
     const inferredBenefitPrice = encodedBenefitPrice && encodedBenefitPrice > 0 ? encodedBenefitPrice : currentNormalPrice;
-    const hasPromotionFormula = Number.isFinite(inferredPromotionPrice)
+    const hasPromotionBase = Number.isFinite(inferredPromotionPrice) && inferredPromotionPrice > 0;
+    const hasPromotionFormula = hasPromotionBase
       && Number.isFinite(inferredBenefitPrice)
       && inferredPromotionPrice > inferredBenefitPrice;
     const benefitDiscountAmount = hasPromotionFormula ? Number((inferredPromotionPrice - inferredBenefitPrice).toFixed(2)) : null;
@@ -1286,9 +1287,11 @@ export function applyNetworkPromoData(skuPrices, networkPayloads = [], options =
       formula: `普通价 ${inferredPromotionPrice.toFixed(2)} - ${accountBenefit.label} ${benefitDiscountAmount.toFixed(2)} = ${inferredBenefitPrice.toFixed(2)}`,
     } : null;
     const explicitSurprisePrice = surpriseLayer?.value || (explicitPrices.length === 1 ? explicitPrices[0] : null);
-    const normalPrice = benefitInference?.normalPrice || currentNormalPrice;
-    if (benefitInference) {
+    const normalPrice = hasPromotionBase ? inferredPromotionPrice : currentNormalPrice;
+    if (hasPromotionBase) {
       pushPriceLayer(priceLayers, { label: "普通价（活动公式）", value: normalPrice, source: "mobile-promotion-formula" });
+    }
+    if (benefitInference) {
       pushPriceLayer(priceLayers, { label: accountBenefit.layerLabel, value: inferredBenefitPrice, source: "mobile-promotion-formula" });
     }
     const discountItems = Array.from(new Map([...(sku.discountItems || []), ...data.discountItems].map((item) => [
@@ -1313,55 +1316,6 @@ export function applyNetworkPromoData(skuPrices, networkPayloads = [], options =
       surprisePrice: explicitSurprisePrice || accountFields.surprisePrice || sku.surprisePrice || null,
       surpriseStatus: explicitSurprisePrice ? "available" : accountFields.surpriseStatus || sku.surpriseStatus,
       ...accountFields,
-    };
-  });
-}
-
-export function applyAccountBenefitFormula(skuPrices, accountType) {
-  const config = {
-    normal: { label: "惊喜立减", layerLabel: "惊喜立减价", priceField: "surprisePrice", statusField: "surpriseStatus", discountField: "surpriseDiscountAmount", inferenceField: "surpriseInference" },
-    gift: { label: "礼金优惠", layerLabel: "礼金价", priceField: "giftPrice", statusField: "giftStatus", discountField: "giftDiscountAmount", inferenceField: "giftInference" },
-    vip88: { label: "88VIP优惠", layerLabel: "88VIP价", priceField: "vipPrice", statusField: "vipStatus", discountField: "vipDiscountAmount", inferenceField: "vipInference" },
-  }[accountType];
-  if (!config) return skuPrices;
-
-  return skuPrices.map((sku) => {
-    if (Number(sku[config.priceField]) > 0) return sku;
-    const originalPrice = Number(sku.originalPrice);
-    const benefitPrice = Number(sku.normalPrice ?? sku.price);
-    if (!(originalPrice > 0 && benefitPrice > 0)) return sku;
-    const items = Array.from(new Map((sku.discountItems || [])
-      .filter((item) => Number(item.amount) > 0 && !/礼金|88\s*VIP|会员|惊喜|淘金币|金币/i.test(`${item.label} ${item.text}`))
-      .map((item) => [`${item.label}:${Number(item.amount).toFixed(2)}`, { label: item.label, amount: Number(item.amount) }])).values());
-    if (!items.length) return sku;
-    const promotionDiscount = items.reduce((sum, item) => sum + item.amount, 0);
-    const normalPrice = Number((originalPrice - promotionDiscount).toFixed(2));
-    const benefitDiscountAmount = Number((normalPrice - benefitPrice).toFixed(2));
-    if (!(normalPrice > benefitPrice && normalPrice <= originalPrice && benefitDiscountAmount > 0.05)) return sku;
-    const normalFormula = `标价 ${originalPrice.toFixed(2)}${items.map((item) => ` - ${item.label} ${item.amount.toFixed(2)}`).join("")} = 普通价 ${normalPrice.toFixed(2)}`;
-    const inference = {
-      basePrice: originalPrice,
-      normalPrice,
-      benefitPrice,
-      benefitDiscountAmount,
-      accountType,
-      items,
-      normalFormula,
-      formula: `普通价 ${normalPrice.toFixed(2)} - ${config.label} ${benefitDiscountAmount.toFixed(2)} = ${benefitPrice.toFixed(2)}`,
-      source: "visible-promotion-formula",
-    };
-    const priceLayers = [...(sku.priceLayers || [])];
-    pushPriceLayer(priceLayers, { label: "普通价（活动公式）", value: normalPrice, source: inference.source });
-    pushPriceLayer(priceLayers, { label: config.layerLabel, value: benefitPrice, source: inference.source });
-    return {
-      ...sku,
-      price: normalPrice,
-      normalPrice,
-      priceLayers,
-      [config.priceField]: benefitPrice,
-      [config.statusField]: "available",
-      [config.discountField]: benefitDiscountAmount,
-      [config.inferenceField]: inference,
     };
   });
 }
@@ -1704,7 +1658,6 @@ export async function scrapeTmallProduct(product, authSession) {
   );
   structuredSku.skuPrices = applyProductProgramItems(structuredSku.skuPrices, collectProductProgramItems(html));
   structuredSku.skuPrices = structuredSku.skuPrices.map((sku) => calculateAccountPriceScenario(applyAppliedCoinDiscount(sku), accountType));
-  structuredSku.skuPrices = applyAccountBenefitFormula(structuredSku.skuPrices, authSession?.accountType);
   structuredSku.skuPrices = applyNetworkPromoData(structuredSku.skuPrices, mobilePromotionPayloads, { accountType: authSession?.accountType || "normal" })
     .map((sku) => calculateAccountPriceScenario(sku, accountType));
   const shopName = extractShopName(html, jsonData, domData);

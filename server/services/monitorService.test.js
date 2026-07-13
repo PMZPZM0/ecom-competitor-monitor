@@ -121,6 +121,38 @@ test("stale or invalid account benefits are not inherited by a new capture", () 
   assert.equal(historicalAccountPriceSnapshot([{ productId: "p", capturedAt: "2026-01-03", skuPrices: [{ skuId: "a", normalPrice: 179, giftPrice: 629 }] }], "p", "gift"), null);
 });
 
+test("strong per-SKU promotion telemetry wins over a later visible-text guess", () => {
+  const strong = {
+    productId: "p",
+    capturedAt: "2026-07-12",
+    skuPrices: [
+      { skuId: "a", price: 459, normalPrice: 459, surprisePrice: 428, originalPrice: 689, surpriseStatus: "available", surpriseInference: { normalPrice: 459, source: "mobile-promotion-formula" }, priceCalculation: { normal: "普通价 459", surprise: "惊喜价 428" }, priceLayers: [{ label: "普通价（活动公式）", value: 459 }, { label: "惊喜立减价", value: 428 }] },
+      { skuId: "b", price: 409, normalPrice: 409, surprisePrice: 369, originalPrice: 609, surpriseStatus: "available", surpriseInference: { normalPrice: 409, source: "mobile-promotion-formula" }, priceCalculation: { normal: "普通价 409", surprise: "惊喜价 369" }, priceLayers: [] },
+      { skuId: "c", price: 439, normalPrice: 439, surprisePrice: 438.99, originalPrice: 669, surpriseStatus: "available", surpriseInference: { normalPrice: 439, source: "mobile-promotion-formula" }, priceCalculation: { normal: "普通价 439", surprise: "惊喜价 438.99" }, priceLayers: [{ label: "普通价（活动公式）", value: 439 }, { label: "惊喜立减价", value: 438.99 }] },
+    ],
+  };
+  const weak = {
+    productId: "p",
+    capturedAt: "2026-07-13",
+    rawSignals: {},
+    skuPrices: [
+      { skuId: "a", price: 489, normalPrice: 489, surprisePrice: 428, originalPrice: 689, surpriseInference: { normalPrice: 489, source: "visible-promotion-formula" } },
+      { skuId: "b", price: 409, normalPrice: 409, surprisePrice: 369, originalPrice: 609, surpriseInference: { normalPrice: 409, source: "visible-promotion-formula" } },
+      { skuId: "c", price: 469, normalPrice: 469, surprisePrice: 438.99, originalPrice: 669, surpriseInference: { normalPrice: 469, source: "visible-promotion-formula" } },
+    ],
+  };
+  const restored = preserveVerifiedAccountPrices(weak, strong, "normal");
+
+  assert.deepEqual(restored.skuPrices.map((sku) => sku.normalPrice), [459, 409, 439]);
+  assert.deepEqual(restored.skuPrices.map((sku) => sku.surprisePrice), [428, 369, 438.99]);
+  const partial = structuredClone(strong);
+  partial.capturedAt = "2026-07-13";
+  partial.skuPrices[2] = { skuId: "c", price: 438.99, normalPrice: 438.99, surprisePrice: null, originalPrice: 669 };
+  const historical = historicalAccountPriceSnapshot([partial, strong], "p", "normal");
+  assert.deepEqual(historical.skuPrices.map((sku) => sku.normalPrice), [459, 409, 439]);
+  assert.equal(historical.skuPrices[2].surpriseInference.source, "mobile-promotion-formula");
+});
+
 test("normal account is the baseline and lower target-account prices become isolated benefits for every SKU", () => {
   const snapshot = (prices) => ({
     price: prices[0],

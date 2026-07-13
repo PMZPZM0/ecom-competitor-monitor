@@ -170,10 +170,20 @@ export function historicalProductMedia(snapshots, productId) {
 }
 
 export function historicalAccountPriceSnapshot(snapshots, productId, accountType = "normal") {
-  return snapshots
+  const candidates = snapshots
     .filter((snapshot) => snapshot.productId === productId)
-    .sort((left, right) => new Date(right.capturedAt || 0).getTime() - new Date(left.capturedAt || 0).getTime())
-    .find((snapshot) => (snapshot.skuPrices || []).some((sku) => hasVerifiedAccountPrice(sku, accountType))) || null;
+    .sort((left, right) => new Date(right.capturedAt || 0).getTime() - new Date(left.capturedAt || 0).getTime());
+  const skuIds = Array.from(new Set(candidates.flatMap((snapshot) => (snapshot.skuPrices || []).map((sku) => String(sku.skuId)))));
+  const selected = skuIds.map((skuId) => {
+    const entries = candidates.flatMap((snapshot) => (snapshot.skuPrices || [])
+      .filter((sku) => String(sku.skuId) === skuId)
+      .map((sku) => ({ snapshot, sku })));
+    return entries.find((entry) => hasStrongAccountFormula(entry.sku, accountType))
+      || entries.find((entry) => hasVerifiedAccountPrice(entry.sku, accountType));
+  }).filter(Boolean);
+  if (!selected.length) return null;
+  const base = candidates.find((snapshot) => selected.some((entry) => entry.snapshot === snapshot));
+  return { ...base, skuPrices: selected.map((entry) => entry.sku) };
 }
 
 export function preserveVerifiedAccountPrices(snapshot, previousSnapshot, accountType = "normal") {
@@ -186,24 +196,35 @@ export function preserveVerifiedAccountPrices(snapshot, previousSnapshot, accoun
   let preservedCount = 0;
   const skuPrices = (snapshot.skuPrices || []).map((sku) => {
     const previous = previousBySku.get(String(sku.skuId));
-    const displayedPrice = Number(sku.normalPrice ?? sku.price);
+    const displayedPrice = Number(Number(sku[priceField]) > 0 ? sku[priceField] : sku.normalPrice ?? sku.price);
     const previousBenefitPrice = Number(previous?.[priceField]);
-    if (!previous || hasVerifiedAccountPrice(sku, accountType) || !hasVerifiedAccountPrice(previous, accountType)) return sku;
+    if (!previous) return sku;
+    const previousStrong = hasStrongAccountFormula(previous, accountType);
+    const currentStrong = hasStrongAccountFormula(sku, accountType);
+    const sameOriginalPrice = Number.isFinite(Number(sku.originalPrice))
+      && Number.isFinite(Number(previous.originalPrice))
+      && Math.abs(Number(sku.originalPrice) - Number(previous.originalPrice)) <= 0.05;
+    const preferPreviousFormula = previousStrong && !currentStrong && sameOriginalPrice;
+    if (hasVerifiedAccountPrice(sku, accountType) && !preferPreviousFormula) return sku;
+    const previousBenefitVerified = hasVerifiedAccountPrice(previous, accountType);
+    if (!previousBenefitVerified && !(accountType === "normal" && previousStrong)) return sku;
     if (!Number.isFinite(displayedPrice) || Math.abs(displayedPrice - previousBenefitPrice) > 0.05) return sku;
+    const priceCalculation = previous.priceCalculation || sku.priceCalculation;
+    const priceLayers = previous.priceLayers?.length ? previous.priceLayers : sku.priceLayers;
     preservedCount += 1;
     return {
       ...sku,
       price: previous.normalPrice ?? previous.price,
       normalPrice: previous.normalPrice ?? previous.price,
-      [priceField]: previous[priceField],
-      [statusField]: previous[statusField] || "available",
-      [discountField]: previous[discountField] ?? null,
-      [inferenceField]: previous[inferenceField],
+      [priceField]: previousBenefitVerified ? previous[priceField] : null,
+      [statusField]: previousBenefitVerified ? previous[statusField] || "available" : "none",
+      [discountField]: previousBenefitVerified ? previous[discountField] ?? null : null,
+      [inferenceField]: previousBenefitVerified ? previous[inferenceField] : null,
       coinPrice: Number(sku.coinPrice) > 0 ? sku.coinPrice : previous.coinPrice,
       coinStatus: Number(sku.coinPrice) > 0 ? sku.coinStatus : previous.coinStatus,
       coinDiscountAmount: Number(sku.coinPrice) > 0 ? sku.coinDiscountAmount : previous.coinDiscountAmount,
-      priceCalculation: previous.priceCalculation || sku.priceCalculation,
-      priceLayers: previous.priceLayers?.length ? previous.priceLayers : sku.priceLayers,
+      priceCalculation: previousBenefitVerified || accountType !== "normal" ? priceCalculation : { ...priceCalculation, surprise: "未获取惊喜立减价" },
+      priceLayers: previousBenefitVerified || accountType !== "normal" ? priceLayers : (priceLayers || []).filter((layer) => !/惊喜立减价/.test(layer.label)),
       discountItems: previous.discountItems?.length ? previous.discountItems : sku.discountItems,
       accountPricePreservedAt: new Date().toISOString(),
     };
@@ -238,13 +259,18 @@ function buildRunRecord({ source, scope, startedAt, results, message }) {
 function isVerifiedBenefitPrice(normalPrice, benefitPrice) {
   const normal = Number(normalPrice);
   const benefit = Number(benefitPrice);
-  return Number.isFinite(normal) && Number.isFinite(benefit) && benefit > 0 && normal - benefit > 0.05;
+  return Number.isFinite(normal) && Number.isFinite(benefit) && benefit > 0 && normal > benefit;
 }
 
 function hasVerifiedAccountPrice(sku, accountType) {
   const priceField = accountType === "gift" ? "giftPrice" : accountType === "vip88" ? "vipPrice" : "surprisePrice";
   const inferenceField = accountType === "gift" ? "giftInference" : accountType === "vip88" ? "vipInference" : "surpriseInference";
   return isVerifiedBenefitPrice(sku?.[inferenceField]?.normalPrice ?? sku?.normalPrice ?? sku?.price, sku?.[priceField]);
+}
+
+function hasStrongAccountFormula(sku, accountType) {
+  const inferenceField = accountType === "gift" ? "giftInference" : accountType === "vip88" ? "vipInference" : "surpriseInference";
+  return /^(?:mobile|network|cross-account)-/.test(String(sku?.[inferenceField]?.source || ""));
 }
 
 export function mergeAccountSnapshots(snapshots) {
