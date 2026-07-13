@@ -1,33 +1,44 @@
 $ErrorActionPreference = "Stop"
 
 $ProjectRoot = Split-Path -Parent (Split-Path -Parent $MyInvocation.MyCommand.Path)
-$ApiUrl = "http://localhost:4317/api/health"
-$AppUrl = "http://localhost:5173"
+$ApiUrl = "http://127.0.0.1:4317/api/health"
+$AppUrl = "http://127.0.0.1:5173"
 
 if (-not (Test-Path (Join-Path $ProjectRoot "node_modules\.bin\lark-cli.cmd"))) {
   Start-Process -FilePath "npm.cmd" -WorkingDirectory $ProjectRoot -ArgumentList "install" -Wait -NoNewWindow
 }
 
-function Test-AppRunning {
+function Test-Url([string]$Url) {
   try {
-    Invoke-RestMethod -Uri $ApiUrl -TimeoutSec 2 | Out-Null
+    Invoke-WebRequest -UseBasicParsing -Uri $Url -TimeoutSec 2 | Out-Null
     return $true
   } catch {
     return $false
   }
 }
 
-if (-not (Test-AppRunning)) {
+function Start-AppService([string]$ScriptName) {
   Start-Process `
     -FilePath "powershell.exe" `
     -WorkingDirectory $ProjectRoot `
-    -WindowStyle Minimized `
-    -ArgumentList "-NoExit", "-ExecutionPolicy", "Bypass", "-Command", "npm run dev"
+    -WindowStyle Hidden `
+    -ArgumentList "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", "npm run $ScriptName"
+}
 
-  for ($i = 0; $i -lt 20; $i++) {
-    Start-Sleep -Seconds 1
-    if (Test-AppRunning) { break }
-  }
+if (-not (Test-Url $ApiUrl)) {
+  Start-AppService "dev:server"
+}
+if (-not (Test-Url $AppUrl)) {
+  Start-AppService "dev:web"
+}
+
+for ($i = 0; $i -lt 30; $i++) {
+  if ((Test-Url $ApiUrl) -and (Test-Url $AppUrl)) { break }
+  Start-Sleep -Seconds 1
+}
+
+if (-not ((Test-Url $ApiUrl) -and (Test-Url $AppUrl))) {
+  throw "Ecom Monitor startup failed: local frontend or backend was not ready within 30 seconds."
 }
 
 Start-Process $AppUrl
