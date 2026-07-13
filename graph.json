@@ -1,0 +1,610 @@
+{
+  "root": "D:/电商监控",
+  "generatedAt": "2026-07-10T11:26:34.988Z",
+  "nodes": [
+    {
+      "id": "scripts/decode-dts-runtime.mjs",
+      "file": "scripts/decode-dts-runtime.mjs",
+      "lang": "js",
+      "text": "decode dts runtime vm node runtimeurl https assets diantoushi com v3 tb_detail js entry thlhz3 source fetch text bootstrapend indexof context runinnewcontext slice timeout 5_000 aliases set a0_0x35bd match matchall _a za z0 add decoded alias escaped replace regexp 0x 9a gi rawindex json stringify terms process argv term offset count index break console log math max length"
+    },
+    {
+      "id": "scripts/inspect-dts-chunks.mjs",
+      "file": "scripts/inspect-dts-chunks.mjs",
+      "lang": "js",
+      "text": "inspect dts chunks urls https assets diantoushi com v3 tb_detail js _common 0b2f8592 _detail d7382b28 item ce533632 search 542e5bcb terms goods_image itempic picurl mainpic download media api url response fetch source text snippets term matches offset length index indexof break push slice math max discoveredurls array matchall match console log json stringify status bytes set"
+    },
+    {
+      "id": "scripts/make-icon.mjs",
+      "file": "scripts/make-icon.mjs",
+      "lang": "js",
+      "text": "make icon fs node path fileurltopath url __dirname dirname meta outpath resolve app ico size pixels uint8clampedarray blend index alpha inv math round min roundrectmask radius px py dx dy fillroundedrect colorfn floor continue color strokecircle cx cy width max ceil dist hypot abs fillcircle rr strokeline x1 y1 x2 y2 minx maxx miny maxy lengthsq xorheight dibheader buffer alloc writeuint32le writeint32le writeuint16le bitmap src dst andmask image concat header entry writeuint8 length writefilesync console log"
+    },
+    {
+      "id": "server/index.js",
+      "file": "server/index.js",
+      "lang": "js",
+      "text": "index express cors zod jszip sharp loadenv utils env js newid readdb updatedb storage db analyzedata services analysisservice buildtaobaooauthurl maskcookie masksecret authservice reschedulemonitor runmonitoronce runproductonce startscheduler monitorservice closeaccountbrowser gettaobaoauthstate openproductinaccountchrome opentaobaologin browserservice app port process pendingscans map use json limit 2mb productschema name min url group optional accounttype normal gift vip88 showcoinprice safefilename value fallback tmall replace u4e00 u9fa5 slice isallowedmediahost alicdn com taobao tbcdn cn test hostname cleanmediaurl https http jpg jpeg png webp gif mediakey gw img tolowercase itemidfromurl searchparams get id itemid match extensionfromcontenttype contenttype fallbackurl mp4 mpegurl m3u8 pathname z0 fetchremotemedia urlvalue response fetch tostring headers user agent mozilla ok content data buffer arraybuffer addremotemedia zip folder filenamebase convertimagetojpeg media animated flatten background ffffff quality chromasubsampling tobuffer file ext api health _req res monitor time date toisostring overview latestsnapshots snapshots reverse products analyses authsessions session cookie runs modelconfig baseurl openai_base_url openai v1 model openai_model gpt mini apikey hasapikey openai_api_key post req parsed parse body product prod enabled mainimage laststatus pending lasterror createdat updatedat unshift status patch updated params message delete filter snapshot productid end capture source manual open find item authsession active browserprofilekey browserport accountlabel 88vip math max query run result all settings schema intervalminutes int running nextrunat now 60_000 analysis current push config literal auth oauth scan start profilekey floor random set syncpendingscan existing synced expired authstate browserclosed cancelled loggedin waiting nickname browser cancel sync callback send code token ncode sessions activate activated csv rows capturedat shopname shoplogo autogroup title price pricerange skupricecount skupricelayers join skuprices length stringify sku skuid normalprice coinprice layers pricelayers row cell replaceall setheader text charset utf disposition attachment filename ufeff download image video encodeuricomponent lastsnapshot mainimage800 mainimages videourls array skuimages padstart _sku values skuimagekeys gallery750images protectedimagekeys detailimages added 01_800 entries 02_750 _750 03_sku 04_ 05_ monitoreditemid snapshotitemid producturl counts videos"
+    },
+    {
+      "id": "server/services/analysisService.js",
+      "file": "server/services/analysisService.js",
+      "lang": "js",
+      "text": "analysis service buildruleinsights products snapshots insights product history filter item productid id price sort date capturedat length push name continue first latest delta percent tofixed direction math abs analyzedata modelconfig payload map shopname lastsnapshot model autogroup url lastprice laststatus recentsnapshots slice apikey process env openai_api_key baseurl openai_base_url https api openai com v1 openai_model gpt mini mode rule based summary key createdat toisostring response fetch replace responses method post headers authorization bearer content application json body stringify input role system user actions ok error ai status data text output_text output flatmap join parse"
+    },
+    {
+      "id": "server/services/authService.js",
+      "file": "server/services/authService.js",
+      "lang": "js",
+      "text": "auth service crypto node buildtaobaooauthurl appkey process env taobao_app_key redirecturi taobao_redirect_uri configured message state randombytes tostring hex url https oauth taobao com authorize searchparams set response_type code client_id redirect_uri view web maskcookie cookie slice masksecret secret length"
+    },
+    {
+      "id": "server/services/browserService.js",
+      "file": "server/services/browserService.js",
+      "lang": "js",
+      "text": "browser service fs node path spawn child_process fileurltopath url __dirname dirname meta profiledir resolve data chrome profile accountprofilesdir join process env localappdata tmallcompetitormonitor account profiles remoteport taobao_browser_port browserprocesses map browsercontext options profilekey legacy replace za z0 9_ profilepath port headless chromecandidates chrome_path program files google application exe x86 microsoft edge msedge filter findchrome found find candidate existssync error validateproducturl parsed tmall com taobao test hostname openproductinaccountchrome authsession browserprofilekey browserport context ensurebrowser tostring started createtab ok accountname name accounttype normal getjson response fetch status json browserruntimestate version http ready headlesschrome user agent isbrowserready starturl https login runtime cdp createcdp websocketdebuggerurl send close finally index break promise settimeout mkdirsync recursive chromepath launchargs remote debugging dir first run disable apps window size push gpu hide scrollbars browserprocess detached stdio ignore unref set encodeuricomponent method put closetab id wsurl pending listeners socket websocket addeventlistener message parse listener get params reject delete result open timeoutms callid stringify callresolve callreject methodlisteners opentaobaologin member jhtml app gettaobaocookieheader state gettaobaoauthstate cookie loggedin browserclosed nickname cookies storage getcookies scoped domain names identitycookies unb cookie17 tracknick lgc _nk_ sn munb some nicknamecookie includes decodeuricomponent value closeaccountbrowser killed kill getrenderedhtml tab diagnosticresponses includenetworkdiagnostics network responsereceived xhr javascript text mimetype requestid enable page navigate evaluate expression scrollto math min document body scrollheight returnbyvalue documentelement outerhtml networkresponses slice payload getresponsebody html finalurl statuscode source"
+    },
+    {
+      "id": "server/services/monitorService.js",
+      "file": "server/services/monitorService.js",
+      "lang": "js",
+      "text": "monitor service newid readdb updatedb storage db js scrapetmallproduct tmallscraper timer summarizeresults results success filter result snapshot length failed total buildrunrecord source scope startedat message summary id run status finishedat date toisostring mergeaccountsnapshots snapshots preferred find entry session accounttype normal merged structuredclone byskuid map sku skuprices current get skuid accountprices push sessionid guest accountname name price normalprice coinprice originalprice pricelayers set array values accountcaptures pricerange captureproduct product authsessions sessions accounterrors error join title shopname shoplogo model itemid autogroup mainimage laststatus ok lasterror lastsnapshot updatedat snap productid runmonitoronce manual data activesessions enabled active products continue productsessions gift vip88 88vip runrecord all index findindex lastrunat nextrunat running now intervalminutes 60_000 runs slice runproductonce single item schedulenext windowcleartimeout math max delayms settimeout scheduled console finally handle cleartimeout reschedulemonitor startscheduler scheduler"
+    },
+    {
+      "id": "server/services/tmallScraper.js",
+      "file": "server/services/tmallScraper.js",
+      "lang": "js",
+      "text": "tmall scraper cheerio crypto node getrenderedhtml browserservice js useragent mozilla windows nt win64 x64 applewebkit khtml like gecko chrome safari cleanimage url src image img pic decoded replace u002f gi normalized startswith http https webp sum jpg jpeg png cookievalue cookieheader name match regexp mergesetcookie setcookieheader cookies map part split index indexof set slice trim array entries value join mobileapihost producturl hostname z0 com hk fetchmobiledetaildata itemid authsession cookie api h5api h5 mtop taobao detail getdetail data json stringify itemnumid fun _getmobileitemdetail token _m_h5_tk attempt timestamp date now params jsv appkey ttid taobao_h5_9 ecode issec antiflood anticreep h5request sign createhash md5 update digest hex response fetch urlsearchparams headers referer user agent accept application text plain language zh cn en product redirect follow html finalurl statuscode status source scrapetmallproduct startedat toisostring page fetchhtml extractitemid login captcha test skucore skubase error jsondata extractfromjson parsejsonblobs domdata extractfromdom title structuredsku extractstructuredsku shopname extractshopname shoplogo extractshoplogo model extractmodel prices pricematches filter price structuredprices skuprices sku allprices length minprice math min maxprice max skuimages unique mobiledetaildata media extractproductmedia mainimages skuid normalprice coinprice pricetitle pricelayers label kind fallback cleantitle capturedat autogroup deriveautogroup mainimage mainimage800 gallery750images detailimages videourls displayprice pricerange rawsignals htmlbytes imagecount detailimagecount videocount skuimagecount pricecount highresimagecount"
+    },
+    {
+      "id": "server/storage/db.js",
+      "file": "server/storage/db.js",
+      "lang": "js",
+      "text": "db fs node promises path fileurltopath url __dirname dirname meta datadir resolve data dbpath join json initialdata products snapshots authsessions analyses runs modelconfig baseurl apikey model gpt mini monitor intervalminutes running lastrunat nextrunat ensuredb mkdir recursive access writefile stringify utf8 readdb raw readfile parsed parse writedb updatedb mutator next newid prefix date now tostring math random slice"
+    },
+    {
+      "id": "server/utils/env.js",
+      "file": "server/utils/env.js",
+      "lang": "js",
+      "text": "env fs node path loadenv envpath resolve process cwd existssync lines readfilesync utf8 split line trimmed trim startswith includes continue index indexof key slice value"
+    },
+    {
+      "id": "src/App.tsx",
+      "file": "src/App.tsx",
+      "lang": "js",
+      "text": "app useeffect usestate react barchart3 bell database foldertree pausecircle playcircle refreshcw search settings sparkles lucide api lib button components ui badge productform features products authpanel auth metriccards dashboard producttable monitorclassification classification analysispanel analysis modelconfigpanel snapshotfeed monitoring datarecords monitorsettings runlog authsession overview product types domain navitems id label icon title sku subtitle ai categories cookie records csv pageid setoverview activepage setactivepage saved window localstorage getitem tmall monitor active page some item busy setbusy busyproductid setbusyproductid monitortogglebusy setmonitortogglebusy analysisbusy setanalysisbusy error seterror notice setnotice refresh err message timer setinterval 30_000 clearinterval setitem handleadd payload name url group accounttype normal gift vip88 showcoinprice addproduct result captureproduct run finally runmonitor togglemonitorrunning running data updatemonitor runanalysis toggleproduct updateproduct enabled deleteproduct confirm activatesession session activateauthsession deletesession deleteauthsession clearsnapshots savemonitorsettings intervalminutes savemodelconfig baseurl apikey model updatemodelconfig div classname flex min screen items center justify bg f4fbf8 text slate runs currentpage find ontoggle oncapture ondelete sessions authsessions onadd classificationpanel onsaved onactivate analyses onrun config modelconfig onsave renderpage grid cols 420px_1fr gap space snapshots onclear max xl aside inset left border emerald white px rounded md font semibold xs local intelligence nav map key onclick full sm hover main ml header sticky top between backdrop blur h1 nextrunat date tolocaletimestring variant secondary danger disabled red"
+    },
+    {
+      "id": "src/components/ui/badge.tsx",
+      "file": "src/components/ui/badge.tsx",
+      "lang": "js",
+      "text": "badge htmlattributes react cn lib utils classname props htmlspanelement span inline flex items center rounded md border emerald bg px py text xs font medium"
+    },
+    {
+      "id": "src/components/ui/button.tsx",
+      "file": "src/components/ui/button.tsx",
+      "lang": "js",
+      "text": "button buttonhtmlattributes react cn lib utils buttonprops htmlbuttonelement variant primary secondary ghost danger size sm md classname props inline flex items center justify gap rounded border font medium transition disabled cursor allowed opacity px text xs emerald bg white hover sky transparent slate red"
+    },
+    {
+      "id": "src/components/ui/card.tsx",
+      "file": "src/components/ui/card.tsx",
+      "lang": "js",
+      "text": "card htmlattributes react cn lib utils classname props htmldivelement div rounded lg border emerald bg white shadow sm cardheader slate cardtitle htmlheadingelement h2 text font semibold cardcontent"
+    },
+    {
+      "id": "src/components/ui/input.tsx",
+      "file": "src/components/ui/input.tsx",
+      "lang": "js",
+      "text": "input inputhtmlattributes textareahtmlattributes react cn lib utils classname props htmlinputelement full rounded md border slate bg white px text sm outline none transition placeholder focus emerald ring textarea htmltextareaelement min resize py"
+    },
+    {
+      "id": "src/features/analysis/AnalysisPanel.tsx",
+      "file": "src/features/analysis/AnalysisPanel.tsx",
+      "lang": "js",
+      "text": "analysis panel braincircuit wandsparkles lucide react button components ui card cardcontent cardheader cardtitle types domain props analyses onrun promise busy analysispanel latest classname flex items center gap text emerald ai space onclick disabled full div rounded md bg sm leading summary insights map insight index key border slate"
+    },
+    {
+      "id": "src/features/analysis/ModelConfigPanel.tsx",
+      "file": "src/features/analysis/ModelConfigPanel.tsx",
+      "lang": "js",
+      "text": "model config panel usestate react keyround save lucide button components ui card cardcontent cardheader cardtitle input overview types domain props modelconfig onsave payload baseurl apikey promise modelconfigpanel setbaseurl https api openai com v1 setmodel gpt mini setapikey saving setsaving message setmessage submit formevent preventdefault error finally classname flex items center gap text emerald form grid onsubmit label sm font medium slate value onchange target placeholder key hasapikey password disabled xs leading"
+    },
+    {
+      "id": "src/features/auth/AuthPanel.tsx",
+      "file": "src/features/auth/AuthPanel.tsx",
+      "lang": "js",
+      "text": "auth panel useeffect useref usestate react cookie crown gift loadercircle qrcode shieldcheck userroundcheck lucide api lib button components ui card cardcontent cardheader cardtitle input textarea badge authsession types domain props sessions onsaved promise onactivate session ondelete authpanel name setname accounttype setaccounttype normal vip88 setcookie pendingprofilekey setpendingprofilekey message setmessage busy setbusy checkingscan accountgroups title description icon color sky 88vip violet amber openoauth scan chrome result starttaobaoscan profilekey error finally cancelled check current taobaoscanstatus status synced timer window setinterval clearinterval cancelscan canceltaobaoscan savecookie formevent preventdefault addauthsession div classname grid gap xl cols 420px_minmax 1fr flex items center text emerald space rounded md border bg sm mb font medium leading sku 1fr_180px value onchange target placeholder select slate white px option 1fr_auto variant secondary full onclick disabled animate spin danger form onsubmit required submit xs row start justify between mt length filter enabled active source taobao browser map group groupsessions panelclass iconclass section key min semibold 11px shrink id shadow truncate wrap pt size ghost dashed py"
+    },
+    {
+      "id": "src/features/classification/MonitorClassification.tsx",
+      "file": "src/features/classification/MonitorClassification.tsx",
+      "lang": "js",
+      "text": "monitor classification useeffect usememo usestate react alerttriangle lucide badge components ui card cardcontent cardheader cardtitle currency timeago lib utils product types domain imagepreview shoplogo preview products productdisplay productmonitorcard productmodel productshopname productdisplayutils props ontoggle promise oncapture ondelete busyproductid modelgroup model shopgroup shopname models numericprices flatmap lastsnapshot skuprices map sku price filter rangelabel prices length math min max skucount reduce sum lastupdated values date updatedat gettime isfinite toisostring buildgroups byshop set get array entries shopproducts bymodel find modelproducts sort localecompare zh cn monitorclassification setpreview selectedshop setselectedshop groups activegroups group totalmodels errorcount laststatus error closeonescape keyboardevent key escape window addeventlistener keydown removeeventlistener div classname grid gap xl cols 260px_minmax 1fr space mt text sm slate button onclick flex full items center justify between rounded md border px py bg white emerald span left hover src line clamp font medium xs semibold enabled red inline shop row start wrap sky right mb id busy onpreview dashed onclose"
+    },
+    {
+      "id": "src/features/dashboard/MetricCards.tsx",
+      "file": "src/features/dashboard/MetricCards.tsx",
+      "lang": "js",
+      "text": "metric cards alerttriangle image packagesearch timer lucide react card cardcontent components ui timeago lib utils overview types domain metriccards errors products filter product laststatus error length imagecount snapshots rawsignals metrics label value icon tone emerald sky amber monitor lastrunat slate div classname grid cols gap map key flex items center justify between text sm mt 2xl font semibold rounded md bg"
+    },
+    {
+      "id": "src/features/monitoring/DataRecords.tsx",
+      "file": "src/features/monitoring/DataRecords.tsx",
+      "lang": "js",
+      "text": "data records download trash2 lucide react button components ui card cardcontent cardheader cardtitle currency lib utils product snapshot types domain props snapshots products onclear promise datarecords productname map id name shopname modelname model autogroup exportcsv response fetch api csv ok error blob url createobjecturl anchor document createelement href tmall body appendchild click remove revokeobjecturl classname flex row items center justify between sku div gap variant secondary onclick danger table full text left sm thead bg slate xs tr th px py tbody divide key td date capturedat tolocalestring font medium get productid title semibold emerald price skuprices length rawsignals imagecount skuimagecount source browser colspan"
+    },
+    {
+      "id": "src/features/monitoring/MonitorSettings.tsx",
+      "file": "src/features/monitoring/MonitorSettings.tsx",
+      "lang": "js",
+      "text": "monitor settings usestate react pausecircle playcircle save lucide button components ui card cardcontent cardheader cardtitle input overview types domain props onsave payload intervalminutes running promise monitorsettings interval setintervalvalue classname flex items end gap div label mb block text sm font medium slate min max value onchange target variant secondary onclick"
+    },
+    {
+      "id": "src/features/monitoring/RunLog.tsx",
+      "file": "src/features/monitoring/RunLog.tsx",
+      "lang": "js",
+      "text": "run log activity checkcircle2 clock xcircle lucide react badge components ui card cardcontent cardheader cardtitle timeago lib utils runrecord types domain sourcelabel source scheduled manual product all statustone status success border emerald bg text amber red runlog runs classname flex items center gap max 320px space overflow auto map div key id rounded md slate start justify between sm font medium failed mt xs leading message span inline finishedat total length"
+    },
+    {
+      "id": "src/features/monitoring/SnapshotFeed.tsx",
+      "file": "src/features/monitoring/SnapshotFeed.tsx",
+      "lang": "js",
+      "text": "snapshot feed images lucide react card cardcontent cardheader cardtitle components ui currency lib utils types domain snapshotfeed snapshots classname flex items center gap text emerald max 360px space overflow auto scrollbar thin slice map div key id rounded md border slate justify between line clamp sm font medium title semibold price mt xs span date capturedat tolocalestring rawsignals imagecount skuimagecount sku length"
+    },
+    {
+      "id": "src/features/products/DiscountDetailDialog.tsx",
+      "file": "src/features/products/DiscountDetailDialog.tsx",
+      "lang": "js",
+      "text": "discount detail dialog receipttext lucide react useeffect currency lib utils product types domain coinpriceforsku displaypricelabel layerclass normalpriceforsku pricelayersforsku skuprice productdisplayutils detailrow label value kind sources labelorder 88vip discountdetaildialog sku accounttype showcoinprice onclose nonnullable closeonescape keyboardevent key escape window addeventlistener keydown removeeventlistener layers originallayer find layer original originalprice normalprice coinprice candidates price filter map accountprices test pricelayers join accountname merged candidate tofixed existing get array set rows values sort left right div classname inset flex items center justify bg slate role presentation onmousedown section aria modal labelledby title skuid full max xl rounded md white shadow 2xl stoppropagation header start between gap border px py min span inline shrink sky text h2 id sm font semibold mt truncate xs name 11px button hover onclick grid cols 92px_minmax 1fr _90px pb divide row saved math percent fit medium emerald line through"
+    },
+    {
+      "id": "src/features/products/productDisplay.tsx",
+      "file": "src/features/products/productDisplay.tsx",
+      "lang": "js",
+      "text": "product display download play store lucide react button components ui downloadhref productdisplayutils preview src title shoplogo div classname flex shrink items center justify overflow hidden rounded md border slate bg white tmall taobao avatar user test img alt full contain text imagepreview onclose inset onclick max 5xl shadow 2xl stoppropagation mb between gap line clamp sm font medium variant ghost size 78vh imagethumb label imageclassname onpreview aspect dashed xs group relative block absolute bottom px py 11px span href videolink index inline amber target _blank hover"
+    },
+    {
+      "id": "src/features/products/productDisplayUtils.ts",
+      "file": "src/features/products/productDisplayUtils.ts",
+      "lang": "js",
+      "text": "product display utils currency lib types domain skuprice nonnullable lastsnapshot skuprices displaypricelabel rawlabel accounttype test vip vip88 88vip gift normalpriceforsku sku normalprice normallayer pricelayers find layer kind discount original label value price coinpriceforsku coinprice pricelayersforsku options showcoinprice includeoriginal capturedlayers length pricetitle originalprice layers source normalized order seen set map filter key add sort left right layerclass border slate bg white text violet orange amber sky emerald downloadhref src name api download image url encodeuricomponent downloadmediabundlehref productid products media isusefulproductimage avatar sns user flag logo safe loading sprite icon wangwang qrcode tps gw img alicdn com imgextra bao uploaded cleanshopname compact replace tmall taobao gi match cleaned slice infermodel explicit za z0 token cleanproducttitle title trim producttitle productshopname shopname productmodel model productitemid captured itemid searchparams get id productimages snapshot explicitprimary mainimage800 explicitgallery array gallery750images primary gallery secondary snapshotimages mainimages candidates mainimage unique productdetailimages detailimages productvideos videos imageowners mediaimages skuimages pathowner suffixowner video videourls http https parsed continue protocol hostname mp4 m3u8 pathname placeholder sample preview videoowner size push tostring pricerangetext range pricerange"
+    },
+    {
+      "id": "src/features/products/ProductForm.tsx",
+      "file": "src/features/products/ProductForm.tsx",
+      "lang": "js",
+      "text": "product form usestate react crown gift link2 plus userround lucide button components ui card cardcontent cardheader cardtitle input authsession types domain props sessions onadd payload name url group accounttype normal vip88 showcoinprice promise productform seturl setname setgroup setaccounttype setshowcoinprice submitting setsubmitting formerror setformerror submit formevent preventdefault parsedurl taobao tmall com test hostname error available some session enabled active 88vip message finally classname flex items center gap text emerald grid onsubmit label sm font medium slate value onchange target placeholder https detail item htm id required fieldset legend div cols icon color sky amber violet map option count filter length selected selectedclass border bg key onclick min col justify rounded md px py xs white hover span 10px opacity between block sku checkbox accent disabled leading red"
+    },
+    {
+      "id": "src/features/products/ProductMonitorCard.tsx",
+      "file": "src/features/products/ProductMonitorCard.tsx",
+      "lang": "js",
+      "text": "product monitor card check coins copy download externallink pausecircle playcircle receipttext rotatecw trash2 lucide react lazy suspense useeffect usestate badge components ui button api lib currency timeago utils snapshot types domain imagethumb shoplogo videolink preview productdisplay discountdetaildialog coinpriceforsku displaypricelabel downloadhref downloadmediabundlehref layerclass normalpriceforsku pricelayersforsku productdetailimages productimages productitemid productmodel productshopname producttitle productvideos skuprice productdisplayutils skupricetrend module props ontoggle promise oncapture ondelete busy onpreview primarypriceclass label text orange value amber 88vip violet sky capturestatus lastsnapshot div classname rounded md border slate bg white flex items center justify between gap xs font medium laststatus error red ok mt span skuprices length sku updatedat source browser lasterror leading skupricepanel snapshots showcoinprice copiedskuid setcopiedskuid copiedskunameid setcopiedskunameid detailsku setdetailsku accounttypelabel normal gift vip88 copyskuid skuid navigator clipboard writetext window settimeout copyskuname name min self start emerald shadow sm grid cols repeat auto fit minmax 230px 1fr map alllayers originallayer find layer kind original pricelayers includeoriginal normalprice coinprice displayedcoinprice coinpricelabel primarylabel accounttype primaryclass seenprices set tofixed additionalprices accountprices accountprice price filter key add transition hover 58px_minmax group relative overflow hidden full onclick image src title img alt contain 10px href _sku absolute bottom right inline tl jpg 18px truncate shrink whitespace nowrap 11px px id quantity quantitytext ml py pt col semibold none slice line clamp discount dashed fallback animate pulse onclose productmonitorcard copiedtitle setcopiedtitle copieditemid setcopieditemid copiedproducturl setcopiedproducturl openingproduct setopeningproduct setshowcoinprice savingcoinsetting setsavingcoinsetting setsnapshots primary gallery detailimages videos shopname model itemid accounttypeclass active productsnapshots history copytitle copyitemid copyproducturl url openproduct alert message finally togglecoinprice next updateproduct wrap disabled opacity google chrome aria end role switch top left 330px_minmax space mb 188px imageclassname aspect index 58px video variant secondary ghost enabled danger"
+    },
+    {
+      "id": "src/features/products/ProductTable.tsx",
+      "file": "src/features/products/ProductTable.tsx",
+      "lang": "js",
+      "text": "product table useeffect usestate react card cardcontent cardheader cardtitle components ui badge types domain imagepreview preview productdisplay productmonitorcard props products ontoggle promise oncapture ondelete busyproductid producttable setpreview closeonescape keyboardevent key escape window addeventlistener keydown removeeventlistener classname min 420px flex row items start justify between gap div mt text sm slate border sky bg length space map id busy onpreview rounded md dashed center onclose"
+    },
+    {
+      "id": "src/features/products/SkuPriceTrend.tsx",
+      "file": "src/features/products/SkuPriceTrend.tsx",
+      "lang": "js",
+      "text": "sku price trend useeffect usememo usestate react cartesiangrid legend line linechart responsivecontainer tooltip xaxis yaxis recharts trendingup lucide currency lib utils snapshot types domain linecolors 0284c7 ea580c 7c3aed d97706 db2777 0891b2 4f46e5 skupricetrend snapshots selectedsku setselectedsku all orderedsnapshots sort left right date capturedat gettime skuoptions options map reverse skuprices skuid set name array id some visibleskus slice filter chartdata point time tolocalestring zh cn month digit day hour minute section classname mt min border slate pt div mb flex wrap items center justify between gap span inline rounded md bg sky text xs font semibold 11px length select value onchange target max 260px white px outline none focus aria label option key full pb width height data margin top bottom stroke e2e8f0 strokedasharray vertical datakey tick fill 64748b fontsize tickline axisline mintickgap tickformatter math floor ceil formatter labelformatter payload contentstyle borderradius bordercolor cbd5e1 wrapperstyle paddingtop index monotone strokewidth dot activedot connectnulls isanimationactive dashed"
+    },
+    {
+      "id": "src/lib/api.ts",
+      "file": "src/lib/api.ts",
+      "lang": "js",
+      "text": "api analysis authsession overview product runrecord snapshot types domain baseurl meta env vite_api_base request path init requestinit promise response fetch headers content application json ok text message body parse error status addproduct payload name url group accounttype normal gift vip88 showcoinprice products method post stringify updateproduct id patch deleteproduct delete captureproduct run capture productsnapshots snapshots limit openproduct accountname open runmonitor monitor updatemonitor intervalminutes running settings updatemodelconfig apikey model modelconfig config runanalysis taobaooauthurl configured auth taobao oauth starttaobaoscan profilekey port scan start taobaoscanstatus waiting synced cancelled session canceltaobaoscan cancel addauthsession cookie sessions activateauthsession activate deleteauthsession clearsnapshots"
+    },
+    {
+      "id": "src/lib/utils.ts",
+      "file": "src/lib/utils.ts",
+      "lang": "js",
+      "text": "utils clsx classvalue twmerge tailwind merge cn inputs currency value isnan tofixed timeago delta date now gettime minutes math max round"
+    },
+    {
+      "id": "src/main.tsx",
+      "file": "src/main.tsx",
+      "lang": "js",
+      "text": "main strictmode react createroot dom client index css app tsx document getelementbyid root render"
+    },
+    {
+      "id": "src/types/domain.ts",
+      "file": "src/types/domain.ts",
+      "lang": "js",
+      "text": "domain product id name shopname shoplogo model itemid autogroup url group accounttype normal gift vip88 showcoinprice enabled mainimage laststatus pending ok error lasterror lastsnapshot snapshot createdat updatedat productid capturedat title mainimage800 gallery750images mainimages detailimages videourls skuimages skuprices array skuid image price normalprice coinprice originalprice pricetitle pricelayers label value kind discount original source quantity quantitytext accountprices sessionid accountname pricerange fetch browser rawsignals htmlbytes imagecount skuimagecount pricecount highresimagecount videocount detailimagecount authsession cookie manual taobao browserprofilekey browserport active analysis mode ai rule based summary insights actions runrecord all single scheduled scope status success failed startedat finishedat total message overview products snapshots analyses authsessions runs modelconfig baseurl apikey hasapikey monitor intervalminutes running lastrunat nextrunat"
+    },
+    {
+      "id": "vite.config.ts",
+      "file": "vite.config.ts",
+      "lang": "js",
+      "text": "vite config defineconfig react vitejs plugin tailwindcss plugins server port watch ignored data proxy api http localhost"
+    }
+  ],
+  "edges": [
+    {
+      "from": "server/index.js",
+      "to": "server/utils/env.js"
+    },
+    {
+      "from": "server/index.js",
+      "to": "server/storage/db.js"
+    },
+    {
+      "from": "server/index.js",
+      "to": "server/services/analysisService.js"
+    },
+    {
+      "from": "server/index.js",
+      "to": "server/services/authService.js"
+    },
+    {
+      "from": "server/index.js",
+      "to": "server/services/monitorService.js"
+    },
+    {
+      "from": "server/index.js",
+      "to": "server/services/browserService.js"
+    },
+    {
+      "from": "server/services/monitorService.js",
+      "to": "server/storage/db.js"
+    },
+    {
+      "from": "server/services/monitorService.js",
+      "to": "server/services/tmallScraper.js"
+    },
+    {
+      "from": "server/services/tmallScraper.js",
+      "to": "server/services/browserService.js"
+    },
+    {
+      "from": "src/App.tsx",
+      "to": "src/lib/api.ts"
+    },
+    {
+      "from": "src/App.tsx",
+      "to": "src/components/ui/button.tsx"
+    },
+    {
+      "from": "src/App.tsx",
+      "to": "src/components/ui/badge.tsx"
+    },
+    {
+      "from": "src/App.tsx",
+      "to": "src/features/products/ProductForm.tsx"
+    },
+    {
+      "from": "src/App.tsx",
+      "to": "src/features/auth/AuthPanel.tsx"
+    },
+    {
+      "from": "src/App.tsx",
+      "to": "src/features/dashboard/MetricCards.tsx"
+    },
+    {
+      "from": "src/App.tsx",
+      "to": "src/features/products/ProductTable.tsx"
+    },
+    {
+      "from": "src/App.tsx",
+      "to": "src/features/classification/MonitorClassification.tsx"
+    },
+    {
+      "from": "src/App.tsx",
+      "to": "src/features/analysis/AnalysisPanel.tsx"
+    },
+    {
+      "from": "src/App.tsx",
+      "to": "src/features/analysis/ModelConfigPanel.tsx"
+    },
+    {
+      "from": "src/App.tsx",
+      "to": "src/features/monitoring/SnapshotFeed.tsx"
+    },
+    {
+      "from": "src/App.tsx",
+      "to": "src/features/monitoring/DataRecords.tsx"
+    },
+    {
+      "from": "src/App.tsx",
+      "to": "src/features/monitoring/MonitorSettings.tsx"
+    },
+    {
+      "from": "src/App.tsx",
+      "to": "src/features/monitoring/RunLog.tsx"
+    },
+    {
+      "from": "src/App.tsx",
+      "to": "src/types/domain.ts"
+    },
+    {
+      "from": "src/components/ui/badge.tsx",
+      "to": "src/lib/utils.ts"
+    },
+    {
+      "from": "src/components/ui/button.tsx",
+      "to": "src/lib/utils.ts"
+    },
+    {
+      "from": "src/components/ui/card.tsx",
+      "to": "src/lib/utils.ts"
+    },
+    {
+      "from": "src/components/ui/input.tsx",
+      "to": "src/lib/utils.ts"
+    },
+    {
+      "from": "src/features/analysis/AnalysisPanel.tsx",
+      "to": "src/components/ui/button.tsx"
+    },
+    {
+      "from": "src/features/analysis/AnalysisPanel.tsx",
+      "to": "src/components/ui/card.tsx"
+    },
+    {
+      "from": "src/features/analysis/AnalysisPanel.tsx",
+      "to": "src/types/domain.ts"
+    },
+    {
+      "from": "src/features/analysis/ModelConfigPanel.tsx",
+      "to": "src/components/ui/button.tsx"
+    },
+    {
+      "from": "src/features/analysis/ModelConfigPanel.tsx",
+      "to": "src/components/ui/card.tsx"
+    },
+    {
+      "from": "src/features/analysis/ModelConfigPanel.tsx",
+      "to": "src/components/ui/input.tsx"
+    },
+    {
+      "from": "src/features/analysis/ModelConfigPanel.tsx",
+      "to": "src/types/domain.ts"
+    },
+    {
+      "from": "src/features/auth/AuthPanel.tsx",
+      "to": "src/lib/api.ts"
+    },
+    {
+      "from": "src/features/auth/AuthPanel.tsx",
+      "to": "src/components/ui/button.tsx"
+    },
+    {
+      "from": "src/features/auth/AuthPanel.tsx",
+      "to": "src/components/ui/card.tsx"
+    },
+    {
+      "from": "src/features/auth/AuthPanel.tsx",
+      "to": "src/components/ui/input.tsx"
+    },
+    {
+      "from": "src/features/auth/AuthPanel.tsx",
+      "to": "src/components/ui/badge.tsx"
+    },
+    {
+      "from": "src/features/auth/AuthPanel.tsx",
+      "to": "src/types/domain.ts"
+    },
+    {
+      "from": "src/features/classification/MonitorClassification.tsx",
+      "to": "src/components/ui/badge.tsx"
+    },
+    {
+      "from": "src/features/classification/MonitorClassification.tsx",
+      "to": "src/components/ui/card.tsx"
+    },
+    {
+      "from": "src/features/classification/MonitorClassification.tsx",
+      "to": "src/lib/utils.ts"
+    },
+    {
+      "from": "src/features/classification/MonitorClassification.tsx",
+      "to": "src/types/domain.ts"
+    },
+    {
+      "from": "src/features/classification/MonitorClassification.tsx",
+      "to": "src/features/products/productDisplay.tsx"
+    },
+    {
+      "from": "src/features/classification/MonitorClassification.tsx",
+      "to": "src/features/products/ProductMonitorCard.tsx"
+    },
+    {
+      "from": "src/features/classification/MonitorClassification.tsx",
+      "to": "src/features/products/productDisplayUtils.ts"
+    },
+    {
+      "from": "src/features/dashboard/MetricCards.tsx",
+      "to": "src/components/ui/card.tsx"
+    },
+    {
+      "from": "src/features/dashboard/MetricCards.tsx",
+      "to": "src/lib/utils.ts"
+    },
+    {
+      "from": "src/features/dashboard/MetricCards.tsx",
+      "to": "src/types/domain.ts"
+    },
+    {
+      "from": "src/features/monitoring/DataRecords.tsx",
+      "to": "src/components/ui/button.tsx"
+    },
+    {
+      "from": "src/features/monitoring/DataRecords.tsx",
+      "to": "src/components/ui/card.tsx"
+    },
+    {
+      "from": "src/features/monitoring/DataRecords.tsx",
+      "to": "src/lib/utils.ts"
+    },
+    {
+      "from": "src/features/monitoring/DataRecords.tsx",
+      "to": "src/types/domain.ts"
+    },
+    {
+      "from": "src/features/monitoring/MonitorSettings.tsx",
+      "to": "src/components/ui/button.tsx"
+    },
+    {
+      "from": "src/features/monitoring/MonitorSettings.tsx",
+      "to": "src/components/ui/card.tsx"
+    },
+    {
+      "from": "src/features/monitoring/MonitorSettings.tsx",
+      "to": "src/components/ui/input.tsx"
+    },
+    {
+      "from": "src/features/monitoring/MonitorSettings.tsx",
+      "to": "src/types/domain.ts"
+    },
+    {
+      "from": "src/features/monitoring/RunLog.tsx",
+      "to": "src/components/ui/badge.tsx"
+    },
+    {
+      "from": "src/features/monitoring/RunLog.tsx",
+      "to": "src/components/ui/card.tsx"
+    },
+    {
+      "from": "src/features/monitoring/RunLog.tsx",
+      "to": "src/lib/utils.ts"
+    },
+    {
+      "from": "src/features/monitoring/RunLog.tsx",
+      "to": "src/types/domain.ts"
+    },
+    {
+      "from": "src/features/monitoring/SnapshotFeed.tsx",
+      "to": "src/components/ui/card.tsx"
+    },
+    {
+      "from": "src/features/monitoring/SnapshotFeed.tsx",
+      "to": "src/lib/utils.ts"
+    },
+    {
+      "from": "src/features/monitoring/SnapshotFeed.tsx",
+      "to": "src/types/domain.ts"
+    },
+    {
+      "from": "src/features/products/DiscountDetailDialog.tsx",
+      "to": "src/lib/utils.ts"
+    },
+    {
+      "from": "src/features/products/DiscountDetailDialog.tsx",
+      "to": "src/types/domain.ts"
+    },
+    {
+      "from": "src/features/products/DiscountDetailDialog.tsx",
+      "to": "src/features/products/productDisplayUtils.ts"
+    },
+    {
+      "from": "src/features/products/productDisplay.tsx",
+      "to": "src/components/ui/button.tsx"
+    },
+    {
+      "from": "src/features/products/productDisplay.tsx",
+      "to": "src/features/products/productDisplayUtils.ts"
+    },
+    {
+      "from": "src/features/products/productDisplayUtils.ts",
+      "to": "src/lib/utils.ts"
+    },
+    {
+      "from": "src/features/products/productDisplayUtils.ts",
+      "to": "src/types/domain.ts"
+    },
+    {
+      "from": "src/features/products/ProductForm.tsx",
+      "to": "src/components/ui/button.tsx"
+    },
+    {
+      "from": "src/features/products/ProductForm.tsx",
+      "to": "src/components/ui/card.tsx"
+    },
+    {
+      "from": "src/features/products/ProductForm.tsx",
+      "to": "src/components/ui/input.tsx"
+    },
+    {
+      "from": "src/features/products/ProductForm.tsx",
+      "to": "src/types/domain.ts"
+    },
+    {
+      "from": "src/features/products/ProductMonitorCard.tsx",
+      "to": "src/components/ui/badge.tsx"
+    },
+    {
+      "from": "src/features/products/ProductMonitorCard.tsx",
+      "to": "src/components/ui/button.tsx"
+    },
+    {
+      "from": "src/features/products/ProductMonitorCard.tsx",
+      "to": "src/lib/api.ts"
+    },
+    {
+      "from": "src/features/products/ProductMonitorCard.tsx",
+      "to": "src/lib/utils.ts"
+    },
+    {
+      "from": "src/features/products/ProductMonitorCard.tsx",
+      "to": "src/types/domain.ts"
+    },
+    {
+      "from": "src/features/products/ProductMonitorCard.tsx",
+      "to": "src/features/products/productDisplay.tsx"
+    },
+    {
+      "from": "src/features/products/ProductMonitorCard.tsx",
+      "to": "src/features/products/DiscountDetailDialog.tsx"
+    },
+    {
+      "from": "src/features/products/ProductMonitorCard.tsx",
+      "to": "src/features/products/productDisplayUtils.ts"
+    },
+    {
+      "from": "src/features/products/ProductMonitorCard.tsx",
+      "to": "src/features/products/SkuPriceTrend.tsx"
+    },
+    {
+      "from": "src/features/products/ProductTable.tsx",
+      "to": "src/components/ui/card.tsx"
+    },
+    {
+      "from": "src/features/products/ProductTable.tsx",
+      "to": "src/components/ui/badge.tsx"
+    },
+    {
+      "from": "src/features/products/ProductTable.tsx",
+      "to": "src/types/domain.ts"
+    },
+    {
+      "from": "src/features/products/ProductTable.tsx",
+      "to": "src/features/products/productDisplay.tsx"
+    },
+    {
+      "from": "src/features/products/ProductTable.tsx",
+      "to": "src/features/products/ProductMonitorCard.tsx"
+    },
+    {
+      "from": "src/features/products/SkuPriceTrend.tsx",
+      "to": "src/lib/utils.ts"
+    },
+    {
+      "from": "src/features/products/SkuPriceTrend.tsx",
+      "to": "src/types/domain.ts"
+    },
+    {
+      "from": "src/lib/api.ts",
+      "to": "src/types/domain.ts"
+    },
+    {
+      "from": "src/main.tsx",
+      "to": "src/App.tsx"
+    }
+  ]
+}

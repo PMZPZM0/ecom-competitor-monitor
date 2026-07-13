@@ -1,0 +1,40 @@
+appId: com.ecommerce.competitor-monitor
+productName: 电商竞品监控
+artifactName: ${productName}-${version}-${os}-${arch}.${ext}
+directories:
+  output: release
+files:
+  - dist/**/*
+  - electron/**/*
+  - server/**/*
+  - public/app-icon.ico
+  - public/app-icon.png
+  - package.json
+  - '!server/data/**'
+  - '!server/**/*.test.js'
+  - '!output/**'
+  - '!canvas/**'
+asarUnpack:
+  - node_modules/sharp/**/*
+  - node_modules/@img/**/*
+  - node_modules/@larksuite/cli/**/*
+win:
+  target:
+    - nsis
+  icon: public/app-icon.ico
+nsis:
+  oneClick: false
+  allowToChangeInstallationDirectory: true
+  createDesktopShortcut: true
+  createStartMenuShortcut: true
+  shortcutName: 电商竞品监控
+  uninstallDisplayName: 电商竞品监控
+mac:
+  target:
+    - dmg
+    - zip
+  category: public.app-category.business
+  icon: public/app-icon.png
+  identity: null
+  hardenedRuntime: false
+  gatekeeperAssess: false

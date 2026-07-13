@@ -1,0 +1,53 @@
+{
+  "name": "tmall-competitor-monitor",
+  "productName": "电商竞品监控",
+  "private": true,
+  "version": "1.0.0",
+  "type": "module",
+  "main": "electron/main.mjs",
+  "scripts": {
+    "dev": "concurrently \"npm:dev:server\" \"npm:dev:web\"",
+    "dev:web": "vite",
+    "dev:server": "node server/index.js",
+    "dev:desktop": "concurrently \"npm:dev:web\" \"wait-on http://127.0.0.1:5173 && electron electron/main.mjs --dev\"",
+    "build": "tsc -b && vite build",
+    "lint": "oxlint",
+    "test": "node --test server/services/*.test.js server/utils/*.test.js",
+    "preview": "vite preview",
+    "start": "node server/index.js",
+    "pack:win": "npm run build && electron-builder --win nsis",
+    "pack:mac": "npm run build && electron-builder --mac dmg zip"
+  },
+  "dependencies": {
+    "@larksuite/cli": "^1.0.68",
+    "@tailwindcss/vite": "^4.3.2",
+    "cheerio": "^1.2.0",
+    "class-variance-authority": "^0.7.1",
+    "clsx": "^2.1.1",
+    "concurrently": "^10.0.3",
+    "cors": "^2.8.6",
+    "express": "^5.2.1",
+    "jszip": "^3.10.1",
+    "lucide-react": "^1.23.0",
+    "node-cron": "^4.6.0",
+    "react": "^19.2.7",
+    "react-dom": "^19.2.7",
+    "recharts": "^3.9.2",
+    "sharp": "^0.35.3",
+    "tailwind-merge": "^3.6.0",
+    "tailwindcss": "^4.3.2",
+    "zod": "^4.4.3"
+  },
+  "devDependencies": {
+    "@types/node": "^24.13.2",
+    "@types/react": "^19.2.17",
+    "@types/react-dom": "^19.2.3",
+    "@vitejs/plugin-react": "^6.0.3",
+    "electron": "^43.1.0",
+    "electron-builder": "^26.15.3",
+    "oxlint": "^1.71.0",
+    "typescript": "~6.0.2",
+    "vite": "^8.1.1",
+    "wait-on": "^9.0.10"
+  }
+}
