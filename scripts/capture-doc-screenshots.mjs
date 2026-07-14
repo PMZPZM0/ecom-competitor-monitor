@@ -8,6 +8,7 @@ const root = path.resolve(import.meta.dirname, "..");
 const outputDir = path.join(root, "docs", "screenshots");
 const appUrl = process.env.SCREENSHOT_APP_URL || "http://127.0.0.1:5173";
 const apiUrl = process.env.SCREENSHOT_API_URL || "http://127.0.0.1:4317";
+const screenshotOnly = process.env.SCREENSHOT_ONLY || "";
 const port = 9431;
 const profileDir = path.join(os.tmpdir(), `ecom-monitor-docs-${Date.now()}`);
 const chromeCandidates = process.platform === "win32"
@@ -214,6 +215,7 @@ async function prepare(cdp, expression = "scrollTo(0, 0)") {
 }
 
 async function capture(cdp, sensitive, file, { page, action, requireRedaction = false, redactPrices = false } = {}) {
+  if (screenshotOnly && file !== screenshotOnly) return;
   await showPage(cdp, page);
   await prepare(cdp, action);
   const rects = await redactionRects(cdp, sensitive, redactPrices);
