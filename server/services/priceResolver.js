@@ -1,12 +1,17 @@
 import crypto from "node:crypto";
 
-export const PRICE_PARSER_VERSION = "evidence-v1.1";
+export const PRICE_PARSER_VERSION = "evidence-v1.2";
 
 const endpoint = "mtop.taobao.pcdetail.data.adjust";
 const publicPromotionLabels = new Map([
   ["spsd4plan", "平台活动立减"],
   ["spsd4cjmj", "超级立减"],
   ["spsd4bybt", "百亿补贴"],
+  ["spsd4price", "平台立减"],
+  ["spsd4autopri", "平台加补"],
+]);
+const governmentPromotionLabels = new Map([
+  ["zflj", "政府补贴"],
 ]);
 
 function decodeJson(value, depth = 0) {
@@ -55,6 +60,7 @@ function requestIdentity(url) {
 
 function promotionKind(code, accountType) {
   if (publicPromotionLabels.has(code)) return "public";
+  if (governmentPromotionLabels.has(code)) return "government";
   if (code === "spsd4jzjj") return "surprise";
   if (code === "1" || code === "coupon2RedForNewUser") return "gift";
   if (/88|vip|member/i.test(code)) return "vip88";
@@ -63,7 +69,7 @@ function promotionKind(code, accountType) {
 }
 
 function promotionLabel(code, kind) {
-  return publicPromotionLabels.get(code) || {
+  return publicPromotionLabels.get(code) || governmentPromotionLabels.get(code) || {
     surprise: "惊喜立减",
     gift: "首单礼金",
     vip88: "88VIP优惠",
@@ -95,6 +101,7 @@ function ambiguous(reason, extra = {}) {
     reason,
     channels: {
       normal: { status: "ambiguous", valueCents: null, reason, evidenceIds: [] },
+      government: unavailableChannel(),
       surprise: unavailableChannel(),
       gift: unavailableChannel(),
       vip88: unavailableChannel(),
@@ -160,18 +167,19 @@ export function resolvePcdetailAdjustPayload(payload, options = {}) {
   const normalCents = listCents - total(publicPromotions);
   if (normalCents <= 0) return ambiguous("public-formula-invalid");
 
+  const governmentPromotions = byKind("government");
+  const governmentCents = normalCents - total(governmentPromotions);
   const surprisePromotions = byKind("surprise");
   const giftPromotions = byKind("gift");
   const vip88Promotions = byKind("vip88");
-  if (giftPromotions.length && vip88Promotions.length) return ambiguous("mixed-account-benefits");
-  const surpriseCents = normalCents - total(surprisePromotions);
-  const accountBenefitKind = giftPromotions.length ? "gift" : vip88Promotions.length ? "vip88" : null;
-  const accountBenefitPromotions = accountBenefitKind === "gift" ? giftPromotions : vip88Promotions;
-  const accountBenefitCents = surpriseCents - total(accountBenefitPromotions);
+  const surpriseCents = governmentCents - total(surprisePromotions);
+  const giftCents = surpriseCents - total(giftPromotions);
+  const vip88Cents = giftCents - total(vip88Promotions);
+  const accountBenefitCents = vip88Cents;
   const coinPromotions = byKind("coin");
   const finalCents = accountBenefitCents - total(coinPromotions);
-  if (surpriseCents <= 0 || accountBenefitCents <= 0 || finalCents <= 0 || finalCents !== displayedCents) {
-    return ambiguous("formula-does-not-close", { formulaInputs: { listCents, normalCents, surpriseCents, accountBenefitCents, finalCents, displayedCents, promotions } });
+  if (governmentCents <= 0 || surpriseCents <= 0 || giftCents <= 0 || vip88Cents <= 0 || finalCents <= 0 || finalCents !== displayedCents) {
+    return ambiguous("formula-does-not-close", { formulaInputs: { listCents, normalCents, governmentCents, surpriseCents, giftCents, vip88Cents, finalCents, displayedCents, promotions } });
   }
 
   const capturedAt = options.capturedAt || new Date().toISOString();
@@ -191,27 +199,40 @@ export function resolvePcdetailAdjustPayload(payload, options = {}) {
   const normalFormula = promotionFormula("标价", listCents, publicPromotions, "普通价", normalCents);
   const channels = {
     normal: resolvedChannel(normalCents, normalFormula),
+    government: unavailableChannel(),
     surprise: unavailableChannel(),
     gift: unavailableChannel(),
     vip88: unavailableChannel(),
     coin: unavailableChannel(),
   };
+  if (governmentPromotions.length) {
+    const formula = promotionFormula("普通价", normalCents, governmentPromotions, "国补价", governmentCents);
+    const item = makeEvidence(baseEvidence, { kind: "government", valueCents: governmentCents, source: "api-formula", sourcePath: "$.data.componentsVO.xsRedPacketParamVO.xsRedPocketParams.tbShopRedPocket.umpInfo.umpPromotionList", formula });
+    evidence.push(item);
+    channels.government = resolvedChannel(governmentCents, formula, [item.id]);
+  }
   if (surprisePromotions.length) {
-    const formula = promotionFormula("普通价", normalCents, surprisePromotions, "惊喜立减价", surpriseCents);
+    const formula = promotionFormula(governmentPromotions.length ? "国补价" : "普通价", governmentCents, surprisePromotions, "惊喜立减价", surpriseCents);
     const item = makeEvidence(baseEvidence, { kind: "surprise", valueCents: surpriseCents, source: "api-formula", sourcePath: "$.data.componentsVO.xsRedPacketParamVO.trackParams.price2", formula });
     evidence.push(item);
     channels.surprise = resolvedChannel(surpriseCents, formula, [item.id]);
   }
-  if (accountBenefitKind) {
-    const label = accountBenefitKind === "gift" ? "礼金价" : "88VIP价";
-    const baseLabel = surprisePromotions.length ? "惊喜立减价" : "普通价";
-    const formula = promotionFormula(baseLabel, surpriseCents, accountBenefitPromotions, label, accountBenefitCents);
-    const item = makeEvidence(baseEvidence, { kind: accountBenefitKind, valueCents: accountBenefitCents, source: "api-formula", sourcePath: "$.data.componentsVO.xsRedPacketParamVO.trackParams.price2", formula });
+  if (giftPromotions.length) {
+    const baseLabel = surprisePromotions.length ? "惊喜立减价" : governmentPromotions.length ? "国补价" : "普通价";
+    const formula = promotionFormula(baseLabel, surpriseCents, giftPromotions, "礼金价", giftCents);
+    const item = makeEvidence(baseEvidence, { kind: "gift", valueCents: giftCents, source: "api-formula", sourcePath: "$.data.componentsVO.xsRedPacketParamVO.trackParams.price2", formula });
     evidence.push(item);
-    channels[accountBenefitKind] = resolvedChannel(accountBenefitCents, formula, [item.id]);
+    channels.gift = resolvedChannel(giftCents, formula, [item.id]);
+  }
+  if (vip88Promotions.length) {
+    const baseLabel = giftPromotions.length ? "礼金价" : surprisePromotions.length ? "惊喜立减价" : governmentPromotions.length ? "国补价" : "普通价";
+    const formula = promotionFormula(baseLabel, giftCents, vip88Promotions, "88VIP价", vip88Cents);
+    const item = makeEvidence(baseEvidence, { kind: "vip88", valueCents: vip88Cents, source: "api-formula", sourcePath: "$.data.componentsVO.xsRedPacketParamVO.trackParams.price2", formula });
+    evidence.push(item);
+    channels.vip88 = resolvedChannel(vip88Cents, formula, [item.id]);
   }
   if (coinPromotions.length) {
-    const baseLabel = accountBenefitKind ? (accountBenefitKind === "gift" ? "礼金价" : "88VIP价") : surprisePromotions.length ? "惊喜立减价" : "普通价";
+    const baseLabel = vip88Promotions.length ? "88VIP价" : giftPromotions.length ? "礼金价" : surprisePromotions.length ? "惊喜立减价" : governmentPromotions.length ? "国补价" : "普通价";
     const formula = promotionFormula(baseLabel, accountBenefitCents, coinPromotions, "淘金币价", finalCents);
     const item = makeEvidence(baseEvidence, { kind: "coin", valueCents: finalCents, source: "api-formula", sourcePath: "$.data.componentsVO.xsRedPacketParamVO.trackParams.price2", formula });
     evidence.push(item);
@@ -263,9 +284,10 @@ export function applyPriceResolution(sku, resolution) {
     return Number.isSafeInteger(cents) ? cents / 100 : null;
   };
   const normalPrice = value("normal");
-  const priceLayers = (sku.priceLayers || []).filter((layer) => !/普通价（活动公式）|惊喜立减价|礼金价|88VIP价/.test(layer.label || ""));
+  const priceLayers = (sku.priceLayers || []).filter((layer) => !/普通价（活动公式）|国补价|惊喜立减价|礼金价|88VIP价/.test(layer.label || ""));
   priceLayers.push({ label: "普通价", value: normalPrice, kind: "price", source: "pcdetail-adjust" });
   const channelFields = {
+    government: ["governmentPrice", "governmentStatus", "governmentDiscountAmount", "国补价"],
     surprise: ["surprisePrice", "surpriseStatus", "surpriseDiscountAmount", "惊喜立减价"],
     gift: ["giftPrice", "giftStatus", "giftDiscountAmount", "礼金价"],
     vip88: ["vipPrice", "vipStatus", "vipDiscountAmount", "88VIP价"],
@@ -288,6 +310,7 @@ export function applyPriceResolution(sku, resolution) {
     priceCalculation: {
       ...(sku.priceCalculation || {}),
       normal: resolution.channels.normal.formula,
+      government: resolution.channels.government.formula || "本次未获取明确政府补贴证据",
       surprise: resolution.channels.surprise.formula || "本次未获取明确惊喜立减证据",
       gift: resolution.channels.gift.formula || "本次未获取明确礼金证据",
       vip88: resolution.channels.vip88.formula || "本次未获取明确88VIP证据",
@@ -298,9 +321,13 @@ export function applyPriceResolution(sku, resolution) {
     const channelPrice = channelValues[kind];
     result[priceField] = channelPrice;
     result[statusField] = channelPrice != null ? "available" : "none";
-    const baseCents = kind === "surprise"
+    const baseCents = kind === "government"
       ? resolution.channels.normal.valueCents
-      : resolution.channels.surprise.valueCents ?? resolution.channels.normal.valueCents;
+      : kind === "surprise"
+        ? resolution.channels.government.valueCents ?? resolution.channels.normal.valueCents
+        : kind === "vip88"
+          ? resolution.channels.gift.valueCents ?? resolution.channels.surprise.valueCents ?? resolution.channels.government.valueCents ?? resolution.channels.normal.valueCents
+          : resolution.channels.surprise.valueCents ?? resolution.channels.government.valueCents ?? resolution.channels.normal.valueCents;
     result[discountField] = channelPrice != null ? (baseCents - resolution.channels[kind].valueCents) / 100 : null;
   }
   const coinPrice = value("coin");
@@ -310,6 +337,7 @@ export function applyPriceResolution(sku, resolution) {
     const coinBaseCents = resolution.channels.gift.valueCents
       ?? resolution.channels.vip88.valueCents
       ?? resolution.channels.surprise.valueCents
+      ?? resolution.channels.government.valueCents
       ?? resolution.channels.normal.valueCents;
     result.coinDiscountAmount = (coinBaseCents - resolution.channels.coin.valueCents) / 100;
   } else {

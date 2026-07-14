@@ -5,10 +5,11 @@ import { currency } from '../../lib/utils'
 import type { Product, Snapshot } from '../../types/domain'
 
 type Sku = Snapshot['skuPrices'][number]
-type Channel = 'normal' | 'surprise' | 'gift' | 'vip88' | 'coin'
+type Channel = 'normal' | 'government' | 'surprise' | 'gift' | 'vip88' | 'coin'
 
 const channels: Array<{ key: Channel; label: string; value: (sku: Sku) => number | null | undefined; formula: keyof NonNullable<Sku['priceCalculation']> }> = [
   { key: 'normal', label: '普通价', value: (sku) => sku.normalPrice ?? sku.price, formula: 'normal' },
+  { key: 'government', label: '国补价', value: (sku) => sku.governmentPrice, formula: 'government' },
   { key: 'surprise', label: '惊喜立减价', value: (sku) => sku.surprisePrice, formula: 'surprise' },
   { key: 'gift', label: '礼金价', value: (sku) => sku.giftPrice, formula: 'gift' },
   { key: 'vip88', label: '88VIP价', value: (sku) => sku.vipPrice, formula: 'vip88' },
@@ -74,7 +75,7 @@ export function PriceVerificationDialog({ product, onClose }: { product: Product
                 <div className="min-w-0 text-sm font-semibold text-slate-900"><span className="line-clamp-2">{sku.name}</span></div>
                 <div className="text-xs tabular-nums text-slate-400">SKU ID {sku.skuId}</div>
               </div>
-              <div className="mt-3 grid gap-2 lg:grid-cols-5">
+              <div className="mt-3 grid gap-2 md:grid-cols-3 xl:grid-cols-6">
                 {channels.map((channel) => {
                   const item = inspectChannel(sku, channel)
                   const unavailable = !item.verified

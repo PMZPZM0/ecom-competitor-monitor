@@ -180,8 +180,8 @@ function App() {
     await refresh()
   }
 
-  async function saveProductSchedule(product: Product, intervalMinutes: number, monitorStartAt: string) {
-    await api.updateProduct(product.id, { monitorIntervalMinutes: intervalMinutes, monitorStartAt })
+  async function saveProductSchedule(product: Product, mode: NonNullable<Product['monitorScheduleMode']>, intervalMinutes: number, monitorStartAt: string | null) {
+    await api.updateProduct(product.id, { monitorScheduleMode: mode, monitorIntervalMinutes: intervalMinutes, monitorStartAt })
     await refresh()
   }
 

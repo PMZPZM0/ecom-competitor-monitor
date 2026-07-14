@@ -17,7 +17,7 @@ type Props = {
   onCapture: (product: Product) => Promise<Product | void>
   onCaptureBatch: (products: Product[]) => Promise<void>
   onPauseBatch: (products: Product[]) => Promise<void>
-  onSchedule: (product: Product, intervalMinutes: number, monitorStartAt: string) => Promise<void>
+  onSchedule: (product: Product, mode: NonNullable<Product['monitorScheduleMode']>, intervalMinutes: number, monitorStartAt: string | null) => Promise<void>
   onToggle: (product: Product) => Promise<void>
 }
 
@@ -149,8 +149,8 @@ export function MonitorQueue({ products, monitor, authSessions, busyProductId, b
     }
   }
 
-  async function saveSchedule(product: Product, intervalMinutes: number, monitorStartAt: string) {
-    await onSchedule(product, intervalMinutes, monitorStartAt)
+  async function saveSchedule(product: Product, mode: NonNullable<Product['monitorScheduleMode']>, intervalMinutes: number, monitorStartAt: string | null) {
+    await onSchedule(product, mode, intervalMinutes, monitorStartAt)
     setScheduleProduct(null)
     setFeedback({ tone: 'success', message: `“${productTitle(product)}”的抓取计划已保存，并同步到总览和监控分类。` })
   }
@@ -186,7 +186,7 @@ export function MonitorQueue({ products, monitor, authSessions, busyProductId, b
               <div className="flex items-center gap-2"><input type="checkbox" checked={selectedIds.has(product.id)} onChange={(event) => toggleProductSelection(product.id, event.target.checked)} aria-label={`选择 ${productTitle(product)}`} /><span className="text-sm font-semibold tabular-nums text-slate-400">{(page - 1) * 10 + index + 1}</span></div>
               <div className="flex min-w-0 items-center gap-3"><div className="h-14 w-14 shrink-0 overflow-hidden rounded-md border border-slate-200 bg-slate-50">{primary ? <img src={primary} alt="" loading="lazy" decoding="async" className="h-full w-full object-contain" /> : null}</div><div className="min-w-0"><div className="truncate text-sm font-semibold text-slate-900" title={productTitle(product)}>{productTitle(product)}</div><div className="mt-1 flex min-w-0 flex-wrap items-center gap-x-3 gap-y-1 text-xs text-slate-500"><span className="truncate">{productShopName(product)}</span><span>型号 {productModel(product)}</span><span className="tabular-nums">ID {productItemId(product) || '未识别'}</span></div><div className="mt-1 text-xs text-slate-400">上次抓取：{product.lastSnapshot?.capturedAt ? new Date(product.lastSnapshot.capturedAt).toLocaleString('zh-CN', { hour12: false }) : '尚未成功抓取'} · {product.lastSnapshot?.skuPrices?.length || 0} 个 SKU</div></div></div>
               <div><Badge className={product.accountType === 'gift' ? 'border-amber-100 bg-amber-50 text-amber-700' : product.accountType === 'vip88' ? 'border-violet-100 bg-violet-50 text-violet-700' : 'border-sky-100 bg-sky-50 text-sky-700'}>{accountLabel(product)}</Badge></div>
-              <div className="min-w-0"><Badge className={status.className}>{status.label}</Badge><div className="mt-1.5 flex items-center gap-1 text-xs text-slate-600"><Clock3 className="h-3.5 w-3.5 shrink-0 text-slate-400" />{monitor.running && product.nextMonitorAt ? new Date(product.nextMonitorAt).toLocaleString('zh-CN', { hour12: false }) : '暂不执行'}</div><div className="mt-1 text-xs text-slate-400">每 {product.monitorIntervalMinutes ?? monitor.intervalMinutes} 分钟</div></div>
+              <div className="min-w-0"><Badge className={status.className}>{status.label}</Badge><div className="mt-1.5 flex items-center gap-1 text-xs text-slate-600"><Clock3 className="h-3.5 w-3.5 shrink-0 text-slate-400" />{monitor.running && product.nextMonitorAt ? new Date(product.nextMonitorAt).toLocaleString('zh-CN', { hour12: false }) : '暂不执行'}</div><div className="mt-1 text-xs text-slate-400">{product.monitorScheduleMode === 'once' ? '单次定时 · 完成后暂停' : `循环监控 · 每 ${product.monitorIntervalMinutes ?? monitor.intervalMinutes} 分钟`}</div></div>
               <div className="flex justify-end gap-2"><Button type="button" variant="secondary" size="sm" onClick={() => setScheduleProduct(product)} disabled={working} title="设置日期、时间和抓取周期"><CalendarClock className="h-4 w-4" />定时</Button><Button type="button" size="sm" onClick={() => capture(product)} disabled={working || protectionRemaining > 0} title={protectionRemaining > 0 ? '本软件设置的采集频率保护，不代表淘宝账号风控' : '立即抓取当前商品'}>{working ? <LoaderCircle className="h-4 w-4 animate-spin" /> : <RotateCw className="h-4 w-4" />}{working ? '执行中' : protectionRemaining > 0 ? formatProtectionCountdown(protectionRemaining) : '抓取'}</Button><Button type="button" variant="secondary" size="sm" onClick={() => remove(product)} disabled={working} title="移出监控队列，保留定时设置"><PauseCircle className="h-4 w-4" />移出</Button></div>
             </div>
           )
@@ -195,7 +195,7 @@ export function MonitorQueue({ products, monitor, authSessions, busyProductId, b
       </div>
 
       {filteredProducts.length > 10 && <div className="flex items-center justify-end gap-2"><button type="button" onClick={() => setPage((current) => Math.max(1, current - 1))} disabled={page === 1} className="inline-flex h-8 w-8 items-center justify-center rounded-md border border-slate-200 bg-white text-slate-600 disabled:opacity-40" title="上一页"><ChevronLeft className="h-4 w-4" /></button><span className="text-xs text-slate-500">第 {page} / {totalPages} 页</span><button type="button" onClick={() => setPage((current) => Math.min(totalPages, current + 1))} disabled={page === totalPages} className="inline-flex h-8 w-8 items-center justify-center rounded-md border border-slate-200 bg-white text-slate-600 disabled:opacity-40" title="下一页"><ChevronRight className="h-4 w-4" /></button></div>}
-      {scheduleProduct && <MonitorScheduleDialog product={scheduleProduct} monitor={monitor} onClose={() => setScheduleProduct(null)} onSave={(intervalMinutes, monitorStartAt) => saveSchedule(scheduleProduct, intervalMinutes, monitorStartAt)} />}
+      {scheduleProduct && <MonitorScheduleDialog product={scheduleProduct} monitor={monitor} onClose={() => setScheduleProduct(null)} onSave={(mode, intervalMinutes, monitorStartAt) => saveSchedule(scheduleProduct, mode, intervalMinutes, monitorStartAt)} />}
     </section>
   )
 }

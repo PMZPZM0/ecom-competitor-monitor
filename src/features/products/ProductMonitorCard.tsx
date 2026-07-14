@@ -42,7 +42,7 @@ type Props = {
   monitor: Overview['monitor']
   onToggle: (product: Product) => Promise<void>
   onToggleGlobal: () => Promise<void>
-  onSchedule: (product: Product, intervalMinutes: number, monitorStartAt: string) => Promise<void>
+  onSchedule: (product: Product, mode: NonNullable<Product['monitorScheduleMode']>, intervalMinutes: number, monitorStartAt: string | null) => Promise<void>
   onCapture: (product: Product) => Promise<Product | void>
   onRetryBuyerShows: (product: Product) => Promise<Product>
   onDelete: (product: Product) => Promise<void>
@@ -312,6 +312,7 @@ export function ProductMonitorCard({ product, monitor, onToggle, onToggleGlobal,
   const [retryingBuyerShows, setRetryingBuyerShows] = useState(false)
   const [operation, setOperation] = useState<OperationStatus | null>(null)
   const operationTimerRef = useRef<number | null>(null)
+  const [scheduleModeDraft, setScheduleModeDraft] = useState<NonNullable<Product['monitorScheduleMode']>>(product.monitorScheduleMode === 'once' ? 'once' : 'interval')
   const [scheduleDraft, setScheduleDraft] = useState(String(product.monitorIntervalMinutes ?? monitor.intervalMinutes))
   const initialIntervalMinutes = product.monitorIntervalMinutes ?? monitor.intervalMinutes
   const [scheduleDateDraft, setScheduleDateDraft] = useState(() => scheduleInputParts(product.monitorStartAt, product.nextMonitorAt, initialIntervalMinutes).date)
@@ -380,10 +381,11 @@ export function ProductMonitorCard({ product, monitor, onToggle, onToggleGlobal,
 
   useEffect(() => {
     const parts = scheduleInputParts(product.monitorStartAt, product.nextMonitorAt, product.monitorIntervalMinutes ?? monitor.intervalMinutes)
+    setScheduleModeDraft(product.monitorScheduleMode === 'once' ? 'once' : 'interval')
     setScheduleDraft(String(product.monitorIntervalMinutes ?? monitor.intervalMinutes))
     setScheduleDateDraft(parts.date)
     setScheduleTimeDraft(parts.time)
-  }, [product.id, product.monitorIntervalMinutes, product.monitorStartAt, product.nextMonitorAt, monitor.intervalMinutes])
+  }, [product.id, product.monitorScheduleMode, product.monitorIntervalMinutes, product.monitorStartAt, product.nextMonitorAt, monitor.intervalMinutes])
 
   useEffect(() => () => {
     if (operationTimerRef.current) window.clearTimeout(operationTimerRef.current)
@@ -538,19 +540,23 @@ export function ProductMonitorCard({ product, monitor, onToggle, onToggleGlobal,
 
   async function saveSchedule() {
     const intervalMinutes = Number(scheduleDraft)
-    if (!Number.isInteger(intervalMinutes) || intervalMinutes < 30 || intervalMinutes > 1440) {
+    if (scheduleModeDraft === 'interval' && (!Number.isInteger(intervalMinutes) || intervalMinutes < 30 || intervalMinutes > 1440)) {
       window.alert('单品定时监控间隔必须是 30 至 1440 分钟的整数。')
       return
     }
     const monitorStart = new Date(`${scheduleDateDraft}T${scheduleTimeDraft}:00`)
-    if (!scheduleDateDraft || !scheduleTimeDraft || Number.isNaN(monitorStart.getTime())) {
+    if (scheduleModeDraft === 'once' && (!scheduleDateDraft || !scheduleTimeDraft || Number.isNaN(monitorStart.getTime()))) {
       window.alert('请选择有效的监控日期和抓取时间。')
+      return
+    }
+    if (scheduleModeDraft === 'once' && monitorStart.getTime() <= Date.now()) {
+      window.alert('单次定时必须选择未来时间。')
       return
     }
     setSavingSchedule(true)
     showOperation({ key: 'schedule', tone: 'progress', message: '正在保存定时监控计划...' })
     try {
-      await onSchedule(product, intervalMinutes, monitorStart.toISOString())
+      await onSchedule(product, scheduleModeDraft, intervalMinutes, scheduleModeDraft === 'once' ? monitorStart.toISOString() : null)
       const blockers = [!monitor.running ? '开启全局自动监控' : '', !product.enabled ? '启用本商品' : ''].filter(Boolean)
       showOperation({
         key: 'schedule',
@@ -732,41 +738,26 @@ export function ProductMonitorCard({ product, monitor, onToggle, onToggleGlobal,
         </div>
         <div className="mt-3 flex flex-wrap items-center gap-2 text-sm text-slate-600">
           <CalendarClock className="h-4 w-4 shrink-0 text-slate-400" />
-          <span>从</span>
-          <label htmlFor={`monitor-date-${product.id}`} className="sr-only">监控日期</label>
-          <input
-            id={`monitor-date-${product.id}`}
-            type="date"
-            value={scheduleDateDraft}
-            onChange={(event) => setScheduleDateDraft(event.target.value)}
-            className="h-9 w-[145px] rounded-md border border-slate-200 bg-white px-2 text-sm text-slate-800 outline-none focus:border-emerald-400"
-          />
-          <label htmlFor={`monitor-time-${product.id}`} className="sr-only">详细抓取时间</label>
-          <input
-            id={`monitor-time-${product.id}`}
-            type="time"
-            step={60}
-            value={scheduleTimeDraft}
-            onChange={(event) => setScheduleTimeDraft(event.target.value)}
-            className="h-9 w-[105px] rounded-md border border-slate-200 bg-white px-2 text-sm text-slate-800 outline-none focus:border-emerald-400"
-          />
-          <span>开始，每</span>
-          <input
-            type="number"
-            min={30}
-            max={1440}
-            step={1}
-            value={scheduleDraft}
-            onChange={(event) => setScheduleDraft(event.target.value)}
-            className="h-9 w-[88px] rounded-md border border-slate-200 bg-white px-2 text-center text-sm text-slate-800 outline-none focus:border-emerald-400"
-            aria-label="单品定时监控间隔"
-          />
-          <span>分钟</span>
+          <div className="inline-flex h-9 overflow-hidden rounded-md border border-slate-200 bg-white" role="radiogroup" aria-label="抓取计划模式">
+            <button type="button" role="radio" aria-checked={scheduleModeDraft === 'once'} onClick={() => setScheduleModeDraft('once')} className={`px-3 text-sm font-medium ${scheduleModeDraft === 'once' ? 'bg-emerald-600 text-white' : 'text-slate-600 hover:bg-slate-50'}`}>单次定时</button>
+            <button type="button" role="radio" aria-checked={scheduleModeDraft === 'interval'} onClick={() => setScheduleModeDraft('interval')} className={`border-l border-slate-200 px-3 text-sm font-medium ${scheduleModeDraft === 'interval' ? 'bg-emerald-600 text-white' : 'text-slate-600 hover:bg-slate-50'}`}>循环监控</button>
+          </div>
+          {scheduleModeDraft === 'once' ? <>
+            <span>执行于</span>
+            <label htmlFor={`monitor-date-${product.id}`} className="sr-only">监控日期</label>
+            <input id={`monitor-date-${product.id}`} type="date" value={scheduleDateDraft} onChange={(event) => setScheduleDateDraft(event.target.value)} className="h-9 w-[145px] rounded-md border border-slate-200 bg-white px-2 text-sm text-slate-800 outline-none focus:border-emerald-400" />
+            <label htmlFor={`monitor-time-${product.id}`} className="sr-only">详细抓取时间</label>
+            <input id={`monitor-time-${product.id}`} type="time" step={60} value={scheduleTimeDraft} onChange={(event) => setScheduleTimeDraft(event.target.value)} className="h-9 w-[105px] rounded-md border border-slate-200 bg-white px-2 text-sm text-slate-800 outline-none focus:border-emerald-400" />
+          </> : <>
+            <span>每</span>
+            <input type="number" min={30} max={1440} step={1} value={scheduleDraft} onChange={(event) => setScheduleDraft(event.target.value)} className="h-9 w-[88px] rounded-md border border-slate-200 bg-white px-2 text-center text-sm text-slate-800 outline-none focus:border-emerald-400" aria-label="单品循环监控间隔" />
+            <span>分钟抓取一次</span>
+          </>}
           <button type="button" onClick={saveSchedule} disabled={savingSchedule} className="inline-flex h-9 items-center justify-center gap-1.5 rounded-md bg-emerald-600 px-3 font-medium text-white hover:bg-emerald-700 disabled:opacity-60" title="保存本商品抓取计划">
             <Save className="h-3.5 w-3.5" />
             {savingSchedule ? '保存中' : '保存计划'}
           </button>
-          <span className="text-xs text-slate-500">暂停任一开关都不会删除此计划。</span>
+          <span className="text-xs text-slate-500">{scheduleModeDraft === 'once' ? '执行完成后自动暂停本商品。' : '只按当前分钟周期循环，不读取日期时间。'}</span>
         </div>
       </div>
 

@@ -3,11 +3,12 @@ import type { Product } from '../../types/domain'
 
 export type SkuPrice = NonNullable<Product['lastSnapshot']>['skuPrices'][number]
 
-export function verifiedPriceChannel(sku: SkuPrice, channel: 'normal' | 'surprise' | 'gift' | 'vip88' | 'coin') {
+export function verifiedPriceChannel(sku: SkuPrice, channel: 'normal' | 'government' | 'surprise' | 'gift' | 'vip88' | 'coin') {
   return sku.resolutionStatus === 'verified' && sku.priceResolution?.channels?.[channel]?.status === 'verified'
 }
 
 export function displayPriceLabel(rawLabel = '', accountType?: Product['accountType']) {
+  if (/政府补贴|国家补贴|国补/.test(rawLabel)) return '国补价'
   if (/惊喜立减|惊喜价/.test(rawLabel)) return '惊喜立减价'
   if (/淘金币|金币/.test(rawLabel)) return '淘金币价'
   if (/88\s*VIP/i.test(rawLabel)) return '88VIP价'
@@ -26,7 +27,7 @@ export function normalPriceForSku(sku: SkuPrice) {
   const normalLayer = sku.priceLayers?.find((layer) => (
     layer.kind !== 'discount' &&
     layer.kind !== 'original' &&
-    !/淘金币|金币|首单|礼金|88|会员|VIP/i.test(layer.label)
+    !/政府补贴|国家补贴|国补|淘金币|金币|首单|礼金|88|会员|VIP/i.test(layer.label)
   ))
   return normalLayer?.value || sku.price
 }
@@ -108,6 +109,7 @@ export function priceLayersForSku(sku: SkuPrice, options: { includeOriginal?: bo
       ]
   const layers = [
     ...(sku.normalPrice ? [{ label: '普通价', value: sku.normalPrice, kind: 'price' as const, source: 'normalized' }] : []),
+    ...(sku.governmentPrice ? [{ label: '国补价', value: sku.governmentPrice, kind: 'price' as const, source: 'normalized' }] : []),
     ...(sku.surprisePrice ? [{ label: '惊喜立减价', value: sku.surprisePrice, kind: 'price' as const, source: 'normalized' }] : []),
     ...(sku.giftPrice ? [{ label: '礼金价', value: sku.giftPrice, kind: 'price' as const, source: 'normalized' }] : []),
     ...(sku.vipPrice ? [{ label: '88VIP价', value: sku.vipPrice, kind: 'price' as const, source: 'normalized' }] : []),
@@ -116,12 +118,13 @@ export function priceLayersForSku(sku: SkuPrice, options: { includeOriginal?: bo
   ]
   const order = (label: string, kind?: string) => {
     if (kind === 'original' || label === '标价') return 0
-    if (/普通价|店铺优惠后|到手价|券后|平台|补贴/.test(label)) return 1
-    if (/惊喜立减|惊喜价/.test(label)) return 2
-    if (/淘金币|金币/.test(label)) return 3
+    if (/普通价|店铺优惠后|到手价|券后|平台/.test(label)) return 1
+    if (/政府补贴|国家补贴|国补/.test(label)) return 2
+    if (/惊喜立减|惊喜价/.test(label)) return 3
     if (/首单|礼金/.test(label)) return 4
     if (/88\s*VIP/i.test(label)) return 5
-    return 6
+    if (/淘金币|金币/.test(label)) return 6
+    return 7
   }
   const seen = new Set<string>()
   return layers
@@ -143,6 +146,7 @@ export function layerClass(kind?: string, label?: string) {
   if (/礼金/.test(label || '')) return 'border-orange-100 bg-orange-50 text-orange-700'
   if (/淘金币|金币/.test(label || '')) return 'border-amber-100 bg-amber-50 text-amber-700'
   if (/惊喜立减|惊喜价/.test(label || '')) return 'border-rose-100 bg-rose-50 text-rose-700'
+  if (/政府补贴|国家补贴|国补/.test(label || '')) return 'border-teal-100 bg-teal-50 text-teal-700'
   if (/普通价/.test(label || '')) return 'border-sky-100 bg-sky-50 text-sky-700'
   if (kind === 'discount') return 'border-amber-100 bg-amber-50 text-amber-700'
   return 'border-emerald-100 bg-emerald-50 text-emerald-700'

@@ -12,7 +12,7 @@ type Props = {
   totalProducts?: number
   onToggle: (product: Product) => Promise<void>
   onToggleGlobal: () => Promise<void>
-  onSchedule: (product: Product, intervalMinutes: number, monitorStartAt: string) => Promise<void>
+  onSchedule: (product: Product, mode: NonNullable<Product['monitorScheduleMode']>, intervalMinutes: number, monitorStartAt: string | null) => Promise<void>
   onCapture: (product: Product) => Promise<Product | void>
   onRetryBuyerShows: (product: Product) => Promise<Product>
   onDelete: (product: Product) => Promise<void>

@@ -9,6 +9,8 @@ export type Product = {
   url: string
   group: string
   accountType?: 'normal' | 'gift' | 'vip88'
+  /** Exactly one automatic schedule mode is active for a product. Legacy data defaults to interval. */
+  monitorScheduleMode?: 'once' | 'interval'
   /** Per-product scheduled capture interval. Omit to use the global default. */
   monitorIntervalMinutes?: number | null
   /** User-selected local date/time anchor, persisted as an ISO timestamp. */
@@ -40,7 +42,7 @@ export type PriceResolution = {
   reason?: string
   parserVersion?: string
   evidenceHash?: string
-  channels?: Partial<Record<'normal' | 'surprise' | 'gift' | 'vip88' | 'coin', PriceChannelResolution>>
+  channels?: Partial<Record<'normal' | 'government' | 'surprise' | 'gift' | 'vip88' | 'coin', PriceChannelResolution>>
 }
 
 export type PriceEvidence = {
@@ -48,7 +50,7 @@ export type PriceEvidence = {
   itemId: string
   skuId: string
   accountType: 'normal' | 'gift' | 'vip88'
-  kind: 'list' | 'normal' | 'surprise' | 'gift' | 'vip88' | 'coin'
+  kind: 'list' | 'normal' | 'government' | 'surprise' | 'gift' | 'vip88' | 'coin'
   valueCents: number
   source: 'api-explicit' | 'api-formula' | 'selected-dom'
   endpoint: string
@@ -112,6 +114,9 @@ export type Snapshot = {
     image?: string
     price: number
     normalPrice?: number
+    governmentPrice?: number | null
+    governmentStatus?: 'available' | 'none'
+    governmentDiscountAmount?: number | null
     surprisePrice?: number | null
     surpriseStatus?: 'available' | 'none'
     surpriseDiscountAmount?: number | null
@@ -126,6 +131,7 @@ export type Snapshot = {
     coinDiscountAmount?: number | null
     priceCalculation?: {
       normal: string
+      government?: string
       surprise: string
       gift?: string
       vip88?: string
@@ -162,6 +168,7 @@ export type Snapshot = {
       resolutionStatus?: PriceResolutionStatus
       priceResolution?: PriceResolution
       normalPrice?: number
+      governmentPrice?: number | null
       surprisePrice?: number | null
       giftPrice?: number | null
       giftDiscountAmount?: number | null
@@ -171,6 +178,7 @@ export type Snapshot = {
       originalPrice?: number
       priceCalculation?: {
         normal: string
+        government?: string
         surprise: string
         gift?: string
         vip88?: string

@@ -175,7 +175,7 @@ test("resolves an explicit 88VIP benefit without reusing gift or surprise fields
   assert.equal(sku.surprisePrice, null);
 });
 
-test("rejects a response that mixes gift and 88VIP account benefits", () => {
+test("resolves stacked gift and 88VIP benefits as separate cumulative layers", () => {
   const skuId = "mixed-account-benefits";
   const resolution = resolveSkuPriceEvidence([payload(skuId, "199", "119", [
     { promotionName: "spsd4plan", amount: 3000 },
@@ -183,8 +183,12 @@ test("rejects a response that mixes gift and 88VIP account benefits", () => {
     { promotionName: "coupon2RedForNewUser", amount: 1000 },
     { promotionName: "88vipDiscount", amount: 1000 },
   ])], { itemId: "843315272519", skuId, accountType: "vip88", selectedSkuVerified: true });
-  assert.equal(resolution.status, "ambiguous");
-  assert.equal(resolution.reason, "mixed-account-benefits");
+  const sku = applyPriceResolution({ skuId, priceLayers: [] }, resolution);
+  assert.equal(resolution.status, "verified");
+  assert.equal(sku.normalPrice, 139);
+  assert.equal(sku.giftPrice, 129);
+  assert.equal(sku.vipPrice, 119);
+  assert.match(sku.priceCalculation.vip88, /礼金价 129\.00 - 88VIP优惠 10\.00 = 88VIP价 119\.00/);
 });
 
 test("clears legacy account prices when the verified response has no matching evidence", () => {
@@ -214,6 +218,28 @@ test("resolves normal, surprise and coin prices from uppAcrossPromotion", () => 
   assert.equal(sku.surprisePrice, 489);
   assert.equal(sku.coinPrice, 479.91);
   assert.match(sku.priceCalculation.coin, /淘金币抵扣 9\.09/);
+});
+
+test("resolves the observed platform, government, surprise, gift and coin formula independently", () => {
+  const skuId = "986865193025-sku-1";
+  const resolution = resolveSkuPriceEvidence([payload(skuId, "1099", "478.56", [
+    { promotionName: "spsd4cjmj", amount: 13200 },
+    { promotionName: "spsd4autopri", amount: 3000 },
+    { promotionName: "spsd4price", amount: 26800 },
+    { promotionName: "zflj", amount: 8445 },
+    { promotionName: "spsd4jzjj", amount: 5500 },
+    { promotionName: "coupon2RedForNewUser", amount: 4000 },
+    { promotionName: "uppAcrossPromotion", amount: 1099 },
+  ])], { itemId: "843315272519", skuId, accountType: "gift", selectedSkuVerified: true });
+  const sku = applyPriceResolution({ skuId, priceLayers: [] }, resolution);
+  assert.equal(resolution.status, "verified");
+  assert.equal(sku.normalPrice, 669);
+  assert.equal(sku.governmentPrice, 584.55);
+  assert.equal(sku.surprisePrice, 529.55);
+  assert.equal(sku.giftPrice, 489.55);
+  assert.equal(sku.coinPrice, 478.56);
+  assert.match(sku.priceCalculation.normal, /平台加补 30\.00.*平台立减 268\.00/);
+  assert.match(sku.priceCalculation.government, /政府补贴 84\.45/);
 });
 
 test("fails closed when the formula does not equal price2", () => {

@@ -1,7 +1,9 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
+  accountCaptureDiagnostic,
   buildRunRecord,
+  completeScheduledProduct,
   dueProductIds,
   earliestProductSchedule,
   historicalAccountPriceSnapshot,
@@ -17,6 +19,7 @@ import {
   preserveVerifiedAccountPrices,
   resolveCaptureProtectionMinutes,
   resolveProductIntervalMinutes,
+  resolveProductScheduleMode,
   riskCooldownMs,
   runInCaptureGroups,
   scheduleProduct,
@@ -46,24 +49,34 @@ test("per-product schedules inherit the global interval and allow an override", 
   assert.equal(scheduleProduct({ id: "d", enabled: true }, { ...monitor, running: false }, { now }).enabled, true);
 });
 
-test("per-product schedule uses a date/time anchor and advances past missed intervals", () => {
+test("single-run and interval schedules are mutually exclusive", () => {
   const now = Date.parse("2026-07-12T08:00:00.000Z");
-  const future = { enabled: true, monitorIntervalMinutes: 120, monitorStartAt: "2026-07-12T08:30:00.000Z" };
-  const past = { enabled: true, monitorIntervalMinutes: 120, monitorStartAt: "2026-07-12T05:00:00.000Z" };
-  assert.equal(nextProductScheduleAt(future, 60, now), "2026-07-12T08:30:00.000Z");
-  assert.equal(nextProductScheduleAt(past, 60, now), "2026-07-12T09:00:00.000Z");
+  const once = { enabled: true, monitorScheduleMode: "once", monitorIntervalMinutes: 120, monitorStartAt: "2026-07-12T08:30:00.000Z" };
+  const interval = { enabled: true, monitorScheduleMode: "interval", monitorIntervalMinutes: 120, monitorStartAt: "2026-07-12T05:00:00.000Z" };
+  assert.equal(resolveProductScheduleMode(once), "once");
+  assert.equal(resolveProductScheduleMode({}), "interval");
+  assert.equal(nextProductScheduleAt(once, 60, now), "2026-07-12T08:30:00.000Z");
+  assert.equal(nextProductScheduleAt(interval, 60, now), "2026-07-12T10:00:00.000Z");
   assert.equal(nextProductScheduleAt({ enabled: true }, 60, now), "2026-07-12T09:00:00.000Z");
 });
 
-test("global pause preserves the product anchor and resume recalculates from it", () => {
+test("global pause preserves a single-run time and resume restores that exact time", () => {
   const anchor = "2026-07-12T05:00:00.000Z";
-  const product = { id: "anchored", enabled: true, monitorIntervalMinutes: 120, monitorStartAt: anchor };
+  const product = { id: "anchored", enabled: true, monitorScheduleMode: "once", monitorIntervalMinutes: 120, monitorStartAt: anchor };
   const paused = scheduleProduct(product, { running: false, intervalMinutes: 60 }, { reset: true, now: Date.parse("2026-07-12T08:00:00.000Z") });
   assert.equal(paused.monitorStartAt, anchor);
   assert.equal(paused.nextMonitorAt, null);
   const resumed = scheduleProduct(paused, { running: true, intervalMinutes: 60 }, { reset: true, now: Date.parse("2026-07-12T10:00:00.000Z") });
   assert.equal(resumed.monitorStartAt, anchor);
-  assert.equal(resumed.nextMonitorAt, "2026-07-12T11:00:00.000Z");
+  assert.equal(resumed.nextMonitorAt, anchor);
+});
+
+test("a completed single-run schedule pauses only that product", () => {
+  const once = { id: "once", enabled: true, monitorScheduleMode: "once", monitorStartAt: "2026-07-12T08:30:00.000Z", nextMonitorAt: "2026-07-12T08:30:00.000Z" };
+  const completed = completeScheduledProduct(once, { running: true, intervalMinutes: 60 }, Date.parse("2026-07-12T08:31:00.000Z"));
+  assert.equal(completed.enabled, false);
+  assert.equal(completed.monitorStartAt, null);
+  assert.equal(completed.nextMonitorAt, null);
 });
 
 test("due product selection is ordered and excludes paused or future products", () => {
@@ -225,6 +238,17 @@ test("gift and 88VIP products require both account snapshots but not a dedicated
   assert.equal(hasTrustedAccountBaseline([normal, gift], "gift"), true);
   assert.equal(hasTrustedAccountBaseline([normal], "vip88"), false);
   assert.equal(hasTrustedAccountBaseline([normal, vipWithoutBenefit], "vip88"), true);
+});
+
+test("account capture diagnostics expose failed formulas and unknown promotion codes", () => {
+  const diagnostic = accountCaptureDiagnostic([{ session: { accountType: "vip88" }, snapshot: { skuPrices: [{
+    skuId: "sku-1",
+    resolutionStatus: "ambiguous",
+    priceResolution: { reason: "formula-does-not-close", formulaInputs: { promotions: [{ code: "new-code", kind: "unknown" }] } },
+  }] } }]);
+  assert.match(diagnostic, /vip88 0\/1/);
+  assert.match(diagnostic, /formula-does-not-close/);
+  assert.match(diagnostic, /new-code/);
 });
 
 test("resolveCaptureProtectionMinutes prefers an account pool override", () => {

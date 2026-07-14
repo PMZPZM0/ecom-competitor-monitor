@@ -66,14 +66,14 @@ export function HelpCenter() {
             {[
               ['全局自动监控', '控制整个软件是否执行后台定时任务'],
               ['本商品已启用', '决定这个商品是否进入监控队列'],
-              ['到达计划时间', '使用单品周期，未设置时使用全局默认周期'],
+              ['到达计划时间', '单次定时或循环监控只生效一种'],
               ['开始抓取', '按账号池和并发限制执行'],
             ].map(([title, text], index) => <div key={title} className="contents max-[900px]:block"><div className={`rounded-md border p-3 ${index === 3 ? 'border-emerald-200 bg-emerald-50' : 'border-slate-200 bg-white'}`}><div className="font-semibold text-slate-900">{title}</div><div className="mt-1 text-xs leading-5 text-slate-500">{text}</div></div>{index < 3 && <div className="flex items-center justify-center font-semibold text-slate-300 max-[900px]:py-1">+</div>}</div>)}
           </div>
           <Checklist items={[
             '顶部“全局自动监控”是总开关。暂停后，所有商品都不会按时间自动抓取，但单品启停与计划会保留。',
             '商品卡片“启用本商品”只影响当前商品。启用后会进入监控队列；移出队列不会删除商品和历史数据。',
-            '商品卡片底部可保存开始日期、详细时间和重复间隔。暂停任一开关都不会删除这个计划。',
+            '商品卡片底部二选一：单次定时只执行所选日期时间并在完成后暂停；循环监控只按分钟周期执行。',
             '手动点击“抓取”不依赖定时计划，但仍会遵守当前账号状态和采集保护设置。',
           ]} />
         </Section>
@@ -95,7 +95,7 @@ export function HelpCenter() {
         </Section>
 
         <Section id="guide-price" title="价格、优惠明细与监控价">
-          <div className="overflow-x-auto"><table className="w-full border-collapse text-left text-sm"><thead><tr className="border-y border-slate-200 bg-slate-50 text-slate-600"><th className="px-3 py-2">价格</th><th className="px-3 py-2">含义</th><th className="px-3 py-2">未获取时</th></tr></thead><tbody className="divide-y divide-slate-100"><tr><td className="px-3 py-3 font-medium text-sky-700">普通价</td><td className="px-3 py-3">普通账号当前 SKU 的真实前台到手基准价</td><td className="px-3 py-3">显示未验证，不使用标价猜测</td></tr><tr><td className="px-3 py-3 font-medium text-rose-700">惊喜立减价</td><td className="px-3 py-3">普通价减去页面明确返回的惊喜立减权益</td><td className="px-3 py-3">显示当前 SKU 无或未获取</td></tr><tr><td className="px-3 py-3 font-medium text-amber-700">淘金币价</td><td className="px-3 py-3">普通价减去当前账号和 SKU 的淘金币抵扣</td><td className="px-3 py-3">显示无淘金币</td></tr><tr><td className="px-3 py-3 font-medium text-orange-700">礼金价</td><td className="px-3 py-3">礼金账号资格价，与普通价独立核对</td><td className="px-3 py-3">显示未获取</td></tr><tr><td className="px-3 py-3 font-medium text-violet-700">88VIP 价</td><td className="px-3 py-3">88VIP 账号专享价，与普通价独立核对</td><td className="px-3 py-3">显示未获取</td></tr></tbody></table></div>
+          <div className="overflow-x-auto"><table className="w-full border-collapse text-left text-sm"><thead><tr className="border-y border-slate-200 bg-slate-50 text-slate-600"><th className="px-3 py-2">价格</th><th className="px-3 py-2">含义</th><th className="px-3 py-2">未获取时</th></tr></thead><tbody className="divide-y divide-slate-100"><tr><td className="px-3 py-3 font-medium text-sky-700">普通价</td><td className="px-3 py-3">平台公共优惠后的普通账号基准价</td><td className="px-3 py-3">显示未验证，不使用标价猜测</td></tr><tr><td className="px-3 py-3 font-medium text-teal-700">国补价</td><td className="px-3 py-3">普通价减去当前 SKU 明确返回的政府补贴</td><td className="px-3 py-3">显示未获取国补价</td></tr><tr><td className="px-3 py-3 font-medium text-rose-700">惊喜立减价</td><td className="px-3 py-3">国补价或普通价再减明确的惊喜立减权益</td><td className="px-3 py-3">显示当前 SKU 无或未获取</td></tr><tr><td className="px-3 py-3 font-medium text-amber-700">淘金币价</td><td className="px-3 py-3">当前价格层级再减该账号和 SKU 的淘金币抵扣</td><td className="px-3 py-3">显示无淘金币</td></tr><tr><td className="px-3 py-3 font-medium text-orange-700">礼金价</td><td className="px-3 py-3">礼金账号资格价，与普通价独立核对</td><td className="px-3 py-3">显示未获取</td></tr><tr><td className="px-3 py-3 font-medium text-violet-700">88VIP 价</td><td className="px-3 py-3">88VIP 账号专享价，与普通价独立核对</td><td className="px-3 py-3">显示未获取</td></tr></tbody></table></div>
           <Checklist items={[
             '“核对价格”逐 SKU 展示证据、金额和公式；验证不闭合时不会保存猜测值。',
             '“优惠明细”按标价、商品优惠、账号权益和最终价格分层展示，每个 SKU 独立。',

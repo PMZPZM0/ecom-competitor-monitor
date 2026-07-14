@@ -18,6 +18,7 @@ const lineColors = ['#0284c7', '#ea580c', '#7c3aed', '#059669', '#d97706', '#db2
 
 const priceModes = [
   { value: 'normalPrice', label: '普通价' },
+  { value: 'governmentPrice', label: '国补价' },
   { value: 'surprisePrice', label: '惊喜立减价' },
   { value: 'giftPrice', label: '礼金价' },
   { value: 'vipPrice', label: '88VIP价' },
@@ -27,7 +28,7 @@ const priceModes = [
 type PriceMode = (typeof priceModes)[number]['value']
 
 function priceForMode(sku: Snapshot['skuPrices'][number], mode: PriceMode) {
-  const channel = mode === 'normalPrice' ? 'normal' : mode === 'surprisePrice' ? 'surprise' : mode === 'giftPrice' ? 'gift' : mode === 'vipPrice' ? 'vip88' : 'coin'
+  const channel = mode === 'normalPrice' ? 'normal' : mode === 'governmentPrice' ? 'government' : mode === 'surprisePrice' ? 'surprise' : mode === 'giftPrice' ? 'gift' : mode === 'vipPrice' ? 'vip88' : 'coin'
   if (sku.resolutionStatus !== 'verified' || sku.priceResolution?.channels?.[channel]?.status !== 'verified') return null
   const value = mode === 'normalPrice' ? sku.normalPrice : sku[mode]
   return typeof value === 'number' ? value : null

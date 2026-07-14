@@ -324,6 +324,7 @@ app.patch("/api/products/:id", async (req, res) => {
     group: z.string().min(1).optional(),
     accountType: z.enum(["normal", "gift", "vip88"]).optional(),
     enabled: z.boolean().optional(),
+    monitorScheduleMode: z.enum(["once", "interval"]).optional(),
     monitorIntervalMinutes: z.number().int().min(30).max(1440).nullable().optional(),
     monitorStartAt: z.string().datetime().nullable().optional(),
     monitorPrice: z.number().positive().nullable().optional(),
@@ -336,7 +337,7 @@ app.patch("/api/products/:id", async (req, res) => {
   await updateDb((db) => {
     db.products = db.products.map((product) => {
       if (product.id !== req.params.id) return product;
-      scheduleChanged = patch.enabled !== undefined || patch.monitorIntervalMinutes !== undefined || patch.monitorStartAt !== undefined;
+      scheduleChanged = patch.enabled !== undefined || patch.monitorScheduleMode !== undefined || patch.monitorIntervalMinutes !== undefined || patch.monitorStartAt !== undefined;
       updated = { ...product, ...patch, updatedAt: new Date().toISOString() };
       if (scheduleChanged) updated = scheduleProduct(updated, db.monitor, { reset: true });
       return updated;

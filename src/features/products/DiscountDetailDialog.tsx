@@ -3,7 +3,7 @@ import { useEffect } from 'react'
 import { createPortal } from 'react-dom'
 import { currency } from '../../lib/utils'
 import type { Product } from '../../types/domain'
-import { accountBenefitForSku, coinBenefitForSku, displayPriceLabel, normalPriceForSku, priceLayersForSku, surpriseBenefitForSku, type SkuPrice } from './productDisplayUtils'
+import { accountBenefitForSku, coinBenefitForSku, displayPriceLabel, normalPriceForSku, priceLayersForSku, surpriseBenefitForSku, verifiedPriceChannel, type SkuPrice } from './productDisplayUtils'
 
 export function DiscountDetailDialog({
   sku,
@@ -36,6 +36,7 @@ export function DiscountDetailDialog({
   const originalLayer = layers.find((layer) => layer.kind === 'original' || layer.label === '标价')
   const originalPrice = originalLayer?.value || sku.originalPrice
   const normalPrice = normalPriceForSku(sku)
+  const governmentPrice = verifiedPriceChannel(sku, 'government') ? sku.governmentPrice : null
   const surpriseBenefit = surpriseBenefitForSku(sku)
   const accountBenefit = accountBenefitForSku(sku, accountType)
   const coinBenefit = coinBenefitForSku(sku)
@@ -150,6 +151,14 @@ export function DiscountDetailDialog({
               <span className="text-xs text-sky-700">活动公式还原后的普通价格</span>
               <span className="text-right text-lg font-semibold text-sky-800">{currency(normalPrice)}</span>
             </div>
+            {governmentPrice && governmentPrice !== normalPrice && <>
+              <div className="flex h-6 items-center pl-9 text-teal-500"><ArrowDown className="h-4 w-4" /></div>
+              <div className="grid grid-cols-[104px_minmax(0,1fr)_96px] items-center gap-3 rounded bg-teal-50 px-2 py-3">
+                <span className="text-xs font-semibold text-teal-700">国补价</span>
+                <span className="text-xs text-teal-700">普通价减政府补贴 {currency(sku.governmentDiscountAmount)}</span>
+                <span className="text-right text-lg font-semibold text-teal-800">{currency(governmentPrice)}</span>
+              </div>
+            </>}
             {accountBenefit.price && accountBenefit.price !== normalPrice && (
               <>
                 <div className="flex h-6 items-center pl-9 text-orange-500"><ArrowDown className="h-4 w-4" /></div>
@@ -178,6 +187,7 @@ export function DiscountDetailDialog({
             <div className="mb-2 text-xs font-medium text-slate-700">价格自动计算</div>
             <div className="space-y-1 text-[11px] text-slate-500">
               <div>{sku.priceCalculation?.normal || `普通价 ${currency(normalPrice)}`}</div>
+              <div className={governmentPrice ? 'text-teal-700' : ''}>{sku.priceCalculation?.government || (governmentPrice ? `普通价 ${currency(normalPrice)} - 政府补贴 ${currency(sku.governmentDiscountAmount)} = ${currency(governmentPrice)}` : '未获取国补价')}</div>
               <div className={surpriseBenefit.available ? 'text-rose-700' : ''}>{sku.priceCalculation?.surprise || (surpriseBenefit.price ? `普通价 ${currency(normalPrice)} - 惊喜立减 ${currency(surpriseBenefit.discountAmount || normalPrice - surpriseBenefit.price)} = ${currency(surpriseBenefit.price)}` : '未获取惊喜立减价')}</div>
               {accountType === 'gift' && <div className={accountBenefit.available ? 'text-orange-700' : ''}>{sku.priceCalculation?.gift || (accountBenefit.price ? `普通价 ${currency(normalPrice)} - 礼金优惠 ${currency(accountBenefit.discountAmount)} = ${currency(accountBenefit.price)}` : '未获取礼金价')}</div>}
               {accountType === 'vip88' && <div className={accountBenefit.available ? 'text-violet-700' : ''}>{sku.priceCalculation?.vip88 || (accountBenefit.price ? `普通价 ${currency(normalPrice)} - 88VIP优惠 ${currency(accountBenefit.discountAmount)} = ${currency(accountBenefit.price)}` : '未获取88VIP价')}</div>}

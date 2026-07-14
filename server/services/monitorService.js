@@ -52,13 +52,17 @@ export function resolveProductIntervalMinutes(product, fallbackMinutes = 60) {
   return Math.min(MAX_PRODUCT_INTERVAL_MINUTES, Math.max(MIN_PRODUCT_INTERVAL_MINUTES, Math.round(value)));
 }
 
+export function resolveProductScheduleMode(product) {
+  return product?.monitorScheduleMode === "once" ? "once" : "interval";
+}
+
 export function nextProductScheduleAt(product, fallbackMinutes = 60, now = Date.now()) {
+  if (resolveProductScheduleMode(product) === "once") {
+    const scheduledAt = Date.parse(product?.monitorStartAt || "");
+    return Number.isFinite(scheduledAt) ? new Date(scheduledAt).toISOString() : null;
+  }
   const intervalMs = resolveProductIntervalMinutes(product, fallbackMinutes) * 60_000;
-  const anchor = Date.parse(product?.monitorStartAt || "");
-  if (!Number.isFinite(anchor)) return new Date(now + intervalMs).toISOString();
-  if (anchor > now) return new Date(anchor).toISOString();
-  const elapsedIntervals = Math.floor((now - anchor) / intervalMs) + 1;
-  return new Date(anchor + elapsedIntervals * intervalMs).toISOString();
+  return new Date(now + intervalMs).toISOString();
 }
 
 export function scheduleProduct(product, monitor, { reset = false, now = Date.now() } = {}) {
@@ -336,6 +340,35 @@ export function hasTrustedAccountBaseline(snapshots, accountType = "normal") {
     .some((entry) => (entry.snapshot.skuPrices || []).some((sku) => normalSkuIds.has(String(sku.skuId)) && verifiedChannel(sku, "normal")));
 }
 
+export function accountCaptureDiagnostic(snapshots) {
+  return snapshots.map(({ session, snapshot }) => {
+    const skus = snapshot.skuPrices || [];
+    const verified = skus.filter((sku) => verifiedChannel(sku, "normal")).length;
+    const reasons = new Set();
+    const unknownCodes = new Set();
+    for (const sku of skus) {
+      if (verifiedChannel(sku, "normal")) continue;
+      if (sku.priceResolution?.reason) reasons.add(sku.priceResolution.reason);
+      for (const promotion of sku.priceResolution?.formulaInputs?.promotions || []) {
+        if (promotion.kind === "unknown") unknownCodes.add(promotion.code);
+      }
+    }
+    const details = [
+      `${session?.accountType || "normal"} ${verified}/${skus.length} 个 SKU 已验证`,
+      reasons.size ? `原因 ${[...reasons].join(",")}` : "",
+      unknownCodes.size ? `未识别促销码 ${[...unknownCodes].join(",")}` : "",
+    ].filter(Boolean);
+    return details.join("，");
+  }).join("；");
+}
+
+export function completeScheduledProduct(product, monitor, now = Date.now()) {
+  if (resolveProductScheduleMode(product) === "once") {
+    return { ...product, enabled: false, monitorStartAt: null, nextMonitorAt: null };
+  }
+  return scheduleProduct(product, monitor, { reset: true, now });
+}
+
 function buyerShowKey(item) {
   const id = String(item?.id || "");
   if (id && !/^(?:buyer|rate)-\d+$/.test(id)) return `id:${id}`;
@@ -485,11 +518,12 @@ export async function captureProduct(product, authSessions = [], { captureProtec
     if (!snapshots.length) throw new Error(accountErrors.map((error) => `${error.accountName}：${error.message}`).join("；"));
     const targetAccountType = product.accountType || "normal";
     if (!hasTrustedAccountBaseline(snapshots, targetAccountType)) {
+      const diagnostic = accountCaptureDiagnostic(snapshots);
       if (targetAccountType === "normal") throw new Error("普通价格缺少可验证的 SKU 证据，本次结果已拒绝保存，避免把标价误当普通价。请重试抓取；若持续失败，请检查普通账号登录状态。");
       if (!hasTrustedAccountBaseline(snapshots, "normal")) {
-        throw new Error(`${targetAccountType === "gift" ? "礼金" : "88VIP"}商品缺少普通账号的可验证 SKU 基准，请检查普通账号后重试。`);
+        throw new Error(`${targetAccountType === "gift" ? "礼金" : "88VIP"}商品缺少普通账号的可验证 SKU 基准。${diagnostic}`);
       }
-      throw new Error(`${targetAccountType === "gift" ? "礼金" : "88VIP"}账号未返回与普通账号一致的可验证 SKU 页面，请检查该账号登录状态后重试。`);
+      throw new Error(`${targetAccountType === "gift" ? "礼金" : "88VIP"}账号未返回与普通账号一致的可验证 SKU 页面。${diagnostic}`);
     }
     for (const { session } of snapshots) {
       if (!session) continue;
@@ -705,7 +739,7 @@ async function scheduleNext() {
         const completedAt = Date.now();
         await updateDb((db) => {
           db.products = db.products.map((product) => dueIds.includes(product.id)
-            ? scheduleProduct(product, db.monitor, { reset: true, now: completedAt })
+            ? completeScheduledProduct(product, db.monitor, completedAt)
             : product);
           return db;
         });

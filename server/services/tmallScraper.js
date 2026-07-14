@@ -3,7 +3,7 @@ import crypto from "node:crypto";
 import { getRenderedHtml, isTaobaoLoginDocument } from "./browserService.js";
 import { applyPriceResolution, PRICE_PARSER_VERSION, resolveSkuPriceEvidence } from "./priceResolver.js";
 
-export const SCRAPER_VERSION = "2.0.1";
+export const SCRAPER_VERSION = "2.0.2";
 
 const userAgent =
   "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126 Safari/537.36";
@@ -1405,6 +1405,7 @@ async function fetchMobilePromotionPayloads(itemId, skuPrices, authSession) {
     try {
       retry = await getRenderedHtml(desktopProductUrl, authSession, {
         selectSkus: retrySkus.map((sku) => ({ skuId: sku.skuId, valueIds: sku.selectionValueIds })),
+        selectSkuNames: retrySkus.flatMap((sku) => String(sku.name || "").split(/\s*\/\s*/).map((name) => name.trim()).filter(Boolean)),
       });
     } catch {
       return first;
