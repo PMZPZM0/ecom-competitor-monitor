@@ -1,11 +1,12 @@
 import crypto from "node:crypto";
 
-export const PRICE_PARSER_VERSION = "evidence-v1";
+export const PRICE_PARSER_VERSION = "evidence-v1.1";
 
 const endpoint = "mtop.taobao.pcdetail.data.adjust";
 const publicPromotionLabels = new Map([
   ["spsd4plan", "平台活动立减"],
   ["spsd4cjmj", "超级立减"],
+  ["spsd4bybt", "百亿补贴"],
 ]);
 
 function decodeJson(value, depth = 0) {

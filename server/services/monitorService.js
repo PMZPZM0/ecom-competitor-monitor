@@ -464,13 +464,6 @@ export async function captureProduct(product, authSessions = [], { captureProtec
             session,
             snapshot: capturedSnapshot,
           });
-          if (session) {
-            session.lastSuccessAt = new Date().toISOString();
-            session.consecutiveFailures = 0;
-            session.cooldownUntil = null;
-            session.healthStatus = "healthy";
-            session.loginStatus = "valid";
-          }
           break;
         } catch (error) {
           accountErrors.push({ sessionId: session?.id || "guest", accountName: session?.name || "未登录前台", message: error.message });
@@ -494,6 +487,14 @@ export async function captureProduct(product, authSessions = [], { captureProtec
     if (!hasTrustedAccountBaseline(snapshots, targetAccountType)) {
       if (targetAccountType === "normal") throw new Error("普通价格缺少可验证的 SKU 证据，本次结果已拒绝保存，避免把标价误当普通价。请重试抓取；若持续失败，请检查普通账号登录状态。");
       throw new Error(`${targetAccountType === "gift" ? "礼金" : "88VIP"}价格缺少普通账号基准，本次结果已拒绝保存，避免把标价误当普通价。请检查普通账号登录后重试。`);
+    }
+    for (const { session } of snapshots) {
+      if (!session) continue;
+      session.lastSuccessAt = new Date().toISOString();
+      session.consecutiveFailures = 0;
+      session.cooldownUntil = null;
+      session.healthStatus = "healthy";
+      session.loginStatus = "valid";
     }
     const snapshot = mergeAccountSnapshots(snapshots);
     preserveBuyerShowHistory(snapshot, product.lastSnapshot);

@@ -54,6 +54,20 @@ for (const [skuId, price1, price2, promotions, normalPrice, surprisePrice] of pr
   });
 }
 
+test("resolves the real subsidy and coin formula for the meat grinder", () => {
+  const skuId = "6070797216579";
+  const resolution = resolveSkuPriceEvidence([payload(skuId, "219", "94.62", [
+    { promotionName: "spsd4bybt", amount: 12000 },
+    { promotionName: "uppAcrossPromotion", amount: 438 },
+  ])], { itemId: "843315272519", skuId, accountType: "normal", selectedSkuVerified: true });
+  const sku = applyPriceResolution({ skuId, priceLayers: [] }, resolution);
+  assert.equal(resolution.status, "verified");
+  assert.equal(sku.normalPrice, 99);
+  assert.equal(sku.coinPrice, 94.62);
+  assert.match(sku.priceCalculation.normal, /百亿补贴 120\.00/);
+  assert.match(sku.priceCalculation.coin, /淘金币抵扣 4\.38/);
+});
+
 test("gift formula ignores non-applied unknown promotions and requires explicit gift code", () => {
   const skuId = "6274971435306";
   const promotions = [

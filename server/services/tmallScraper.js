@@ -1,9 +1,9 @@
 import * as cheerio from "cheerio";
 import crypto from "node:crypto";
-import { getRenderedHtml } from "./browserService.js";
+import { getRenderedHtml, isTaobaoLoginDocument } from "./browserService.js";
 import { applyPriceResolution, PRICE_PARSER_VERSION, resolveSkuPriceEvidence } from "./priceResolver.js";
 
-export const SCRAPER_VERSION = "2.0.0";
+export const SCRAPER_VERSION = "2.0.1";
 
 const userAgent =
   "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126 Safari/537.36";
@@ -1701,7 +1701,7 @@ async function fetchHtml(product, authSession) {
     for (let attempt = 1; attempt <= 2; attempt++) {
       try {
         const page = await getRenderedHtml(product.url, authSession, { captureVideo: true, captureBuyerShow: true });
-        const looksBlocked = (/login|验证|captcha|滑块/i.test(page.finalUrl) || /扫码登录|密码登录|安全验证|请完成验证/i.test(page.html)) && !/skuCore|skuBase/i.test(page.html);
+        const looksBlocked = isTaobaoLoginDocument(page.finalUrl, page.html);
         if (!looksBlocked) return page;
         throw new Error("当前抓到登录或验证页面");
       } catch (error) {
@@ -1730,6 +1730,9 @@ export async function scrapeTmallBuyerShows(product, authSession) {
   const page = authSession?.source === "taobao-browser"
     ? await getRenderedHtml(product.url, authSession, { captureBuyerShow: true })
     : await fetchHtml(product, authSession);
+  if (isTaobaoLoginDocument(page.finalUrl, page.html)) {
+    throw new Error("浏览器登录态已失效，请重新授权后再重试买家秀。");
+  }
   const html = page.html || "";
   const itemId = extractItemId(page.finalUrl, product.url, html);
   const existingImages = [

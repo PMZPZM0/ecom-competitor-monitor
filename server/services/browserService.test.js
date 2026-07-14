@@ -33,5 +33,15 @@ test("isTaobaoLoginUrl recognizes Taobao login redirects", () => {
 
 test("isTaobaoLoginDocument rejects login and verification pages", () => {
   assert.equal(isTaobaoLoginDocument("https://i.taobao.com/my_taobao.htm", "手机扫码登录"), true);
+  const detailLoginBridge = `
+    <script>
+      localStorage.x5referer = window.location.href;
+      const jump = "/wow/z/app/tbpc/pc-detail-ssr-2025/home/page/login_jump";
+      window.WindVane.call("aluWVJSBridge", "sdkLogin", {});
+      const config = { "action": "login" };
+    </script>
+  `;
+  assert.equal(isTaobaoLoginDocument("https://detail.tmall.com/item.htm?id=1", detailLoginBridge), true);
+  assert.equal(isTaobaoLoginDocument("https://detail.tmall.com/item.htm?id=1", `${detailLoginBridge}<script>window.skuCore = {}</script>`), false);
   assert.equal(isTaobaoLoginDocument("https://i.taobao.com/my_taobao.htm", "我的淘宝"), false);
 });

@@ -156,7 +156,12 @@ export function isTaobaoLoginUrl(url = "") {
 }
 
 export function isTaobaoLoginDocument(url = "", html = "") {
-  return isTaobaoLoginUrl(url) || /手机扫码登录|密码登录|短信登录|请登录后继续|安全验证|请完成验证/i.test(String(html));
+  const source = String(html);
+  const hasProductData = /skuCore|skuBase|skuOptionsArea/i.test(source);
+  const loginBridge = /pc-detail-ssr-2025[\s\S]{0,8000}\/(?:login_jump|close_iframe_page)|aluWVJSBridge[\s\S]{0,2000}sdkLogin|["']action["']\s*:\s*["']login["']/i.test(source);
+  return isTaobaoLoginUrl(url)
+    || /手机扫码登录|密码登录|短信登录|请登录后继续|安全验证|请完成验证/i.test(source)
+    || (loginBridge && !hasProductData);
 }
 
 export async function openProductInAccountChrome(url, authSession) {
