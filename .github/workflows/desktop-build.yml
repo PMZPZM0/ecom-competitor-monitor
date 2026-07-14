@@ -32,6 +32,7 @@ jobs:
   macos:
     runs-on: macos-14
     strategy:
+      fail-fast: false
       matrix:
         arch: [x64, arm64]
     steps:
@@ -41,14 +42,14 @@ jobs:
           node-version: 22
           cache: npm
       - run: npm ci
+      - run: npm test
+      - run: npm run lint
       - name: Install sharp for target macOS architecture
         run: npm install --no-save --package-lock=false --include=optional --os=darwin --cpu=${{ matrix.arch }} sharp
       - name: Verify sharp target runtime
         run: |
           test -d node_modules/@img/sharp-darwin-${{ matrix.arch }}
           test -d node_modules/@img/sharp-libvips-darwin-${{ matrix.arch }}
-      - run: npm test
-      - run: npm run lint
       - run: npm run pack:mac -- --${{ matrix.arch }} --publish never
       - uses: actions/upload-artifact@v4
         with:
