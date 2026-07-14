@@ -333,7 +333,7 @@ export function hasTrustedAccountBaseline(snapshots, accountType = "normal") {
   if (accountType === "normal") return normalSkuIds.size > 0;
   return normalSkuIds.size > 0 && snapshots
     .filter((entry) => entry.session?.accountType === accountType)
-    .some((entry) => (entry.snapshot.skuPrices || []).some((sku) => normalSkuIds.has(String(sku.skuId)) && verifiedChannel(sku, accountType)));
+    .some((entry) => (entry.snapshot.skuPrices || []).some((sku) => normalSkuIds.has(String(sku.skuId)) && verifiedChannel(sku, "normal")));
 }
 
 function buyerShowKey(item) {
@@ -486,7 +486,10 @@ export async function captureProduct(product, authSessions = [], { captureProtec
     const targetAccountType = product.accountType || "normal";
     if (!hasTrustedAccountBaseline(snapshots, targetAccountType)) {
       if (targetAccountType === "normal") throw new Error("普通价格缺少可验证的 SKU 证据，本次结果已拒绝保存，避免把标价误当普通价。请重试抓取；若持续失败，请检查普通账号登录状态。");
-      throw new Error(`${targetAccountType === "gift" ? "礼金" : "88VIP"}价格缺少普通账号基准，本次结果已拒绝保存，避免把标价误当普通价。请检查普通账号登录后重试。`);
+      if (!hasTrustedAccountBaseline(snapshots, "normal")) {
+        throw new Error(`${targetAccountType === "gift" ? "礼金" : "88VIP"}商品缺少普通账号的可验证 SKU 基准，请检查普通账号后重试。`);
+      }
+      throw new Error(`${targetAccountType === "gift" ? "礼金" : "88VIP"}账号未返回与普通账号一致的可验证 SKU 页面，请检查该账号登录状态后重试。`);
     }
     for (const { session } of snapshots) {
       if (!session) continue;

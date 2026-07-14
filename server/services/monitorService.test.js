@@ -208,7 +208,7 @@ test("a target account list price never replaces the observed normal-account pri
   assert.equal(sku.giftPrice, undefined);
 });
 
-test("gift and 88VIP products also capture one normal-account baseline", () => {
+test("gift and 88VIP products require both account snapshots but not a dedicated benefit", () => {
   const sessions = [
     { id: "n1", accountType: "normal" },
     { id: "n2", accountType: "normal" },
@@ -219,9 +219,12 @@ test("gift and 88VIP products also capture one normal-account baseline", () => {
   assert.deepEqual(sessionsForProduct(sessions, "vip88").map((session) => session.id), ["n1", "n2", "v1"]);
   const normal = { session: sessions[0], snapshot: { skuPrices: [verifiedSku({ skuId: "sku-1", normalPrice: 179 }, ["normal"])] } };
   const gift = { session: sessions[2], snapshot: { skuPrices: [verifiedSku({ skuId: "sku-1", normalPrice: 179, giftPrice: 126 }, ["normal", "gift"])] } };
+  const vipWithoutBenefit = { session: sessions[3], snapshot: { skuPrices: [verifiedSku({ skuId: "sku-1", normalPrice: 179 }, ["normal"])] } };
   assert.equal(hasTrustedAccountBaseline([gift], "gift"), false);
   assert.equal(hasTrustedAccountBaseline([normal, { session: sessions[2], snapshot: { skuPrices: [{ skuId: "sku-1", normalPrice: 126 }] } }], "gift"), false);
   assert.equal(hasTrustedAccountBaseline([normal, gift], "gift"), true);
+  assert.equal(hasTrustedAccountBaseline([normal], "vip88"), false);
+  assert.equal(hasTrustedAccountBaseline([normal, vipWithoutBenefit], "vip88"), true);
 });
 
 test("resolveCaptureProtectionMinutes prefers an account pool override", () => {
