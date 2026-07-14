@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { BarChart3, BookOpen, CircleAlert, CircleCheck, CloudDownload, Database, FolderTree, ListChecks, ListTodo, LoaderCircle, PauseCircle, PlayCircle, RefreshCw, Search, Settings, Sparkles, Type, X } from 'lucide-react'
 import { api } from './lib/api'
 import { Button } from './components/ui/button'
@@ -23,24 +23,25 @@ import { UpdateDialog } from './features/updates/UpdateDialog'
 import type { AuthSession, Overview, Product, UpdateInfo } from './types/domain'
 
 const navItems = [
-  { id: 'overview', label: '监控总览', icon: BarChart3, title: '竞品价格与 SKU 图监控', subtitle: '通过限速队列和账号池轮换抓取，支持价格预警与趋势分析。' },
-  { id: 'queue', label: '监控队列', icon: ListChecks, title: '已监控商品队列', subtitle: '集中查看已启用商品的执行顺序、定时计划和运行状态。' },
-  { id: 'capture-queue', label: '抓取队列', icon: ListTodo, title: '抓取任务队列', subtitle: '查看排队和运行进度，完成项会自动移出，页面刷新不会取消后端任务。' },
-  { id: 'categories', label: '监控分类', icon: FolderTree, title: '店铺与型号自动分类', subtitle: '按店铺自动建小分类，再按产品型号归档监控数据。' },
-  { id: 'auth', label: '账号授权', icon: Settings, title: '淘宝与飞书账号授权', subtitle: '管理淘宝采价账号、飞书扫码授权、价格文档和机器人通知。' },
-  { id: 'analysis', label: 'AI 分析（功能开发中）', icon: Sparkles, title: 'AI 数据分析', subtitle: '基于历史抓取数据生成价格、SKU 和图片变化洞察。' },
+  { id: 'guide', label: '使用说明（先看）', icon: BookOpen, title: '使用说明', subtitle: '第一次使用请从这里开始，按顺序完成账号授权、商品抓取和自动监控。' },
+  { id: 'auth', label: '账号授权', icon: Settings, title: '淘宝与飞书账号授权', subtitle: '第一步：授权采价账号，再按需连接飞书文档和机器人通知。' },
+  { id: 'overview', label: '监控总览', icon: BarChart3, title: '竞品价格与 SKU 图监控', subtitle: '第二步：添加并核对商品，设置监控价、抓取计划和启用状态。' },
+  { id: 'queue', label: '监控队列', icon: ListChecks, title: '已监控商品队列', subtitle: '第三步：查看已启用商品的执行顺序、定时计划和运行状态。' },
+  { id: 'capture-queue', label: '抓取队列', icon: ListTodo, title: '抓取任务队列', subtitle: '查看当前排队和运行进度，完成项自动移出，页面刷新不会取消任务。' },
+  { id: 'categories', label: '监控分类', icon: FolderTree, title: '店铺与型号自动分类', subtitle: '按店铺和型号整理商品，再进行筛选、批量抓取或批量管理。' },
   { id: 'records', label: '数据记录', icon: Database, title: '数据记录与监控设置', subtitle: '查看历史快照、导出 CSV，并调整后台监控间隔。' },
-  { id: 'guide', label: '使用说明', icon: BookOpen, title: '使用说明', subtitle: '从账号授权、商品抓取到自动监控和飞书提醒的完整操作流程。' },
+  { id: 'analysis', label: 'AI 分析（功能开发中）', icon: Sparkles, title: 'AI 数据分析', subtitle: '基于历史抓取数据生成价格、SKU 和图片变化洞察。' },
 ] as const
 
 type PageId = (typeof navItems)[number]['id']
 type FontSize = 'small' | 'standard' | 'large'
+const UPDATE_NOTIFIED_VERSION_KEY = 'ecommerce-monitor-update-notified-version'
 
 function App() {
   const [overview, setOverview] = useState<Overview | null>(null)
   const [activePage, setActivePage] = useState<PageId>(() => {
     const saved = window.localStorage.getItem('tmall-monitor-active-page')
-    return navItems.some((item) => item.id === saved) ? saved as PageId : 'overview'
+    return navItems.some((item) => item.id === saved) ? saved as PageId : 'guide'
   })
   const [busy, setBusy] = useState(false)
   const [busyProductId, setBusyProductId] = useState('')
@@ -53,6 +54,7 @@ function App() {
   const [updateInfo, setUpdateInfo] = useState<UpdateInfo | null>(null)
   const [updateChecking, setUpdateChecking] = useState(false)
   const [updateError, setUpdateError] = useState('')
+  const updateCheckActive = useRef(false)
 
   async function refresh() {
     setOverview(await api.overview())
@@ -72,7 +74,15 @@ function App() {
   }, [])
 
   useEffect(() => {
-    checkUpdates(false).catch(() => undefined)
+    const check = () => checkUpdates(false, true).catch(() => undefined)
+    const checkWhenVisible = () => {
+      if (document.visibilityState === 'visible') check()
+    }
+    check()
+    document.addEventListener('visibilitychange', checkWhenVisible)
+    return () => {
+      document.removeEventListener('visibilitychange', checkWhenVisible)
+    }
   }, [])
 
   useEffect(() => {
@@ -93,15 +103,23 @@ function App() {
     return () => window.clearTimeout(timer)
   }, [notice, error])
 
-  async function checkUpdates(openDialog = true) {
+  async function checkUpdates(openDialog = true, automatic = false) {
     if (openDialog) setUpdateOpen(true)
+    if (updateCheckActive.current) return
+    updateCheckActive.current = true
     setUpdateChecking(true)
     setUpdateError('')
     try {
-      setUpdateInfo(await api.checkUpdate())
+      const info = await api.checkUpdate()
+      setUpdateInfo(info)
+      if (automatic && info.updateAvailable && window.localStorage.getItem(UPDATE_NOTIFIED_VERSION_KEY) !== info.latestVersion) {
+        window.localStorage.setItem(UPDATE_NOTIFIED_VERSION_KEY, info.latestVersion)
+        setUpdateOpen(true)
+      }
     } catch (reason) {
       setUpdateError(reason instanceof Error ? reason.message : '检查更新失败。')
     } finally {
+      updateCheckActive.current = false
       setUpdateChecking(false)
     }
   }
@@ -402,7 +420,7 @@ function App() {
     }
 
     if (activePage === 'guide') {
-      return <HelpCenter />
+      return <HelpCenter onNavigate={setActivePage} />
     }
 
     return (
