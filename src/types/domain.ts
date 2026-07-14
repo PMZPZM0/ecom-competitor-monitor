@@ -9,6 +9,7 @@ export type Product = {
   url: string
   group: string
   accountType?: 'normal' | 'gift' | 'vip88'
+  captureBuyerShows?: boolean
   /** Exactly one automatic schedule mode is active for a product. Legacy data defaults to interval. */
   monitorScheduleMode?: 'once' | 'interval'
   /** Per-product scheduled capture interval. Omit to use the global default. */
@@ -40,6 +41,7 @@ export type PriceChannelResolution = {
 export type PriceResolution = {
   status: PriceResolutionStatus
   reason?: string
+  normalLabel?: string
   parserVersion?: string
   evidenceHash?: string
   channels?: Partial<Record<'normal' | 'government' | 'surprise' | 'gift' | 'vip88' | 'coin', PriceChannelResolution>>
@@ -62,8 +64,8 @@ export type PriceEvidence = {
 }
 
 export type BuyerShowCapture = {
-  status: 'complete' | 'partial' | 'confirmed-empty' | 'failed'
-  source: 'observed-network' | 'legacy-rate-api' | 'verified-dom' | 'cache'
+  status: 'complete' | 'partial' | 'confirmed-empty' | 'failed' | 'skipped'
+  source: 'observed-network' | 'legacy-rate-api' | 'verified-dom' | 'cache' | 'disabled'
   failureCode?: string
   itemId: string
   sellerId?: string
@@ -269,12 +271,39 @@ export type RunRecord = {
   message: string
 }
 
+export type CaptureQueueJob = {
+  id: string
+  source: string
+  scope: string
+  status: 'queued' | 'running' | 'completed' | 'failed'
+  outcome: 'success' | 'partial' | 'failed' | null
+  productIds: string[]
+  products: Array<{ id: string; name: string }>
+  activeProductIds: string[]
+  total: number
+  completed: number
+  message: string
+  error: string
+  createdAt: string
+  startedAt: string | null
+  finishedAt: string | null
+}
+
+export type CaptureQueueStatus = {
+  running: boolean
+  pendingCount: number
+  completedCount: number
+  retentionSeconds: number
+  jobs: CaptureQueueJob[]
+}
+
 export type Overview = {
   products: Product[]
   snapshots: Snapshot[]
   analyses: Analysis[]
   authSessions: AuthSession[]
   runs: RunRecord[]
+  captureQueue: CaptureQueueStatus
   runtime: {
     version: string
     buildCommit: string

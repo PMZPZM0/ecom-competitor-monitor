@@ -3,6 +3,7 @@ import { useEffect } from 'react'
 import { createPortal } from 'react-dom'
 import { currency } from '../../lib/utils'
 import type { Product, Snapshot } from '../../types/domain'
+import { publicPriceLabelForSku } from './productDisplayUtils'
 
 type Sku = Snapshot['skuPrices'][number]
 type Channel = 'normal' | 'government' | 'surprise' | 'gift' | 'vip88' | 'coin'
@@ -83,7 +84,7 @@ export function PriceVerificationDialog({ product, onClose }: { product: Product
                     <div key={channel.key} className={`min-w-0 rounded-md px-3 py-2.5 ${item.matches ? 'bg-emerald-50' : unavailable ? 'bg-slate-50' : 'bg-red-50'}`}>
                       <div className={`flex items-center gap-1.5 text-sm font-medium ${item.matches ? 'text-emerald-700' : unavailable ? 'text-slate-500' : 'text-red-700'}`}>
                         {item.matches ? <CheckCircle2 className="h-4 w-4 shrink-0" /> : !unavailable ? <AlertTriangle className="h-4 w-4 shrink-0" /> : null}
-                        {channel.label}
+                        {channel.key === 'normal' ? publicPriceLabelForSku(sku) : channel.label}
                       </div>
                       <div className="mt-1 text-base font-semibold tabular-nums text-slate-900">{typeof item.displayed === 'number' ? currency(item.displayed) : '未获取'}</div>
                       {item.verified && <div className="mt-1 text-xs text-slate-500">证据 {item.evidence === null ? '--' : currency(item.evidence)}</div>}
@@ -94,7 +95,7 @@ export function PriceVerificationDialog({ product, onClose }: { product: Product
               <div className="mt-3 space-y-2 border-t border-slate-100 pt-3">
                 {channels.map((channel) => {
                   const item = inspectChannel(sku, channel)
-                  return <div key={channel.key} className="grid gap-1 text-sm md:grid-cols-[112px_minmax(0,1fr)]"><span className={item.matches ? 'font-medium text-emerald-700' : 'font-medium text-slate-500'}>{channel.label}</span><span className="break-words text-slate-600">{item.formulaText}</span></div>
+                  return <div key={channel.key} className="grid gap-1 text-sm md:grid-cols-[112px_minmax(0,1fr)]"><span className={item.matches ? 'font-medium text-emerald-700' : 'font-medium text-slate-500'}>{channel.key === 'normal' ? publicPriceLabelForSku(sku) : channel.label}</span><span className="break-words text-slate-600">{item.formulaText}</span></div>
                 })}
               </div>
             </section>

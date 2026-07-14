@@ -1,12 +1,15 @@
 import crypto from "node:crypto";
 
-export const PRICE_PARSER_VERSION = "evidence-v1.2";
+export const PRICE_PARSER_VERSION = "evidence-v1.3";
 
 const endpoint = "mtop.taobao.pcdetail.data.adjust";
 const publicPromotionLabels = new Map([
   ["spsd4plan", "平台活动立减"],
   ["spsd4cjmj", "超级立减"],
   ["spsd4bybt", "百亿补贴"],
+  ["spsd4bybtjb", "百亿补贴加补"],
+  ["spsd4hjmssjbt", "淘宝秒杀补贴"],
+  ["spsd4hjbt", "淘宝秒杀加补"],
   ["spsd4price", "平台立减"],
   ["spsd4autopri", "平台加补"],
 ]);
@@ -164,6 +167,7 @@ export function resolvePcdetailAdjustPayload(payload, options = {}) {
   const byKind = (kind) => promotions.filter((item) => item.kind === kind);
   const total = (items) => items.reduce((sum, item) => sum + item.amountCents, 0);
   const publicPromotions = byKind("public");
+  const normalLabel = publicPromotions.some((item) => /^spsd4hj/i.test(item.code)) ? "淘宝秒杀价" : "普通价";
   const normalCents = listCents - total(publicPromotions);
   if (normalCents <= 0) return ambiguous("public-formula-invalid");
 
@@ -196,7 +200,7 @@ export function resolvePcdetailAdjustPayload(payload, options = {}) {
     makeEvidence(baseEvidence, { kind: "list", valueCents: listCents, source: "api-explicit", sourcePath: "$.data.componentsVO.xsRedPacketParamVO.trackParams.price1" }),
     makeEvidence(baseEvidence, { kind: "normal", valueCents: normalCents, source: "api-formula", sourcePath: "$.data.componentsVO.xsRedPacketParamVO.xsRedPocketParams.tbShopRedPocket.umpInfo.umpPromotionList" }),
   ];
-  const normalFormula = promotionFormula("标价", listCents, publicPromotions, "普通价", normalCents);
+  const normalFormula = promotionFormula("标价", listCents, publicPromotions, normalLabel, normalCents);
   const channels = {
     normal: resolvedChannel(normalCents, normalFormula),
     government: unavailableChannel(),
@@ -251,6 +255,7 @@ export function resolvePcdetailAdjustPayload(payload, options = {}) {
     channels,
     evidence,
     promotions,
+    normalLabel,
     displayedCents,
     evidenceHash: evidenceId(evidence.map(({ id }) => id)),
   };
@@ -284,8 +289,9 @@ export function applyPriceResolution(sku, resolution) {
     return Number.isSafeInteger(cents) ? cents / 100 : null;
   };
   const normalPrice = value("normal");
-  const priceLayers = (sku.priceLayers || []).filter((layer) => !/普通价（活动公式）|国补价|惊喜立减价|礼金价|88VIP价/.test(layer.label || ""));
-  priceLayers.push({ label: "普通价", value: normalPrice, kind: "price", source: "pcdetail-adjust" });
+  const normalLabel = resolution.normalLabel || "普通价";
+  const priceLayers = (sku.priceLayers || []).filter((layer) => !/普通价（活动公式）|普通价|淘宝秒杀价|秒杀价|国补价|惊喜立减价|礼金价|88VIP价/.test(layer.label || ""));
+  priceLayers.push({ label: normalLabel, value: normalPrice, kind: "price", source: "pcdetail-adjust" });
   const channelFields = {
     government: ["governmentPrice", "governmentStatus", "governmentDiscountAmount", "国补价"],
     surprise: ["surprisePrice", "surpriseStatus", "surpriseDiscountAmount", "惊喜立减价"],
@@ -301,7 +307,7 @@ export function applyPriceResolution(sku, resolution) {
     price: normalPrice,
     normalPrice,
     originalPrice: resolution.evidence.find((item) => item.kind === "list")?.valueCents / 100 || sku.originalPrice,
-    priceTitle: "普通价",
+    priceTitle: normalLabel,
     priceLayers,
     priceEvidence: resolution.evidence,
     priceResolution: resolution,

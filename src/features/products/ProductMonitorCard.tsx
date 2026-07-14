@@ -23,6 +23,7 @@ import {
   downloadMediaBundleHref,
   layerClass,
   normalPriceForSku,
+  publicPriceLabelForSku,
   priceLayersForSku,
   productDetailImages,
   productImages,
@@ -146,10 +147,10 @@ function SkuPricePanel({ product, snapshots, showTrend, onPreview, onSaveSkuMoni
           const coinBenefit = coinBenefitForSku(sku)
           const coinPrice = coinPriceForSku(sku)
           const coinPriceLabel = anonymous ? '淘金币需登录' : coinPrice ? '淘金币价' : coinBenefit.available ? '淘金币抵扣' : '无淘金币'
-          const primaryLabel = !normalVerified ? '价格未验证' : anonymous ? '匿名公开价' : '普通价'
+          const primaryLabel = !normalVerified ? '价格未验证' : anonymous ? '匿名公开价' : publicPriceLabelForSku(sku)
           const primaryClass = !normalVerified || anonymous ? { label: 'text-slate-500', value: 'text-slate-700' } : primaryPriceClass(primaryLabel)
           const seenPrices = new Set([
-            ...(normalPrice != null ? [`普通价:${normalPrice.toFixed(2)}`] : []),
+            ...(normalPrice != null ? [`${publicPriceLabelForSku(sku)}:${normalPrice.toFixed(2)}`] : []),
             ...(accountBenefit.price ? [`${accountBenefit.label}:${accountBenefit.price.toFixed(2)}`] : []),
             ...(coinPrice ? [`淘金币价:${coinPrice.toFixed(2)}`] : []),
           ])
@@ -169,7 +170,7 @@ function SkuPricePanel({ product, snapshots, showTrend, onPreview, onSaveSkuMoni
             }).filter((price): price is NonNullable<typeof price> => price !== null),
           ].filter((price) => {
             if (price.kind === 'discount') return false
-            if (price.label === '普通价' || price.label === '淘金币价') return false
+            if (price.label === '普通价' || price.label === '淘宝秒杀价' || price.label === '淘金币价') return false
             const key = `${price.label}:${price.value.toFixed(2)}`
             if (seenPrices.has(key)) return false
             seenPrices.add(key)
@@ -324,14 +325,15 @@ export function ProductMonitorCard({ product, monitor, onToggle, onToggleGlobal,
   const buyerShowCapture = product.lastSnapshot?.buyerShowCapture
   const currentBuyerShows = (product.lastSnapshot?.buyerShows || []).filter((item) => item.text || item.images?.length || item.videoUrls?.length)
   const cachedBuyerShows = product.lastSnapshot?.buyerShowCachedItems || []
-  const usingBuyerShowCache = buyerShowCapture?.status === 'failed' && currentBuyerShows.length === 0 && cachedBuyerShows.length > 0
+  const usingBuyerShowCache = (buyerShowCapture?.status === 'failed' || buyerShowCapture?.status === 'skipped') && currentBuyerShows.length === 0 && cachedBuyerShows.length > 0
   const buyerShows = (usingBuyerShowCache ? product.lastSnapshot?.buyerShowCachedItems || [] : currentBuyerShows).filter((item) => item.text || item.images?.length || item.videoUrls?.length)
   const buyerShowStatusText = usingBuyerShowCache
-    ? '本次抓取失败，展示上次成功缓存'
+    ? buyerShowCapture?.status === 'skipped' ? '本次按设置跳过，展示上次成功缓存' : '本次抓取失败，展示上次成功缓存'
     : buyerShowCapture?.status === 'complete' ? '本次完整抓取'
       : buyerShowCapture?.status === 'partial' ? `${buyerShowCapture.pageCount <= 1 ? '本次仅抓到评价首屏' : '本次部分抓取'} · ${buyerShowCapture.mediaCount} 个媒体`
         : buyerShowCapture?.status === 'confirmed-empty' ? '本次确认无买家秀'
-          : buyerShowCapture?.status === 'failed' ? `本次买家秀未获取 · ${buyerShowCapture.failureCode || '未知原因'}` : ''
+          : buyerShowCapture?.status === 'failed' ? `本次买家秀未获取 · ${buyerShowCapture.failureCode || '未知原因'}`
+            : buyerShowCapture?.status === 'skipped' ? '已关闭自动抓取买家秀' : ''
   const skuDisplayImages = Array.from(new Map((product.lastSnapshot?.skuPrices || [])
     .filter((sku) => sku.image)
     .map((sku) => [sku.image as string, { src: sku.image as string, title: sku.name }])).values())
@@ -410,12 +412,14 @@ export function ProductMonitorCard({ product, monitor, onToggle, onToggleGlobal,
   }
 
   async function captureNow() {
-    showOperation({ key: 'capture', tone: 'progress', message: '正在抓取价格、SKU、素材和买家秀，请保持软件运行。' })
+    showOperation({ key: 'capture', tone: 'progress', message: product.captureBuyerShows === false ? '正在抓取价格、SKU 和素材，请保持软件运行。' : '正在抓取价格、SKU、素材和买家秀，请保持软件运行。' })
     try {
       const captured = await onCapture(product)
       const buyerCapture = captured?.lastSnapshot?.buyerShowCapture
       const cachedCount = captured?.lastSnapshot?.buyerShowCachedItems?.length || 0
-      const message = buyerCapture?.status === 'failed'
+      const message = buyerCapture?.status === 'skipped'
+        ? '价格与素材已更新；已按商品设置跳过买家秀。'
+        : buyerCapture?.status === 'failed'
         ? cachedCount > 0
           ? `价格与素材已更新；买家秀本次失败，继续展示 ${cachedCount} 条历史成功数据。`
           : `价格与素材已更新；买家秀本次未获取（${buyerCapture.failureCode || '未知原因'}）。`

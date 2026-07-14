@@ -3,9 +3,12 @@ import test from "node:test";
 import {
   accountCaptureDiagnostic,
   buildRunRecord,
+  clearFinishedCaptureJobs,
   completeScheduledProduct,
   dueProductIds,
   earliestProductSchedule,
+  enqueueCaptureOperation,
+  getCaptureQueueStatus,
   historicalAccountPriceSnapshot,
   historicalPrimaryImages,
   historicalProductMedia,
@@ -26,6 +29,37 @@ import {
   sessionsForProduct,
   snapshotAllowsPriceAlerts,
 } from "./monitorService.js";
+
+test("capture queue keeps running work and starts the next task in order", async () => {
+  const events = [];
+  let releaseFirst;
+  let markStarted;
+  const firstStarted = new Promise((resolve) => { markStarted = resolve; });
+  const first = enqueueCaptureOperation({ source: "queue-test-one", productIds: ["p1"] }, async () => {
+    events.push("first-start");
+    markStarted();
+    await new Promise((resolve) => { releaseFirst = resolve; });
+    events.push("first-end");
+    return { run: { status: "success", message: "first done" } };
+  });
+  await firstStarted;
+  const second = enqueueCaptureOperation({ source: "queue-test-two", productIds: ["p2"] }, async () => {
+    events.push("second-start");
+    return { run: { status: "success", message: "second done" } };
+  });
+  await new Promise((resolve) => setImmediate(resolve));
+
+  const during = getCaptureQueueStatus().jobs;
+  assert.equal(during.find((job) => job.source === "queue-test-one")?.status, "running");
+  assert.equal(during.find((job) => job.source === "queue-test-two")?.status, "queued");
+  releaseFirst();
+  await Promise.all([first, second]);
+  assert.deepEqual(events, ["first-start", "first-end", "second-start"]);
+  assert.equal(getCaptureQueueStatus().jobs.find((job) => job.source === "queue-test-two")?.status, "completed");
+  assert.equal(getCaptureQueueStatus(Date.now() + 5_001).jobs.some((job) => job.source.startsWith("queue-test-")), false);
+  assert.equal(clearFinishedCaptureJobs(), 0);
+  assert.equal(getCaptureQueueStatus().jobs.some((job) => job.source.startsWith("queue-test-")), false);
+});
 
 function verifiedSku(sku, channels = ["normal"]) {
   return {

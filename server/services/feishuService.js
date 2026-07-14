@@ -119,7 +119,7 @@ export function effectivePriceForSku(sku, accountType = "normal") {
   const account = accountLabels[accountType] || accountLabels.normal;
   const verified = (kind) => sku?.resolutionStatus === "verified" && sku?.priceResolution?.channels?.[kind]?.status === "verified";
   const options = [
-    verified("normal") ? { label: "普通价", value: Number(sku.normalPrice) } : null,
+    verified("normal") ? { label: /秒杀/.test(`${sku.priceTitle || ""} ${sku.priceCalculation?.normal || ""}`) ? "淘宝秒杀价" : "普通价", value: Number(sku.normalPrice) } : null,
     verified("government") ? { label: "国补价", value: Number(sku.governmentPrice) } : null,
     verified(accountType === "normal" ? "surprise" : accountType) ? { label: account.benefit, value: Number(sku[account.field]) } : null,
     verified("coin") ? { label: "淘金币价", value: Number(sku.coinPrice) } : null,
@@ -180,7 +180,7 @@ export function buildPriceCard({ type, product, price, threshold, skuName, trigg
     return [
       { tag: "markdown", content: `${prefix} **${index + 1}. ${escapeMarkdown(sku.name || sku.skuId)}**${status}\nSKU ID ${escapeMarkdown(sku.skuId)}` },
       { tag: "column_set", flex_mode: "none", horizontal_spacing: "small", columns: [
-        priceColumn(anonymous ? "匿名公开价" : "普通价", channelValue(sku, "normal", { anonymous, accountType })),
+        priceColumn(anonymous ? "匿名公开价" : /秒杀/.test(`${sku.priceTitle || ""} ${sku.priceCalculation?.normal || ""}`) ? "淘宝秒杀价" : "普通价", channelValue(sku, "normal", { anonymous, accountType })),
         priceColumn("国补价", channelValue(sku, "government", { anonymous, accountType })),
         priceColumn("惊喜立减价", channelValue(sku, "surprise", { anonymous, accountType })),
       ] },
@@ -199,7 +199,7 @@ export function buildPriceCard({ type, product, price, threshold, skuName, trigg
       const prefix = triggered.has(sku.skuId) ? "🔔" : "▫️";
       return [
         `${prefix} **${index + gridSkus.length + 1}. ${escapeMarkdown(sku.name || sku.skuId)}**`,
-        `普通价 ${channelValue(sku, "normal", { anonymous, accountType })}　国补价 ${channelValue(sku, "government", { anonymous, accountType })}　惊喜立减价 ${channelValue(sku, "surprise", { anonymous, accountType })}　礼金价 ${channelValue(sku, "gift", { anonymous, accountType })}　88VIP价 ${channelValue(sku, "vip88", { anonymous, accountType })}　淘金币价 ${channelValue(sku, "coin", { anonymous, accountType })}　监控价 ${Number.isFinite(monitorPrice) && monitorPrice > 0 ? priceText(monitorPrice) : "未设置"}`,
+        `${/秒杀/.test(`${sku.priceTitle || ""} ${sku.priceCalculation?.normal || ""}`) ? "淘宝秒杀价" : "普通价"} ${channelValue(sku, "normal", { anonymous, accountType })}　国补价 ${channelValue(sku, "government", { anonymous, accountType })}　惊喜立减价 ${channelValue(sku, "surprise", { anonymous, accountType })}　礼金价 ${channelValue(sku, "gift", { anonymous, accountType })}　88VIP价 ${channelValue(sku, "vip88", { anonymous, accountType })}　淘金币价 ${channelValue(sku, "coin", { anonymous, accountType })}　监控价 ${Number.isFinite(monitorPrice) && monitorPrice > 0 ? priceText(monitorPrice) : "未设置"}`,
       ].join("\n");
     });
     skuElements.push({ tag: "hr" }, { tag: "markdown", content: `**更多 SKU**\n${compactLines.join("\n\n")}` });

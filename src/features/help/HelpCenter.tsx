@@ -7,6 +7,7 @@ const sections = [
   ['guide-product', '添加与抓取'],
   ['guide-price', '价格与优惠'],
   ['guide-queue', '监控队列'],
+  ['guide-capture-queue', '抓取队列'],
   ['guide-feishu', '飞书提醒'],
   ['guide-media', '素材与买家秀'],
   ['guide-risk', '采集保护'],
@@ -80,7 +81,7 @@ export function HelpCenter() {
 
         <Section id="guide-account" title="账号授权与账号类型">
           <div className="flex items-start gap-3"><KeyRound className="mt-1 h-5 w-5 shrink-0 text-blue-600" /><div><p>打开“账号授权”，填写账号备注并选择类型，然后点击扫码授权。淘宝 App 扫码完成后，必须点击“检测登录”，状态有效才会参与抓取。</p></div></div>
-          <div className="overflow-x-auto"><table className="w-full border-collapse text-left text-sm"><thead><tr className="border-y border-slate-200 bg-slate-50 text-slate-600"><th className="px-3 py-2">账号类型</th><th className="px-3 py-2">主要用途</th><th className="px-3 py-2">重要说明</th></tr></thead><tbody className="divide-y divide-slate-100"><tr><td className="px-3 py-3 font-medium">普通账号</td><td className="px-3 py-3">普通价、活动价、惊喜立减价、淘金币价</td><td className="px-3 py-3">礼金与 88VIP 计算也需要普通价基准，建议至少保持一个普通账号在线。</td></tr><tr><td className="px-3 py-3 font-medium">礼金账号</td><td className="px-3 py-3">首单礼金、新人专享等资格价</td><td className="px-3 py-3">没有真实礼金资格时显示“未获取”，不会拿标价代替。</td></tr><tr><td className="px-3 py-3 font-medium">88VIP 账号</td><td className="px-3 py-3">88VIP 专享价格</td><td className="px-3 py-3">必须由对应账号页面返回可信权益依据。</td></tr></tbody></table></div>
+          <div className="overflow-x-auto"><table className="w-full border-collapse text-left text-sm"><thead><tr className="border-y border-slate-200 bg-slate-50 text-slate-600"><th className="px-3 py-2">账号类型</th><th className="px-3 py-2">主要用途</th><th className="px-3 py-2">重要说明</th></tr></thead><tbody className="divide-y divide-slate-100"><tr><td className="px-3 py-3 font-medium">普通账号</td><td className="px-3 py-3">普通价、淘宝秒杀价、惊喜立减价、淘金币价</td><td className="px-3 py-3">礼金与 88VIP 计算也需要公共价格基准，建议至少保持一个普通账号在线。</td></tr><tr><td className="px-3 py-3 font-medium">礼金账号</td><td className="px-3 py-3">首单礼金、新人专享等资格价</td><td className="px-3 py-3">没有真实礼金资格时显示“未获取”，不会拿标价代替。</td></tr><tr><td className="px-3 py-3 font-medium">88VIP 账号</td><td className="px-3 py-3">88VIP 专享价格</td><td className="px-3 py-3">必须由对应账号页面返回可信权益依据。</td></tr></tbody></table></div>
           <Checklist items={['“一键检测全部”只检查登录状态，不会开始抓取。', '账号失效时优先点击“重新授权”，不必删除账号卡片。', '一个账号固定使用自己的浏览器资料目录，关闭抓取窗口不会删除登录状态。']} />
         </Section>
 
@@ -88,14 +89,15 @@ export function HelpCenter() {
           <div className="flex items-start gap-3"><Search className="mt-1 h-5 w-5 shrink-0 text-blue-600" /><div><p><strong>链接模式：</strong>粘贴淘宝或天猫商品链接，软件会自动删除跟踪参数，只保留平台、商品路径和商品 ID。</p><p className="mt-2"><strong>商品 ID 模式：</strong>只输入纯数字 ID，选择淘宝或天猫，软件会自动补全有效地址前缀。</p></div></div>
           <Checklist items={[
             '单个添加会创建商品并立即抓取；新商品默认处于“本商品未启用”，先核对数据再加入监控。',
-            '批量添加用于多个新链接或 ID，一次最多 30 个；每组最多 5 个并发，其余按顺序排队。',
+            '“同时抓取买家秀”默认关闭；勾选后，该商品的首次、手动和定时抓取才会自动包含买家秀。',
+            '批量添加用于多个新链接或 ID，一次最多 30 个；买家秀选项对本批商品统一生效，每组最多 5 个并发。',
             '商品简称不是必填。抓取成功后优先展示平台真实标题、店铺和型号。',
             '抓取完成后先检查主图、SKU 数量、普通价和账号专享价；有疑问时打开“核对价格”。',
           ]} />
         </Section>
 
         <Section id="guide-price" title="价格、优惠明细与监控价">
-          <div className="overflow-x-auto"><table className="w-full border-collapse text-left text-sm"><thead><tr className="border-y border-slate-200 bg-slate-50 text-slate-600"><th className="px-3 py-2">价格</th><th className="px-3 py-2">含义</th><th className="px-3 py-2">未获取时</th></tr></thead><tbody className="divide-y divide-slate-100"><tr><td className="px-3 py-3 font-medium text-sky-700">普通价</td><td className="px-3 py-3">平台公共优惠后的普通账号基准价</td><td className="px-3 py-3">显示未验证，不使用标价猜测</td></tr><tr><td className="px-3 py-3 font-medium text-teal-700">国补价</td><td className="px-3 py-3">普通价减去当前 SKU 明确返回的政府补贴</td><td className="px-3 py-3">显示未获取国补价</td></tr><tr><td className="px-3 py-3 font-medium text-rose-700">惊喜立减价</td><td className="px-3 py-3">国补价或普通价再减明确的惊喜立减权益</td><td className="px-3 py-3">显示当前 SKU 无或未获取</td></tr><tr><td className="px-3 py-3 font-medium text-amber-700">淘金币价</td><td className="px-3 py-3">当前价格层级再减该账号和 SKU 的淘金币抵扣</td><td className="px-3 py-3">显示无淘金币</td></tr><tr><td className="px-3 py-3 font-medium text-orange-700">礼金价</td><td className="px-3 py-3">礼金账号资格价，与普通价独立核对</td><td className="px-3 py-3">显示未获取</td></tr><tr><td className="px-3 py-3 font-medium text-violet-700">88VIP 价</td><td className="px-3 py-3">88VIP 账号专享价，与普通价独立核对</td><td className="px-3 py-3">显示未获取</td></tr></tbody></table></div>
+          <div className="overflow-x-auto"><table className="w-full border-collapse text-left text-sm"><thead><tr className="border-y border-slate-200 bg-slate-50 text-slate-600"><th className="px-3 py-2">价格</th><th className="px-3 py-2">含义</th><th className="px-3 py-2">未获取时</th></tr></thead><tbody className="divide-y divide-slate-100"><tr><td className="px-3 py-3 font-medium text-sky-700">普通/淘宝秒杀价</td><td className="px-3 py-3">平台公共优惠或秒杀公式验证后的当前价格</td><td className="px-3 py-3">显示未验证，不使用标价猜测</td></tr><tr><td className="px-3 py-3 font-medium text-teal-700">国补价</td><td className="px-3 py-3">公共价格减去当前 SKU 明确返回的政府补贴</td><td className="px-3 py-3">显示未获取国补价</td></tr><tr><td className="px-3 py-3 font-medium text-rose-700">惊喜立减价</td><td className="px-3 py-3">国补价或公共价格再减明确的惊喜立减权益</td><td className="px-3 py-3">显示当前 SKU 无或未获取</td></tr><tr><td className="px-3 py-3 font-medium text-amber-700">淘金币价</td><td className="px-3 py-3">当前价格层级再减该账号和 SKU 的淘金币抵扣</td><td className="px-3 py-3">显示无淘金币</td></tr><tr><td className="px-3 py-3 font-medium text-orange-700">礼金价</td><td className="px-3 py-3">礼金账号资格价，与公共价格独立核对</td><td className="px-3 py-3">显示未获取</td></tr><tr><td className="px-3 py-3 font-medium text-violet-700">88VIP 价</td><td className="px-3 py-3">88VIP 账号专享价格，与公共价格独立核对</td><td className="px-3 py-3">显示未获取</td></tr></tbody></table></div>
           <Checklist items={[
             '“核对价格”逐 SKU 展示证据、金额和公式；验证不闭合时不会保存猜测值。',
             '“优惠明细”按标价、商品优惠、账号权益和最终价格分层展示，每个 SKU 独立。',
@@ -107,6 +109,11 @@ export function HelpCenter() {
         <Section id="guide-queue" title="监控队列怎么用">
           <div className="flex items-start gap-3"><ListChecks className="mt-1 h-5 w-5 shrink-0 text-blue-600" /><p>“监控队列”只显示已启用商品，默认按下次抓取时间排列。全局暂停时商品仍保留在队列中，但状态会统一显示“等待全局开启”。</p></div>
           <Checklist items={['队列序号表示当前页面中的执行先后；下次时间相同的商品仍受最多 5 个并发限制。', '“抓取”只立即执行当前商品，并遵守账号状态和采集保护。', '“移出”只暂停本商品自动监控，商品卡片、历史价格、监控价和计划都保留。', '在总览或分类重新点击“启用本商品”，商品会立即回到队列。']} />
+        </Section>
+
+        <Section id="guide-capture-queue" title="抓取队列：刷新页面不会丢任务">
+          <div className="flex items-start gap-3"><ListChecks className="mt-1 h-5 w-5 shrink-0 text-blue-600" /><p>“抓取队列”记录单品、批量和定时抓取的排队顺序、实时进度与结果。任务由后端执行，刷新页面或切换菜单只会重载界面，不会取消任务。</p></div>
+          <Checklist items={['同一时间执行一个队列任务；批量任务内部仍最多并发 5 个商品。', '完成或失败项保留 5 秒用于确认结果，随后自动移出；长期结果在“数据记录”查看。', '退出整个软件会停止后端进程；未完成任务不会自动续跑，重新打开后按失败记录重试。']} />
         </Section>
 
         <Section id="guide-feishu" title="飞书文档与机器人提醒">
@@ -121,7 +128,7 @@ export function HelpCenter() {
 
         <Section id="guide-media" title="素材包与买家秀">
           <div className="flex items-start gap-3"><Download className="mt-1 h-5 w-5 shrink-0 text-blue-600" /><p>素材包按 800 主图、750 主图、SKU 图、详情图和真实视频分类打包。买家秀可预览图片、视频和文案，也可单条或批量下载。</p></div>
-          <Checklist items={['买家秀抓取失败时使用“仅重试买家秀”，不会重新计算价格或覆盖 SKU 数据。', '本次失败但历史曾成功时，预览继续显示上次有效缓存，并明确标注缓存状态。', '生成 ZIP 时等待状态变为“下载已开始”后再关闭软件。', '没有真实视频或媒体评价时不会生成占位内容。']} />
+          <Checklist items={['新增商品时按需勾选“同时抓取买家秀”；不需要时关闭可缩短抓取时间。', '买家秀未开启或抓取失败时，仍可使用“仅重试买家秀”，不会重新计算价格或覆盖 SKU 数据。', '本次失败但历史曾成功时，预览继续显示上次有效缓存，并明确标注缓存状态。', '生成 ZIP 时等待状态变为“下载已开始”后再关闭软件。', '没有真实视频或媒体评价时不会生成占位内容。']} />
         </Section>
 
         <Section id="guide-risk" title="采集保护、并发和浏览器">

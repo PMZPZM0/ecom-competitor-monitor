@@ -1,98 +1,118 @@
-# 天猫竞品监控本地部署 App
+# 电商竞品监控
 
-本项目是一个本地运行的天猫/淘宝竞品监控工作台，用于添加商品链接、抓取主图/SKU 图/SKU 价格、每 10 分钟自动监控，并生成 AI 或本地规则分析。
+一款本地运行的淘宝/天猫竞品监控桌面应用，支持商品与 SKU 采集、分账号价格核验、定时监控、素材/买家秀下载和飞书提醒。Windows、macOS Intel 与 macOS Apple Silicon 均提供安装包。
 
-## 使用说明
+> “AI 分析”当前仅保留菜单入口并标注“功能开发中”，不作为正式功能使用。
 
-- [中文使用说明书](docs/USER_GUIDE.md)
-- [Windows、macOS 安装包下载](https://github.com/PMZPZM0/ecom-competitor-monitor/releases/latest)
+## 下载与说明
+
+- [下载最新版安装包](https://github.com/PMZPZM0/ecom-competitor-monitor/releases/latest)
+- [查看完整中文使用说明](docs/USER_GUIDE.md)
+- Windows：选择文件名包含 `Windows-x64.exe` 的安装包。
+- Intel 芯片 Mac：选择 `macOS-Intel.dmg`。
+- Apple M 系列芯片 Mac：选择 `macOS-AppleSilicon.dmg`。
 
 ## 界面预览
 
-以下截图已对店铺名、商品名、商品 ID、SKU ID 和商品素材等信息进行隐私处理。
+以下截图来自最新版真实界面。商品图片、店铺、商品名、商品 ID、SKU、型号、价格、库存、账号备注、用户分组和飞书业务内容均已使用不可还原的马赛克脱敏，仓库不保存未脱敏原图。
 
 | 监控总览 | 商品抓取工作台 |
 | --- | --- |
 | ![监控总览](docs/screenshots/dashboard-home.png) | ![商品抓取工作台](docs/screenshots/product-workbench.png) |
 
-| 店铺与型号分类 | 淘宝账号授权 |
+| SKU 监控概览 | SKU 价格趋势 |
 | --- | --- |
-| ![店铺与型号分类](docs/screenshots/monitor-classification.png) | ![淘宝账号授权](docs/screenshots/account-auth.png) |
+| ![SKU 监控概览](docs/screenshots/sku-monitor-overview.png) | ![SKU 价格趋势](docs/screenshots/product-monitor-trend.png) |
 
-| 飞书文档与机器人提醒 | SKU 价格趋势 |
+| SKU 优惠明细 | 已监控商品队列 |
 | --- | --- |
-| ![飞书文档与机器人提醒](docs/screenshots/feishu-notifications.png) | ![SKU 价格趋势](docs/screenshots/product-monitor-trend.png) |
+| ![SKU 优惠明细](docs/screenshots/sku-monitor-detail.png) | ![已监控商品队列](docs/screenshots/monitor-queue.png) |
 
-| SKU 监控概览 | SKU 监控明细 |
+| 抓取任务队列 | 店铺与型号分类 |
 | --- | --- |
-| ![SKU 监控概览](docs/screenshots/sku-monitor-overview.png) | ![SKU 监控明细](docs/screenshots/sku-monitor-detail.png) |
+| ![抓取任务队列](docs/screenshots/capture-queue.png) | ![店铺与型号分类](docs/screenshots/monitor-classification.png) |
 
-## 功能
+| 淘宝账号授权 | 飞书文档与机器人提醒 |
+| --- | --- |
+| ![淘宝账号授权](docs/screenshots/account-auth.png) | ![飞书文档与机器人提醒](docs/screenshots/feishu-notifications.png) |
 
-- 商品链接管理：录入天猫/淘宝商品链接、分组、启停监控。
-- 图片与价格抓取：提取主图、SKU 图、SKU 价格与价格区间。
-- 定时监控：后端默认每 10 分钟运行一次抓取任务。
-- 淘宝账号授权：支持启动独立 Chrome 打开淘宝登录页，用淘宝 App 扫码登录并同步 taobao/tmall Cookie；也支持本地保存你自己的 Cookie 会话用于抓取。
-- AI 分析：配置 OpenAI 兼容接口后生成 AI 分析；未配置时使用本地规则输出趋势洞察。
-- 本地数据：数据保存在 `server/data/db.json`。
-- 飞书联动：项目内置官方 `@larksuite/cli`，支持扫码授权、自动写飞书价格文档，以及通过群自定义机器人发送价格卡片。
+| 软件内使用说明 | 版本更新与加速下载 |
+| --- | --- |
+| ![软件内使用说明](docs/screenshots/usage-guide.png) | ![版本更新与加速下载](docs/screenshots/update-download.png) |
 
-## 目录结构
+## 主要功能
 
-```text
-server/
-  index.js                 # Express API 入口
-  data/db.json             # 本地数据文件，首次运行自动创建
-  routes/                  # 预留路由分层目录
-  services/
-    analysisService.js     # AI/规则分析
-    authService.js         # 淘宝开放平台 OAuth 辅助
-    browserService.js      # 本地 Chrome 扫码登录与渲染页面抓取
-    monitorService.js      # 10 分钟监控调度
-    tmallScraper.js        # 商品页面抓取与解析
-  storage/db.js            # JSON 数据读写
-  utils/env.js             # .env 加载
+- 商品录入：支持淘宝/天猫长链接、自动精简链接、纯商品 ID 和最多 30 条批量添加；单个/批量均可按需勾选买家秀。
+- 账号池：普通、礼金、88VIP 账号独立浏览器目录、扫码授权、在线检测、重新授权和采集保护。
+- 价格核验：按 SKU 独立解析标价、普通价、淘宝秒杀价、国补价、惊喜立减价、淘金币价、礼金价和 88VIP 价，保留证据、状态和计算公式。
+- 价格监控：每个 SKU 独立监控价、价格趋势、单次定时/循环监控二选一、全局和单品两层开关、专用监控队列。
+- 素材下载：800 主图、前 5 张 750 主图、SKU 图、详情图和真实视频分类打包，支持单项下载。
+- 买家秀：默认不随商品抓取，可按需开启；支持图片、视频和文案预览，整包/单条/批量下载、单独重试和历史有效缓存。
+- 分类管理：按店铺与型号归档，支持搜索、筛选、排序、批量抓取、批量下载和批量删除。
+- 飞书联动：内置官方 `@larksuite/cli`，支持扫码授权、价格文档同步和群机器人低价提醒；提醒冷却不影响抓取与文档写入。
+- 运行反馈：抓取、监控、飞书同步和下载任务均显示进行中、完成或失败原因。
+- 抓取队列：任务由后端排队并保留进度，刷新网页后仍可查看；完成/失败项 60 秒后自动移出，长期结果进入运行日志。
+- 软件更新：按当前系统自动选择安装包，国内镜像加速下载并保留 GitHub 原地址，展示文件大小和 SHA-256。
+- 本地数据：商品、价格记录、账号浏览器目录和飞书配置默认保存在当前电脑。
 
-src/
-  components/ui/           # shadcn 风格基础组件
-  features/
-    analysis/              # AI 分析面板
-    auth/                  # 淘宝授权与 Cookie 会话
-    dashboard/             # 指标卡
-    monitoring/            # 抓取记录
-    products/              # 商品表格与录入
-  lib/                     # API 客户端与工具函数
-  types/                   # 业务类型
-```
+## 本地开发
 
-## 本地运行
+要求 Node.js 20 或更高版本，并安装 Chrome 或 Edge。
 
 ```bash
 npm install
-copy .env.example .env
 npm run dev
 ```
-
-`npm install` 会自动安装项目内的飞书官方 CLI。首次使用请在“数据记录 → 飞书价格提醒”完成应用创建和扫码授权；无需手动执行终端命令。
 
 前端默认地址：`http://localhost:5173`  
 后端默认地址：`http://localhost:4317`
 
+常用命令：
+
+```bash
+npm test
+npm run lint
+npm run build
+npm run screenshots:docs
+```
+
+`npm install` 会安装项目依赖及官方飞书 CLI。`screenshots:docs` 从当前本地界面生成文档截图，只写入脱敏后的 PNG；需要脱敏的页面如果没有识别到遮挡区域，脚本会直接失败。
+
+## 项目结构
+
+```text
+electron/                  # Windows/macOS 桌面容器
+server/
+  index.js                 # Express API 入口
+  services/
+    browserService.js      # 独立账号浏览器与扫码登录
+    tmallScraper.js        # 商品、素材、价格与买家秀采集
+    priceResolver.js       # 分账号价格证据与计算
+    monitorService.js      # 单次/循环监控调度
+    feishuService.js       # 飞书机器人消息
+    larkCliService.js      # 飞书扫码授权与文档同步
+    updateService.js       # GitHub Release 与加速下载
+  storage/                 # 本地数据读写
+src/
+  features/                # 授权、商品、监控、分类、说明、更新界面
+  components/ui/           # 通用 UI 组件
+scripts/                   # 文档截图等维护脚本
+docs/                      # 使用说明和脱敏截图
+```
+
 ## 环境变量
 
-复制 `.env.example` 为 `.env` 后按需配置：
+复制 `.env.example` 为 `.env` 后按需设置：
 
-- `OPENAI_API_KEY`：AI 分析用；留空则使用本地规则。
-- `OPENAI_BASE_URL`：OpenAI 兼容接口地址。
-- `OPENAI_MODEL`：AI 分析模型。
-- `CHROME_PATH`：可选，自定义 Chrome/Edge 路径。
-- `TAOBAO_BROWSER_PORT`：可选，本地扫码登录 Chrome 调试端口，默认 `9223`。
-- `TAOBAO_APP_KEY` / `TAOBAO_APP_SECRET` / `TAOBAO_REDIRECT_URI`：可选，淘宝开放平台 OAuth 参数。
+- `PORT` / `VITE_API_BASE`：本地服务地址。
+- `FEISHU_CONFIG_KEY`：本地加密飞书 Webhook 与签名密钥，建议配置并保持不变。
+- `TAOBAO_APP_KEY` / `TAOBAO_APP_SECRET` / `TAOBAO_REDIRECT_URI`：可选淘宝开放平台 OAuth 参数。
+- `OPENAI_API_KEY` / `OPENAI_BASE_URL` / `OPENAI_MODEL`：为开发中的 AI 分析保留，当前正式界面不启用。
 
-## 注意
+## 使用边界
 
-淘宝/天猫页面可能存在登录、地区、反爬、验证码或动态渲染。当前抓取器会优先使用扫码后的本地 Chrome 登录态渲染页面，再从 HTML、结构化 JSON 和页面文本中提取图片与价格；如果触发登录或验证，会记录错误状态，不会绕过平台安全机制。
+淘宝/天猫页面可能因账号、地区、活动、登录验证和动态渲染返回不同结果。应用只保存有明确页面证据的价格，不把标价猜成普通价或账号专享价，也不会绕过平台验证码和安全验证。请遵守平台服务条款和适用法律。
 
 ## 开源许可
 
-本项目采用 [MIT License](LICENSE) 开源。使用者需自行遵守淘宝、天猫、飞书及所在地区适用的服务条款和法律法规。
+本项目采用 [MIT License](LICENSE)。

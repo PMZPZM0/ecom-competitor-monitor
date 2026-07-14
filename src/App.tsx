@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import { BarChart3, BookOpen, CircleAlert, CircleCheck, CloudDownload, Database, FolderTree, ListChecks, LoaderCircle, PauseCircle, PlayCircle, RefreshCw, Search, Settings, Sparkles, Type, X } from 'lucide-react'
+import { BarChart3, BookOpen, CircleAlert, CircleCheck, CloudDownload, Database, FolderTree, ListChecks, ListTodo, LoaderCircle, PauseCircle, PlayCircle, RefreshCw, Search, Settings, Sparkles, Type, X } from 'lucide-react'
 import { api } from './lib/api'
 import { Button } from './components/ui/button'
 import { Badge } from './components/ui/badge'
@@ -17,6 +17,7 @@ import { FeishuAuthorization, FeishuSettings } from './features/monitoring/Feish
 import { BatchCaptureCard } from './features/monitoring/BatchCaptureCard'
 import { RunLog } from './features/monitoring/RunLog'
 import { MonitorQueue } from './features/monitoring/MonitorQueue'
+import { CaptureQueue } from './features/monitoring/CaptureQueue'
 import { HelpCenter } from './features/help/HelpCenter'
 import { UpdateDialog } from './features/updates/UpdateDialog'
 import type { AuthSession, Overview, Product, UpdateInfo } from './types/domain'
@@ -24,6 +25,7 @@ import type { AuthSession, Overview, Product, UpdateInfo } from './types/domain'
 const navItems = [
   { id: 'overview', label: '监控总览', icon: BarChart3, title: '竞品价格与 SKU 图监控', subtitle: '通过限速队列和账号池轮换抓取，支持价格预警与趋势分析。' },
   { id: 'queue', label: '监控队列', icon: ListChecks, title: '已监控商品队列', subtitle: '集中查看已启用商品的执行顺序、定时计划和运行状态。' },
+  { id: 'capture-queue', label: '抓取队列', icon: ListTodo, title: '抓取任务队列', subtitle: '查看排队和运行进度，完成项会自动移出，页面刷新不会取消后端任务。' },
   { id: 'categories', label: '监控分类', icon: FolderTree, title: '店铺与型号自动分类', subtitle: '按店铺自动建小分类，再按产品型号归档监控数据。' },
   { id: 'auth', label: '账号授权', icon: Settings, title: '淘宝与飞书账号授权', subtitle: '管理淘宝采价账号、飞书扫码授权、价格文档和机器人通知。' },
   { id: 'analysis', label: 'AI 分析（功能开发中）', icon: Sparkles, title: 'AI 数据分析', subtitle: '基于历史抓取数据生成价格、SKU 和图片变化洞察。' },
@@ -104,9 +106,9 @@ function App() {
     }
   }
 
-  async function handleAdd(payload: { name?: string; url: string; group?: string; accountType: 'normal' | 'gift' | 'vip88' }) {
+  async function handleAdd(payload: { name?: string; url: string; group?: string; accountType: 'normal' | 'gift' | 'vip88'; captureBuyerShows: boolean }) {
     setError('')
-    setNotice('正在添加商品，并立即抓取主图、SKU 图和价格...')
+    setNotice(`正在添加商品，并立即抓取主图、SKU 图和价格${payload.captureBuyerShows ? '、买家秀' : ''}...`)
     try {
       const product = await api.addProduct(payload)
       setBusyProductId(product.id)
@@ -122,10 +124,10 @@ function App() {
     }
   }
 
-  async function addProductsBatch(payload: { urls: string[]; group: string; accountType: 'normal' | 'gift' | 'vip88' }) {
+  async function addProductsBatch(payload: { urls: string[]; group: string; accountType: 'normal' | 'gift' | 'vip88'; captureBuyerShows: boolean }) {
     setBusy(true)
     setError('')
-    setNotice(`正在创建并抓取 ${payload.urls.length} 个新商品，每组最多并发 5 个，其余排队...`)
+    setNotice(`正在创建并抓取 ${payload.urls.length} 个新商品${payload.captureBuyerShows ? '（包含买家秀）' : ''}，每组最多并发 5 个，其余排队...`)
     try {
       const result = await api.addProductsBatch(payload)
       setNotice(result.message)
@@ -372,6 +374,10 @@ function App() {
 
     if (activePage === 'queue') {
       return <MonitorQueue products={data.products} monitor={data.monitor} authSessions={data.authSessions} busyProductId={busyProductId} batchBusy={busy} onCapture={captureProduct} onCaptureBatch={(products) => captureProductsBatch(products, false)} onPauseBatch={pauseProductsBatch} onSchedule={saveProductSchedule} onToggle={toggleProduct} />
+    }
+
+    if (activePage === 'capture-queue') {
+      return <CaptureQueue initialStatus={data.captureQueue} />
     }
 
     if (activePage === 'analysis') {

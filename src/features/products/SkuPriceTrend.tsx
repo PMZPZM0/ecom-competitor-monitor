@@ -17,7 +17,7 @@ import type { Product, Snapshot } from '../../types/domain'
 const lineColors = ['#0284c7', '#ea580c', '#7c3aed', '#059669', '#d97706', '#db2777', '#0891b2', '#4f46e5']
 
 const priceModes = [
-  { value: 'normalPrice', label: '普通价' },
+  { value: 'normalPrice', label: '普通/秒杀价' },
   { value: 'governmentPrice', label: '国补价' },
   { value: 'surprisePrice', label: '惊喜立减价' },
   { value: 'giftPrice', label: '礼金价' },

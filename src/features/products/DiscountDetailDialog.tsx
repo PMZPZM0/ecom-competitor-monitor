@@ -3,7 +3,7 @@ import { useEffect } from 'react'
 import { createPortal } from 'react-dom'
 import { currency } from '../../lib/utils'
 import type { Product } from '../../types/domain'
-import { accountBenefitForSku, coinBenefitForSku, displayPriceLabel, normalPriceForSku, priceLayersForSku, surpriseBenefitForSku, verifiedPriceChannel, type SkuPrice } from './productDisplayUtils'
+import { accountBenefitForSku, coinBenefitForSku, displayPriceLabel, normalPriceForSku, priceLayersForSku, publicPriceLabelForSku, surpriseBenefitForSku, verifiedPriceChannel, type SkuPrice } from './productDisplayUtils'
 
 export function DiscountDetailDialog({
   sku,
@@ -147,8 +147,8 @@ export function DiscountDetailDialog({
             ))}
             <div className="flex h-6 items-center pl-9 text-sky-500"><ArrowDown className="h-4 w-4" /></div>
             <div className="grid grid-cols-[104px_minmax(0,1fr)_96px] items-center gap-3 rounded bg-sky-50 px-2 py-3">
-              <span className="text-xs font-semibold text-sky-700">普通价</span>
-              <span className="text-xs text-sky-700">活动公式还原后的普通价格</span>
+              <span className="text-xs font-semibold text-sky-700">{publicPriceLabelForSku(sku)}</span>
+              <span className="text-xs text-sky-700">活动公式验证后的当前公共价格</span>
               <span className="text-right text-lg font-semibold text-sky-800">{currency(normalPrice)}</span>
             </div>
             {governmentPrice && governmentPrice !== normalPrice && <>

@@ -8,6 +8,7 @@ export function verifiedPriceChannel(sku: SkuPrice, channel: 'normal' | 'governm
 }
 
 export function displayPriceLabel(rawLabel = '', accountType?: Product['accountType']) {
+  if (/秒杀/.test(rawLabel)) return '淘宝秒杀价'
   if (/政府补贴|国家补贴|国补/.test(rawLabel)) return '国补价'
   if (/惊喜立减|惊喜价/.test(rawLabel)) return '惊喜立减价'
   if (/淘金币|金币/.test(rawLabel)) return '淘金币价'
@@ -20,6 +21,10 @@ export function displayPriceLabel(rawLabel = '', accountType?: Product['accountT
     if (accountType === 'gift') return '礼金价'
   }
   return '普通价'
+}
+
+export function publicPriceLabelForSku(sku: SkuPrice) {
+  return /秒杀/.test(`${sku.priceTitle || ''} ${sku.priceCalculation?.normal || ''}`) ? '淘宝秒杀价' : '普通价'
 }
 
 export function normalPriceForSku(sku: SkuPrice) {
@@ -108,7 +113,7 @@ export function priceLayersForSku(sku: SkuPrice, options: { includeOriginal?: bo
         ...(sku.originalPrice && sku.originalPrice !== sku.price ? [{ label: '优惠前', value: sku.originalPrice, kind: 'original' as const }] : []),
       ]
   const layers = [
-    ...(sku.normalPrice ? [{ label: '普通价', value: sku.normalPrice, kind: 'price' as const, source: 'normalized' }] : []),
+    ...(sku.normalPrice ? [{ label: publicPriceLabelForSku(sku), value: sku.normalPrice, kind: 'price' as const, source: 'normalized' }] : []),
     ...(sku.governmentPrice ? [{ label: '国补价', value: sku.governmentPrice, kind: 'price' as const, source: 'normalized' }] : []),
     ...(sku.surprisePrice ? [{ label: '惊喜立减价', value: sku.surprisePrice, kind: 'price' as const, source: 'normalized' }] : []),
     ...(sku.giftPrice ? [{ label: '礼金价', value: sku.giftPrice, kind: 'price' as const, source: 'normalized' }] : []),
@@ -118,7 +123,7 @@ export function priceLayersForSku(sku: SkuPrice, options: { includeOriginal?: bo
   ]
   const order = (label: string, kind?: string) => {
     if (kind === 'original' || label === '标价') return 0
-    if (/普通价|店铺优惠后|到手价|券后|平台/.test(label)) return 1
+    if (/普通价|秒杀价|店铺优惠后|到手价|券后|平台/.test(label)) return 1
     if (/政府补贴|国家补贴|国补/.test(label)) return 2
     if (/惊喜立减|惊喜价/.test(label)) return 3
     if (/首单|礼金/.test(label)) return 4

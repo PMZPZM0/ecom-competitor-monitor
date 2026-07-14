@@ -3,7 +3,7 @@ import crypto from "node:crypto";
 import { getRenderedHtml, isTaobaoLoginDocument } from "./browserService.js";
 import { applyPriceResolution, PRICE_PARSER_VERSION, resolveSkuPriceEvidence } from "./priceResolver.js";
 
-export const SCRAPER_VERSION = "2.0.2";
+export const SCRAPER_VERSION = "2.0.3";
 
 const userAgent =
   "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126 Safari/537.36";
@@ -1696,12 +1696,20 @@ export function extractStructuredSku(html) {
   };
 }
 
+export function isUnselectablePromotionSku(sku, selection) {
+  const promotionOnlyName = /(?:晒单|晒图|评价).{0,10}(?:返现|红包)|(?:返现|红包).{0,10}(?:晒单|晒图|评价)/i.test(String(sku?.name || ""));
+  return promotionOnlyName
+    && Number(sku?.quantity || 0) <= 0
+    && selection?.selected === false
+    && /^missing-value:/.test(String(selection?.reason || ""));
+}
+
 async function fetchHtml(product, authSession) {
   if (authSession?.source === "taobao-browser") {
     let lastError;
     for (let attempt = 1; attempt <= 2; attempt++) {
       try {
-        const page = await getRenderedHtml(product.url, authSession, { captureVideo: true, captureBuyerShow: true });
+        const page = await getRenderedHtml(product.url, authSession, { captureVideo: true, captureBuyerShow: product.captureBuyerShows !== false });
         const looksBlocked = isTaobaoLoginDocument(page.finalUrl, page.html);
         if (!looksBlocked) return page;
         throw new Error("当前抓到登录或验证页面");
@@ -1772,6 +1780,15 @@ export async function scrapeTmallProduct(product, authSession) {
   const structuredSku = extractStructuredSku(html);
   const accountType = authSession?.accountType || "normal";
   const mobilePromotionCapture = await fetchMobilePromotionPayloads(itemId, structuredSku.skuPrices, authSession);
+  const excludedPromotionSkuImages = new Set(structuredSku.skuPrices
+    .filter((sku) => isUnselectablePromotionSku(sku, mobilePromotionCapture.selectionResults.find((item) => String(item.skuId) === String(sku.skuId))))
+    .map((sku) => sku.image)
+    .filter(Boolean));
+  structuredSku.skuPrices = structuredSku.skuPrices.filter((sku) => !isUnselectablePromotionSku(
+    sku,
+    mobilePromotionCapture.selectionResults.find((item) => String(item.skuId) === String(sku.skuId)),
+  ));
+  structuredSku.skuImages = structuredSku.skuImages.filter((image) => !excludedPromotionSkuImages.has(image));
   const visibleText = page.visibleText || cheerio.load(html)("body").text();
   const visibleDiscountItems = collectDiscountItemsFromText(visibleText);
   structuredSku.skuPrices = applyVisibleDiscountItems(structuredSku.skuPrices, visibleDiscountItems);
@@ -1808,7 +1825,7 @@ export async function scrapeTmallProduct(product, authSession) {
   const allPrices = structuredPrices.length ? structuredPrices : prices;
   const minPrice = allPrices.length ? Math.min(...allPrices) : null;
   const maxPrice = allPrices.length ? Math.max(...allPrices) : null;
-  const skuImages = unique([...structuredSku.skuImages, ...jsonData.skuImages]).slice(0, 40);
+  const skuImages = unique([...structuredSku.skuImages, ...jsonData.skuImages]).filter((image) => !excludedPromotionSkuImages.has(image)).slice(0, 40);
   const mobileDetailData = await fetchMobileDetailData(itemId, {
     ...authSession,
     cookie: page.cookieHeader || authSession?.cookie || "",
@@ -1838,19 +1855,23 @@ export async function scrapeTmallProduct(product, authSession) {
   );
   const sellerId = extractSellerId(html) || sellerIdFromProductMedia([...media.mainImages, ...skuImages]);
   const accountSessionId = authSession?.id || "guest";
-  const observedBuyerShows = buyerShowCaptureFromNetwork(page.buyerShowPayloads || [], { itemId, accountSessionId });
-  const directBuyerShows = await fetchTmallBuyerShows(itemId, sellerId, page.cookieHeader || authSession?.cookie || "", product.url, accountSessionId);
-  const domBuyerShows = media.buyerShows.length
-    ? buyerShowCaptureResult({ status: "partial", source: "verified-dom", itemId, sellerId, accountSessionId, pageCount: 1, items: media.buyerShows })
-    : buyerShowCaptureResult({ status: "failed", source: "verified-dom", failureCode: "REVIEW_UI_NOT_FOUND", itemId, sellerId, accountSessionId });
-  let buyerShowCapture = bestBuyerShowCapture([observedBuyerShows, directBuyerShows, domBuyerShows]);
-  let buyerShowInteractions = page.buyerShowInteractions || [];
-  if (buyerShowCapture.status === "failed" && authSession?.source === "taobao-browser") {
-    const retry = await scrapeTmallBuyerShows(product, authSession);
-    const firstAttempts = buyerShowCapture.attempts || [];
-    buyerShowCapture = bestBuyerShowCapture([buyerShowCapture, retry.capture]);
-    buyerShowCapture.attempts = [...firstAttempts, ...(retry.capture.attempts || [])];
-    buyerShowInteractions = [...buyerShowInteractions, ...retry.interactions.map((interaction) => ({ ...interaction, retry: true }))];
+  let buyerShowCapture = buyerShowCaptureResult({ status: "skipped", source: "disabled", itemId, sellerId, accountSessionId });
+  let buyerShowInteractions = [];
+  if (product.captureBuyerShows !== false) {
+    const observedBuyerShows = buyerShowCaptureFromNetwork(page.buyerShowPayloads || [], { itemId, accountSessionId });
+    const directBuyerShows = await fetchTmallBuyerShows(itemId, sellerId, page.cookieHeader || authSession?.cookie || "", product.url, accountSessionId);
+    const domBuyerShows = media.buyerShows.length
+      ? buyerShowCaptureResult({ status: "partial", source: "verified-dom", itemId, sellerId, accountSessionId, pageCount: 1, items: media.buyerShows })
+      : buyerShowCaptureResult({ status: "failed", source: "verified-dom", failureCode: "REVIEW_UI_NOT_FOUND", itemId, sellerId, accountSessionId });
+    buyerShowCapture = bestBuyerShowCapture([observedBuyerShows, directBuyerShows, domBuyerShows]);
+    buyerShowInteractions = page.buyerShowInteractions || [];
+    if (buyerShowCapture.status === "failed" && authSession?.source === "taobao-browser") {
+      const retry = await scrapeTmallBuyerShows(product, authSession);
+      const firstAttempts = buyerShowCapture.attempts || [];
+      buyerShowCapture = bestBuyerShowCapture([buyerShowCapture, retry.capture]);
+      buyerShowCapture.attempts = [...firstAttempts, ...(retry.capture.attempts || [])];
+      buyerShowInteractions = [...buyerShowInteractions, ...retry.interactions.map((interaction) => ({ ...interaction, retry: true }))];
+    }
   }
   media.buyerShows = buyerShowCapture.items;
   const mainImages = media.mainImages;

@@ -1,4 +1,4 @@
-import { CircleAlert, CircleCheck, Crown, Gift, Layers3, LoaderCircle, Play, UserRound } from 'lucide-react'
+import { CircleAlert, CircleCheck, Crown, Gift, Images, Layers3, LoaderCircle, Play, UserRound } from 'lucide-react'
 import { useMemo, useState } from 'react'
 import { Badge } from '../../components/ui/badge'
 import { Button } from '../../components/ui/button'
@@ -7,7 +7,7 @@ import { Input, Textarea } from '../../components/ui/input'
 import { normalizeProductUrl, normalizeProductUrlIfPossible } from '../../lib/productUrl'
 import type { AuthSession } from '../../types/domain'
 
-type Payload = { urls: string[]; group: string; accountType: 'normal' | 'gift' | 'vip88' }
+type Payload = { urls: string[]; group: string; accountType: 'normal' | 'gift' | 'vip88'; captureBuyerShows: boolean }
 
 type Props = {
   sessions: AuthSession[]
@@ -19,11 +19,12 @@ export function BatchCaptureCard({ sessions, busy, onRun }: Props) {
   const [rawUrls, setRawUrls] = useState('')
   const [group, setGroup] = useState('核心竞品')
   const [accountType, setAccountType] = useState<Payload['accountType']>('normal')
+  const [captureBuyerShows, setCaptureBuyerShows] = useState(false)
   const [status, setStatus] = useState<{ tone: 'progress' | 'success' | 'error'; message: string } | null>(null)
   const urls = useMemo(() => [...new Set(rawUrls.split(/\r?\n/).map((line) => line.trim()).filter(Boolean).map(normalizeProductUrlIfPossible))], [rawUrls])
 
   async function submit() {
-    setStatus({ tone: 'progress', message: `正在创建并抓取 ${urls.length} 个商品...` })
+    setStatus({ tone: 'progress', message: `正在创建并抓取 ${urls.length} 个商品${captureBuyerShows ? '，包含买家秀' : ''}...` })
     try {
       if (!urls.length) throw new Error('请粘贴至少一个商品链接。')
       if (urls.length > 30) throw new Error('单次最多添加 30 个商品链接。')
@@ -32,7 +33,7 @@ export function BatchCaptureCard({ sessions, busy, onRun }: Props) {
       }
       const available = sessions.some((session) => (session.enabled ?? session.active) && (session.accountType || 'normal') === accountType)
       if (!available) throw new Error(`尚未授权${accountType === 'gift' ? '礼金' : accountType === 'vip88' ? '88VIP' : '普通'}账号。`)
-      await onRun({ urls, group, accountType })
+      await onRun({ urls, group, accountType, captureBuyerShows })
       setRawUrls('')
       setStatus({ tone: 'success', message: '批量商品已创建，抓取结果已更新。' })
     } catch (caught) { setStatus({ tone: 'error', message: caught instanceof Error ? caught.message : '批量添加失败' }) }
@@ -55,6 +56,12 @@ export function BatchCaptureCard({ sessions, busy, onRun }: Props) {
           })}
           </div>
         </fieldset>
+        <label className="flex min-h-10 cursor-pointer items-center gap-2 rounded-md bg-slate-50 px-3 text-sm text-slate-700">
+          <input type="checkbox" checked={captureBuyerShows} onChange={(event) => setCaptureBuyerShows(event.target.checked)} className="h-4 w-4 accent-blue-600" />
+          <Images className="h-4 w-4 text-slate-500" />
+          <span className="font-medium">同时抓取买家秀</span>
+          <span className="text-xs text-slate-400">整批统一，可选</span>
+        </label>
         <div className="mt-auto flex items-center gap-3 pt-1"><Button type="button" onClick={submit} disabled={busy || urls.length === 0} className="min-w-44"><Play className="h-4 w-4" />{busy ? '队列抓取中' : `添加并抓取 ${urls.length} 个`}</Button>{status && <div className={`flex min-w-0 items-center gap-1.5 text-xs ${status.tone === 'progress' ? 'text-blue-700' : status.tone === 'success' ? 'text-emerald-700' : 'text-red-700'}`} role={status.tone === 'error' ? 'alert' : 'status'} aria-live="polite">{status.tone === 'progress' ? <LoaderCircle className="h-4 w-4 shrink-0 animate-spin" /> : status.tone === 'success' ? <CircleCheck className="h-4 w-4 shrink-0" /> : <CircleAlert className="h-4 w-4 shrink-0" />}<span className="line-clamp-2">{status.message}</span></div>}</div>
       </CardContent>
     </Card>

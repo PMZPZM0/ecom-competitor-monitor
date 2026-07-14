@@ -6,6 +6,7 @@ import { Input } from '../../components/ui/input'
 import { timeAgo } from '../../lib/utils'
 import { api } from '../../lib/api'
 import type { LarkCliStatus, Overview, Product } from '../../types/domain'
+import { publicPriceLabelForSku } from '../products/productDisplayUtils'
 
 type Props = {
   feishu: Overview['feishu']
@@ -144,7 +145,7 @@ export function FeishuSettings({ feishu, logs, products, onSave, onTest }: Props
               <div className="mt-0.5 truncate text-xs text-orange-600">{previewProduct.shopName || previewProduct.lastSnapshot?.shopName || '未知店铺'} · {previewProduct.model || previewProduct.lastSnapshot?.model || previewProduct.name}</div>
             </div>
             <div className="grid grid-cols-2 gap-x-6 gap-y-2 p-4">
-              {previewSkus.map((sku) => <div key={sku.skuId} className="min-w-0 border-b border-slate-200 pb-2"><div className="truncate text-xs font-medium text-slate-700">{sku.name}</div><div className="mt-1 flex flex-wrap gap-3 text-[11px] text-slate-500"><span>{previewProduct.lastSnapshot?.accessMode === 'anonymous' ? '匿名' : '普通'} ¥{(sku.normalPrice ?? sku.price).toFixed(2)}</span><span>惊喜立减 {previewProduct.lastSnapshot?.accessMode === 'anonymous' ? '需登录' : sku.surprisePrice == null ? '未获取' : `¥${sku.surprisePrice.toFixed(2)}`}</span><span>淘金币 {previewProduct.lastSnapshot?.accessMode === 'anonymous' ? '需登录' : sku.coinPrice == null ? '无淘金币' : `¥${sku.coinPrice.toFixed(2)}`}</span><span className="text-amber-700">监控 {previewProduct.skuMonitorPrices?.[sku.skuId] ? `¥${previewProduct.skuMonitorPrices[sku.skuId].toFixed(2)}` : '--'}</span></div></div>)}
+              {previewSkus.map((sku) => <div key={sku.skuId} className="min-w-0 border-b border-slate-200 pb-2"><div className="truncate text-xs font-medium text-slate-700">{sku.name}</div><div className="mt-1 flex flex-wrap gap-3 text-[11px] text-slate-500"><span>{previewProduct.lastSnapshot?.accessMode === 'anonymous' ? '匿名' : publicPriceLabelForSku(sku)} ¥{(sku.normalPrice ?? sku.price).toFixed(2)}</span><span>惊喜立减 {previewProduct.lastSnapshot?.accessMode === 'anonymous' ? '需登录' : sku.surprisePrice == null ? '未获取' : `¥${sku.surprisePrice.toFixed(2)}`}</span><span>淘金币 {previewProduct.lastSnapshot?.accessMode === 'anonymous' ? '需登录' : sku.coinPrice == null ? '无淘金币' : `¥${sku.coinPrice.toFixed(2)}`}</span><span className="text-amber-700">监控 {previewProduct.skuMonitorPrices?.[sku.skuId] ? `¥${previewProduct.skuMonitorPrices[sku.skuId].toFixed(2)}` : '--'}</span></div></div>)}
             </div>
           </div>
         )}

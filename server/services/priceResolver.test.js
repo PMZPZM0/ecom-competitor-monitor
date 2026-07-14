@@ -41,6 +41,45 @@ const pressureCookerCases = [
   ], 439, 438.99],
 ];
 
+test("resolves the current billion-subsidy top-up code as a public promotion", () => {
+  const resolution = resolveSkuPriceEvidence([payload("6079769816067", "569", "391", [
+    { promotionName: "spsd4bybt", amount: 17000 },
+    { promotionName: "spsd4bybtjb", amount: 800 },
+  ])], {
+    itemId: "843315272519",
+    skuId: "6079769816067",
+    accountType: "normal",
+    selectedSkuVerified: true,
+    capturedAt: "2026-07-14T00:00:00.000Z",
+  });
+  const sku = applyPriceResolution({ skuId: "6079769816067", priceLayers: [] }, resolution);
+
+  assert.equal(resolution.status, "verified");
+  assert.equal(sku.originalPrice, 569);
+  assert.equal(sku.normalPrice, 391);
+  assert.equal(sku.priceCalculation.normal, "标价 569.00 - 百亿补贴 170.00 - 百亿补贴加补 8.00 = 普通价 391.00");
+});
+
+test("resolves Taobao flash-sale subsidy and top-up as a verified flash-sale price", () => {
+  const resolution = resolveSkuPriceEvidence([payload("5951880316886", "295", "54.92", [
+    { promotionName: "spsd4hjmssjbt", amount: 23600 },
+    { promotionName: "spsd4hjbt", amount: 408 },
+  ])], {
+    itemId: "843315272519",
+    skuId: "5951880316886",
+    accountType: "normal",
+    selectedSkuVerified: true,
+    capturedAt: "2026-07-14T00:00:00.000Z",
+  });
+  const sku = applyPriceResolution({ skuId: "5951880316886", priceTitle: "秒杀价", priceLayers: [] }, resolution);
+
+  assert.equal(resolution.status, "verified");
+  assert.equal(resolution.normalLabel, "淘宝秒杀价");
+  assert.equal(sku.normalPrice, 54.92);
+  assert.equal(sku.priceTitle, "淘宝秒杀价");
+  assert.equal(sku.priceCalculation.normal, "标价 295.00 - 淘宝秒杀补贴 236.00 - 淘宝秒杀加补 4.08 = 淘宝秒杀价 54.92");
+});
+
 for (const [skuId, price1, price2, promotions, normalPrice, surprisePrice] of pressureCookerCases) {
   test(`resolves real pcdetail formula for SKU ${skuId}`, () => {
     const resolution = resolveSkuPriceEvidence([payload(skuId, price1, price2, promotions)], {

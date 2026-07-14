@@ -2,7 +2,7 @@
   "name": "tmall-competitor-monitor",
   "productName": "电商竞品监控",
   "private": true,
-  "version": "1.0.9",
+  "version": "1.0.10",
   "type": "module",
   "main": "electron/main.mjs",
   "scripts": {
@@ -14,6 +14,7 @@
     "lint": "oxlint",
     "test": "node --test server/services/*.test.js server/storage/*.test.js server/utils/*.test.js",
     "preview": "vite preview",
+    "screenshots:docs": "node scripts/capture-doc-screenshots.mjs",
     "start": "node server/index.js",
     "pack:win": "npm run build && electron-builder --win nsis",
     "pack:mac": "npm run build && electron-builder --mac dmg zip"

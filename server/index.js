@@ -11,7 +11,7 @@ import { loadEnv } from "./utils/env.js";
 import { dbRuntimeInfo, newId, readDb, updateDb } from "./storage/db.js";
 import { analyzeData } from "./services/analysisService.js";
 import { buildTaobaoOAuthUrl, maskSecret } from "./services/authService.js";
-import { preserveBuyerShowHistory, rescheduleMonitor, resolveCaptureProtectionMinutes, runMonitorOnce, runProductOnce, scheduleProduct, startScheduler, stopScheduler } from "./services/monitorService.js";
+import { clearFinishedCaptureJobs, getCaptureQueueStatus, preserveBuyerShowHistory, rescheduleMonitor, resolveCaptureProtectionMinutes, runMonitorOnce, runProductOnce, scheduleProduct, startScheduler, stopScheduler } from "./services/monitorService.js";
 import { createNotificationLog, effectivePriceForSku, publicFeishuConfig, sendFeishuNotification, updateFeishuConfig } from "./services/feishuService.js";
 import { appendPriceDocument, cliStatus, createPriceDocument, readAuthQr, startCliLogin, startCliSetup } from "./services/larkCliService.js";
 import { browserRuntimeInfo, checkTaobaoSession, closeAccountBrowser, getTaobaoAuthState, isTaobaoLoginUrl, keepAccountBrowserWarm, minimizeAccountBrowser, openProductInAccountChrome, openTaobaoLogin } from "./services/browserService.js";
@@ -70,11 +70,20 @@ app.get("/api/runtime/update", async (_req, res) => {
   }
 });
 
+app.get("/api/capture-queue", (_req, res) => {
+  res.json(getCaptureQueueStatus());
+});
+
+app.delete("/api/capture-queue/completed", (_req, res) => {
+  res.json({ removed: clearFinishedCaptureJobs() });
+});
+
 const productSchema = z.object({
   name: z.string().trim().optional().default(""),
   url: z.string().url(),
   group: z.string().optional().default("默认分组"),
   accountType: z.enum(["normal", "gift", "vip88"]).default("normal"),
+  captureBuyerShows: z.boolean().default(true),
 });
 
 function safeFilename(value, fallback = "tmall") {
@@ -227,6 +236,7 @@ app.get("/api/overview", async (_req, res) => {
     feishu: publicFeishuConfig(db.feishu),
     notificationLogs: db.notificationLogs.slice(-80).reverse(),
     monitor: db.monitor,
+    captureQueue: getCaptureQueueStatus(),
     runtime: runtimeInfo(),
   });
 });
@@ -258,6 +268,7 @@ app.post("/api/products/batch", async (req, res) => {
     urls: z.array(z.string().url()).min(1).max(30),
     group: z.string().min(1).default("核心竞品"),
     accountType: z.enum(["normal", "gift", "vip88"]).default("normal"),
+    captureBuyerShows: z.boolean().default(true),
   });
   const parsed = schema.parse(req.body);
   const uniqueUrls = [...new Set(parsed.urls.map(normalizeProductUrl))];
@@ -273,6 +284,7 @@ app.post("/api/products/batch", async (req, res) => {
     url,
     group: parsed.group,
     accountType: parsed.accountType,
+    captureBuyerShows: parsed.captureBuyerShows,
     enabled: false,
     mainImage: "",
     lastStatus: "pending",
@@ -323,6 +335,7 @@ app.patch("/api/products/:id", async (req, res) => {
     url: z.string().url().optional(),
     group: z.string().min(1).optional(),
     accountType: z.enum(["normal", "gift", "vip88"]).optional(),
+    captureBuyerShows: z.boolean().optional(),
     enabled: z.boolean().optional(),
     monitorScheduleMode: z.enum(["once", "interval"]).optional(),
     monitorIntervalMinutes: z.number().int().min(30).max(1440).nullable().optional(),

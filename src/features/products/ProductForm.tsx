@@ -1,5 +1,5 @@
 import { useState } from 'react'
-import { CircleAlert, CircleCheck, Crown, Gift, Hash, Link2, LoaderCircle, Plus, Search, UserRound } from 'lucide-react'
+import { CircleAlert, CircleCheck, Crown, Gift, Hash, Images, Link2, LoaderCircle, Plus, Search, UserRound } from 'lucide-react'
 import { Button } from '../../components/ui/button'
 import { Card, CardContent, CardHeader, CardTitle } from '../../components/ui/card'
 import { Input } from '../../components/ui/input'
@@ -12,7 +12,7 @@ type InputMode = 'link' | 'id'
 
 type Props = {
   sessions: AuthSession[]
-  onAdd: (payload: { name?: string; url: string; group?: string; accountType: AccountType }) => Promise<void>
+  onAdd: (payload: { name?: string; url: string; group?: string; accountType: AccountType; captureBuyerShows: boolean }) => Promise<void>
 }
 
 const prefixes: Record<Platform, string> = {
@@ -33,6 +33,7 @@ export function ProductForm({ sessions, onAdd }: Props) {
   const [idInput, setIdInput] = useState('')
   const [group, setGroup] = useState('核心竞品')
   const [accountType, setAccountType] = useState<AccountType>('normal')
+  const [captureBuyerShows, setCaptureBuyerShows] = useState(false)
   const [submitting, setSubmitting] = useState(false)
   const [status, setStatus] = useState<{ tone: 'progress' | 'success' | 'error'; message: string } | null>(null)
 
@@ -46,7 +47,7 @@ export function ProductForm({ sessions, onAdd }: Props) {
   async function submit(event: React.FormEvent) {
     event.preventDefault()
     setSubmitting(true)
-    setStatus({ tone: 'progress', message: '正在创建商品并抓取价格、素材和买家秀...' })
+    setStatus({ tone: 'progress', message: captureBuyerShows ? '正在创建商品并抓取价格、素材和买家秀...' : '正在创建商品并抓取价格与素材...' })
     try {
       const productInput = inputMode === 'id' ? idInput : linkInput
       const itemId = itemIdFromInput(productInput)
@@ -54,7 +55,7 @@ export function ProductForm({ sessions, onAdd }: Props) {
       const normalizedUrl = normalizeProductUrl(inputMode === 'id' ? `${prefixes[platform]}${itemId}` : productInput)
       const available = sessions.some((session) => (session.enabled ?? session.active) && (session.accountType || 'normal') === accountType)
       if (!available) throw new Error(`尚未授权${accountType === 'gift' ? '礼金' : accountType === 'vip88' ? '88VIP' : '普通'}账号，请先到账号授权页面登录。`)
-      await onAdd({ url: normalizedUrl, group, accountType })
+      await onAdd({ url: normalizedUrl, group, accountType, captureBuyerShows })
       if (inputMode === 'id') setIdInput('')
       else setLinkInput('')
       setStatus({ tone: 'success', message: '商品已添加，首次抓取结果已更新到下方列表。' })
@@ -134,6 +135,12 @@ export function ProductForm({ sessions, onAdd }: Props) {
               })}
             </div>
           </fieldset>
+          <label className="flex min-h-10 cursor-pointer items-center gap-2 rounded-md bg-slate-50 px-3 text-sm text-slate-700">
+            <input type="checkbox" checked={captureBuyerShows} onChange={(event) => setCaptureBuyerShows(event.target.checked)} className="h-4 w-4 accent-blue-600" />
+            <Images className="h-4 w-4 text-slate-500" />
+            <span className="font-medium">同时抓取买家秀</span>
+            <span className="text-xs text-slate-400">可选，会增加抓取时间</span>
+          </label>
           <div className="mt-auto flex items-center gap-3 pt-1">
             <Button type="submit" disabled={submitting || !itemId} className="min-w-44"><Plus className="h-4 w-4" />{submitting ? '抓取中' : '添加并立即抓取'}</Button>
             {status && <div className={`flex min-w-0 items-center gap-1.5 text-xs ${status.tone === 'progress' ? 'text-blue-700' : status.tone === 'success' ? 'text-emerald-700' : 'text-red-700'}`} role={status.tone === 'error' ? 'alert' : 'status'} aria-live="polite">{status.tone === 'progress' ? <LoaderCircle className="h-4 w-4 shrink-0 animate-spin" /> : status.tone === 'success' ? <CircleCheck className="h-4 w-4 shrink-0" /> : <CircleAlert className="h-4 w-4 shrink-0" />}<span className="line-clamp-2">{status.message}</span></div>}

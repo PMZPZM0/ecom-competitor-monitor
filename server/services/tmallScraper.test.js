@@ -1,6 +1,14 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { applyAppliedCoinDiscount, applyNetworkPromoData, applyVisibleDiscountItems, applyVisibleSurprisePrice, buyerShowCaptureFromNetwork, buyerShowsFromRateDetail, calculateAccountPriceScenario, calculatePriceScenarios, collectDiscountItems, collectDiscountItemsFromText, collectProductProgramItems, collectVisibleSurprisePrices, extractBuyerShowItems, extractSelectedSkuId, filterProductVideoUrls, resolveCoinBenefit, resolveSkuPrices, selectGalleryImages, selectSquareMainImage, sellerIdFromProductMedia } from "./tmallScraper.js";
+import { applyAppliedCoinDiscount, applyNetworkPromoData, applyVisibleDiscountItems, applyVisibleSurprisePrice, buyerShowCaptureFromNetwork, buyerShowsFromRateDetail, calculateAccountPriceScenario, calculatePriceScenarios, collectDiscountItems, collectDiscountItemsFromText, collectProductProgramItems, collectVisibleSurprisePrices, extractBuyerShowItems, extractSelectedSkuId, filterProductVideoUrls, isUnselectablePromotionSku, resolveCoinBenefit, resolveSkuPrices, selectGalleryImages, selectSquareMainImage, sellerIdFromProductMedia } from "./tmallScraper.js";
+
+test("filters only an unavailable review-rebate pseudo SKU", () => {
+  const failedSelection = { selected: false, reason: "missing-value:44252240468" };
+  assert.equal(isUnselectablePromotionSku({ name: "【旗舰新品】晒图返现50元红包", quantity: 0 }, failedSelection), true);
+  assert.equal(isUnselectablePromotionSku({ name: "奶油白", quantity: 0 }, failedSelection), false);
+  assert.equal(isUnselectablePromotionSku({ name: "晒单返现50元红包", quantity: 3 }, failedSelection), false);
+  assert.equal(isUnselectablePromotionSku({ name: "晒单返现50元红包", quantity: 0 }, { selected: true, reason: "verified" }), false);
+});
 
 test("sellerIdFromProductMedia recovers a seller id from verified product assets", () => {
   assert.equal(

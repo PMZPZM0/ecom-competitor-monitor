@@ -1,4 +1,4 @@
-import type { Analysis, AuthSession, LarkCliStatus, Overview, Product, RunRecord, Snapshot, UpdateInfo } from '../types/domain'
+import type { Analysis, AuthSession, CaptureQueueStatus, LarkCliStatus, Overview, Product, RunRecord, Snapshot, UpdateInfo } from '../types/domain'
 
 const baseUrl = import.meta.env.VITE_API_BASE || ''
 
@@ -27,10 +27,12 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
 
 export const api = {
   overview: () => request<Overview>('/api/overview'),
+  captureQueue: () => request<CaptureQueueStatus>('/api/capture-queue'),
+  clearCaptureQueue: () => request<{ removed: number }>('/api/capture-queue/completed', { method: 'DELETE' }),
   checkUpdate: () => request<UpdateInfo>('/api/runtime/update'),
-  addProduct: (payload: { name?: string; url: string; group?: string; accountType: 'normal' | 'gift' | 'vip88' }) =>
+  addProduct: (payload: { name?: string; url: string; group?: string; accountType: 'normal' | 'gift' | 'vip88'; captureBuyerShows: boolean }) =>
     request<Product>('/api/products', { method: 'POST', body: JSON.stringify(payload) }),
-  addProductsBatch: (payload: { urls: string[]; group: string; accountType: 'normal' | 'gift' | 'vip88' }) =>
+  addProductsBatch: (payload: { urls: string[]; group: string; accountType: 'normal' | 'gift' | 'vip88'; captureBuyerShows: boolean }) =>
     request<{ total: number; created: number; skipped: number; success: number; failed: number; message: string }>('/api/products/batch', { method: 'POST', body: JSON.stringify(payload) }),
   updateProduct: (id: string, payload: Partial<Product>) =>
     request<Product>(`/api/products/${id}`, { method: 'PATCH', body: JSON.stringify(payload) }),

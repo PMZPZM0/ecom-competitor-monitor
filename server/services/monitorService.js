@@ -4,11 +4,13 @@ import { createNotificationLog, effectivePriceForSku, sendFeishuNotification } f
 import { appendPriceDocument } from "./larkCliService.js";
 
 let timer = null;
-let captureRunActive = false;
+let captureQueueTail = Promise.resolve();
+const captureJobs = [];
 
 const MIN_PRODUCT_DELAY_MS = Number(process.env.MONITOR_MIN_DELAY_MS || 5000);
 const MAX_PRODUCT_DELAY_MS = Number(process.env.MONITOR_MAX_DELAY_MS || 12000);
 const MAX_CAPTURE_CONCURRENCY = 5;
+const CAPTURE_JOB_RETENTION_MS = 5_000;
 const MIN_PRODUCT_INTERVAL_MINUTES = 30;
 const MAX_PRODUCT_INTERVAL_MINUTES = 1440;
 
@@ -131,14 +133,96 @@ function persistSessionHealth(current, sessions) {
   });
 }
 
-async function withCaptureLock(operation) {
-  if (captureRunActive) throw new Error("已有抓取任务正在运行，请等待当前任务完成后再试。");
-  captureRunActive = true;
-  try {
-    return await operation();
-  } finally {
-    captureRunActive = false;
+function publicCaptureJob(job) {
+  return {
+    id: job.id,
+    source: job.source,
+    scope: job.scope,
+    status: job.status,
+    outcome: job.outcome,
+    productIds: job.productIds,
+    products: job.products,
+    activeProductIds: job.activeProductIds,
+    total: job.total,
+    completed: job.completed,
+    message: job.message,
+    error: job.error,
+    createdAt: job.createdAt,
+    startedAt: job.startedAt,
+    finishedAt: job.finishedAt,
+  };
+}
+
+export function getCaptureQueueStatus(now = Date.now()) {
+  const cutoff = now - CAPTURE_JOB_RETENTION_MS;
+  for (let index = captureJobs.length - 1; index >= 0; index -= 1) {
+    const job = captureJobs[index];
+    if (job.finishedAt && Date.parse(job.finishedAt) < cutoff) captureJobs.splice(index, 1);
   }
+  return {
+    running: captureJobs.some((job) => job.status === "running"),
+    pendingCount: captureJobs.filter((job) => job.status === "queued").length,
+    completedCount: captureJobs.filter((job) => job.status === "completed" || job.status === "failed").length,
+    retentionSeconds: CAPTURE_JOB_RETENTION_MS / 1000,
+    jobs: captureJobs.map(publicCaptureJob),
+  };
+}
+
+export function clearFinishedCaptureJobs() {
+  let removed = 0;
+  for (let index = captureJobs.length - 1; index >= 0; index -= 1) {
+    if (captureJobs[index].status === "completed" || captureJobs[index].status === "failed") {
+      captureJobs.splice(index, 1);
+      removed += 1;
+    }
+  }
+  return removed;
+}
+
+export function enqueueCaptureOperation(meta, operation) {
+  const job = {
+    id: newId("capture"),
+    source: meta.source || "manual",
+    scope: meta.scope || "selected-products",
+    status: "queued",
+    outcome: null,
+    productIds: [...(meta.productIds || [])],
+    products: [],
+    activeProductIds: [],
+    total: meta.productIds?.length || 0,
+    completed: 0,
+    message: "等待前面的抓取任务完成。",
+    error: "",
+    createdAt: new Date().toISOString(),
+    startedAt: null,
+    finishedAt: null,
+  };
+  captureJobs.unshift(job);
+
+  const execute = async () => {
+    job.status = "running";
+    job.startedAt = new Date().toISOString();
+    job.message = "抓取任务正在运行。";
+    try {
+      const result = await operation(job);
+      job.outcome = result?.run?.status || "success";
+      job.status = job.outcome === "failed" ? "failed" : "completed";
+      job.message = result?.run?.message || "抓取任务已完成。";
+      return result;
+    } catch (error) {
+      job.status = "failed";
+      job.outcome = "failed";
+      job.error = error.message || String(error);
+      job.message = job.error;
+      throw error;
+    } finally {
+      job.activeProductIds = [];
+      job.finishedAt = new Date().toISOString();
+    }
+  };
+  const promise = captureQueueTail.then(execute, execute);
+  captureQueueTail = promise.catch(() => undefined);
+  return promise;
 }
 
 function summarizeResults(results) {
@@ -571,13 +655,21 @@ export async function captureProduct(product, authSessions = [], { captureProtec
   }
 }
 
-async function runMonitorUnlocked({ source = "manual", productIds = null, includeDisabled = false } = {}) {
+async function runMonitorUnlocked({ source = "manual", productIds = null, includeDisabled = false } = {}, queueJob = null) {
   const startedAt = new Date().toISOString();
   const data = await readDb();
   const activeSessions = data.authSessions.filter((session) => (session.enabled ?? session.active ?? true) && session.loginStatus !== "expired");
   const candidates = orderedCaptureCandidates(data.products, productIds, includeDisabled);
+  if (queueJob) {
+    queueJob.total = candidates.length;
+    queueJob.products = candidates.map((product) => ({ id: product.id, name: product.name || product.itemId || product.id }));
+  }
   const ignoreProtection = source === "manual-batch";
   const results = await runInCaptureGroups(candidates, async (product, productIndex) => {
+    if (queueJob) {
+      queueJob.activeProductIds = [...new Set([...queueJob.activeProductIds, product.id])];
+      queueJob.message = `正在抓取 ${queueJob.completed + 1}/${queueJob.total}：${product.name || product.itemId || product.id}`;
+    }
     const captureCandidate = {
       ...product,
       knownPrimaryImages: historicalPrimaryImages(data.snapshots, product.id),
@@ -586,10 +678,17 @@ async function runMonitorUnlocked({ source = "manual", productIds = null, includ
     };
     const accountType = product.accountType || "normal";
     const productSessions = sessionsForProduct(activeSessions, accountType, productIndex);
-    return captureProduct(captureCandidate, productSessions, {
-      captureProtectionMinutes: resolveCaptureProtectionMinutes(data.monitor, accountType),
-      ignoreProtection,
-    });
+    try {
+      return await captureProduct(captureCandidate, productSessions, {
+        captureProtectionMinutes: resolveCaptureProtectionMinutes(data.monitor, accountType),
+        ignoreProtection,
+      });
+    } finally {
+      if (queueJob) {
+        queueJob.activeProductIds = queueJob.activeProductIds.filter((id) => id !== product.id);
+        queueJob.completed += 1;
+      }
+    }
   }, { concurrency: MAX_CAPTURE_CONCURRENCY, delayBetweenGroups: ignoreProtection ? null : randomProductDelay });
 
   const runRecord = buildRunRecord({
@@ -639,24 +738,42 @@ async function runMonitorUnlocked({ source = "manual", productIds = null, includ
 }
 
 export async function runMonitorOnce(options = {}) {
-  return withCaptureLock(() => runMonitorUnlocked(options));
+  return enqueueCaptureOperation({
+    source: options.source || "manual",
+    scope: options.productIds ? "selected-products" : options.includeDisabled ? "all-products" : "all-enabled-products",
+    productIds: options.productIds || [],
+  }, (job) => runMonitorUnlocked(options, job));
 }
 
-async function runProductUnlocked(productId, { source = "single-product" } = {}) {
+async function runProductUnlocked(productId, { source = "single-product" } = {}, queueJob = null) {
   const startedAt = new Date().toISOString();
   const data = await readDb();
   const product = data.products.find((item) => item.id === productId);
   if (!product) throw new Error("商品不存在。");
+  if (queueJob) {
+    queueJob.total = 1;
+    queueJob.products = [{ id: product.id, name: product.name || product.itemId || product.id }];
+    queueJob.activeProductIds = [product.id];
+    queueJob.message = `正在抓取 1/1：${product.name || product.itemId || product.id}`;
+  }
 
   const activeSessions = data.authSessions.filter((session) => (session.enabled ?? session.active ?? true) && session.loginStatus !== "expired");
   const accountType = product.accountType || "normal";
   const productSessions = sessionsForProduct(activeSessions, accountType);
-  const result = await captureProduct({
-    ...product,
-    knownPrimaryImages: historicalPrimaryImages(data.snapshots, product.id),
-    knownGalleryImages: Array.from(new Set([...(product.lastSnapshot?.gallery750Images || []), ...historicalProductMedia(data.snapshots, product.id).galleryImages])),
-    knownVideoUrls: Array.from(new Set([...(product.lastSnapshot?.videoUrls || []), ...historicalProductMedia(data.snapshots, product.id).videoUrls])),
-  }, productSessions, { captureProtectionMinutes: resolveCaptureProtectionMinutes(data.monitor, accountType) });
+  let result;
+  try {
+    result = await captureProduct({
+      ...product,
+      knownPrimaryImages: historicalPrimaryImages(data.snapshots, product.id),
+      knownGalleryImages: Array.from(new Set([...(product.lastSnapshot?.gallery750Images || []), ...historicalProductMedia(data.snapshots, product.id).galleryImages])),
+      knownVideoUrls: Array.from(new Set([...(product.lastSnapshot?.videoUrls || []), ...historicalProductMedia(data.snapshots, product.id).videoUrls])),
+    }, productSessions, { captureProtectionMinutes: resolveCaptureProtectionMinutes(data.monitor, accountType) });
+  } finally {
+    if (queueJob) {
+      queueJob.activeProductIds = [];
+      queueJob.completed = 1;
+    }
+  }
   const runRecord = buildRunRecord({
     source,
     scope: productId,
@@ -701,7 +818,11 @@ async function runProductUnlocked(productId, { source = "single-product" } = {})
 }
 
 export async function runProductOnce(productId, options = {}) {
-  return withCaptureLock(() => runProductUnlocked(productId, options));
+  return enqueueCaptureOperation({
+    source: options.source || "single-product",
+    scope: productId,
+    productIds: [productId],
+  }, (job) => runProductUnlocked(productId, options, job));
 }
 
 async function scheduleNext() {
