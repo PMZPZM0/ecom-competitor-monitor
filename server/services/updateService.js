@@ -1,4 +1,5 @@
 const RELEASES_API = "https://api.github.com/repos/PMZPZM0/ecom-competitor-monitor/releases/latest";
+const DOWNLOAD_MIRROR = "https://ghproxy.net/";
 const CACHE_MS = 30 * 60_000;
 let cachedRelease = null;
 
@@ -37,6 +38,16 @@ export function selectReleaseAsset(assets, platform = process.platform, arch = p
   return null;
 }
 
+export function acceleratedDownloadUrl(value) {
+  try {
+    const url = new URL(value);
+    if (url.protocol !== "https:" || url.hostname !== "github.com" || !/\/releases\/download\//.test(url.pathname)) return "";
+    return `${DOWNLOAD_MIRROR}${url.href}`;
+  } catch {
+    return "";
+  }
+}
+
 async function latestRelease() {
   if (cachedRelease?.expiresAt > Date.now()) return cachedRelease.value;
   const response = await fetch(RELEASES_API, {
@@ -71,7 +82,10 @@ export async function checkForUpdate(currentVersion, runtime = {}) {
     publishedAt: release.published_at || null,
     releaseUrl: release.html_url,
     downloadUrl: asset?.browser_download_url || release.html_url,
+    acceleratedDownloadUrl: asset ? acceleratedDownloadUrl(asset.browser_download_url) : "",
     assetName: asset?.name || "",
+    assetSize: Number(asset?.size) || 0,
+    assetDigest: /^sha256:[a-f0-9]{64}$/i.test(String(asset?.digest || "")) ? asset.digest : "",
     platform,
     arch,
     checkedAt: new Date().toISOString(),

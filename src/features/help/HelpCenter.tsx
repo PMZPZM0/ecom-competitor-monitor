@@ -131,7 +131,7 @@ export function HelpCenter() {
 
         <Section id="guide-update" title="检查并安装新版本">
           <div className="flex items-start gap-3"><CloudDownload className="mt-1 h-5 w-5 shrink-0 text-blue-600" /><p>侧边栏底部常驻“检查软件更新”。软件启动后会连接本项目 GitHub Releases 检查最新正式版，发现新版本时入口会高亮。</p></div>
-          <Checklist items={['点击更新入口可查看当前版本、最新版本、发布日期和更新说明。', '软件会根据 Windows、macOS Intel 或 macOS Apple Silicon 自动选择对应安装包。', '下载后先退出软件，再运行安装包覆盖安装；商品、历史记录、账号资料和飞书配置不会删除。', 'GitHub 暂时无法连接只会影响检查更新，不会影响本地监控与抓取。']} />
+          <Checklist items={['点击更新入口可查看当前版本、最新版本、发布日期和更新说明。', '软件会根据 Windows、macOS Intel 或 macOS Apple Silicon 自动选择对应安装包。', '国内网络可优先使用“加速下载”；镜像不可用时切换“GitHub 原地址”。', '下载后先退出软件，再运行安装包覆盖安装；商品、历史记录、账号资料和飞书配置不会删除。', 'GitHub 暂时无法连接只会影响检查更新，不会影响本地监控与抓取。']} />
         </Section>
 
         <Section id="guide-troubleshoot" title="常见异常与处理顺序">

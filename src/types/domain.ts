@@ -351,7 +351,10 @@ export type UpdateInfo = {
   publishedAt: string | null
   releaseUrl: string
   downloadUrl: string
+  acceleratedDownloadUrl: string
   assetName: string
+  assetSize: number
+  assetDigest: string
   platform: string
   arch: string
   checkedAt: string

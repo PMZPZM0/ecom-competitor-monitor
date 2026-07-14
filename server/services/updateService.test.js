@@ -1,12 +1,19 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { compareVersions, selectReleaseAsset } from "./updateService.js";
+import { acceleratedDownloadUrl, compareVersions, selectReleaseAsset } from "./updateService.js";
 
 test("version comparison handles tags and different segment lengths", () => {
   assert.equal(compareVersions("v1.0.5", "1.0.4"), 1);
   assert.equal(compareVersions("1.0.4", "v1.0.4"), 0);
   assert.equal(compareVersions("1.0.4", "1.1.0"), -1);
   assert.equal(compareVersions("1.0.5", "1.0.5-beta.1"), 0);
+});
+
+test("accelerated downloads only wrap trusted GitHub release assets", () => {
+  const original = "https://github.com/PMZPZM0/ecom-competitor-monitor/releases/download/v1.0.8/EcomMonitor.exe";
+  assert.equal(acceleratedDownloadUrl(original), `https://ghproxy.net/${original}`);
+  assert.equal(acceleratedDownloadUrl("https://example.com/EcomMonitor.exe"), "");
+  assert.equal(acceleratedDownloadUrl("not-a-url"), "");
 });
 
 test("release asset selection matches the current OS and CPU", () => {
