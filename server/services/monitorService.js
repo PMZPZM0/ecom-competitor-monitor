@@ -1,4 +1,5 @@
 import { newId, readDb, updateDb } from "../storage/db.js";
+import { itemIdFromProductUrl } from "../utils/productUrl.js";
 import { scrapeTmallProduct } from "./tmallScraper.js";
 import { createNotificationLog, effectivePriceForSku, sendFeishuNotification } from "./feishuService.js";
 import { appendPriceDocument } from "./larkCliService.js";
@@ -6,6 +7,7 @@ import { appendPriceDocument } from "./larkCliService.js";
 let timer = null;
 let captureQueueTail = Promise.resolve();
 const captureJobs = [];
+const accountCaptureTails = new Map();
 
 const MIN_PRODUCT_DELAY_MS = Number(process.env.MONITOR_MIN_DELAY_MS || 5000);
 const MAX_PRODUCT_DELAY_MS = Number(process.env.MONITOR_MAX_DELAY_MS || 12000);
@@ -108,6 +110,25 @@ export async function runInCaptureGroups(items, worker, { concurrency = MAX_CAPT
   return results;
 }
 
+function accountCaptureKey(session) {
+  if (!session) return "";
+  if (session.browserProfileKey) return `browser:${session.browserProfileKey}:${session.browserPort || ""}`;
+  return `session:${session.id}`;
+}
+
+export async function withAccountCaptureLock(session, operation) {
+  const key = accountCaptureKey(session);
+  if (!key) return operation();
+  const previous = accountCaptureTails.get(key) || Promise.resolve();
+  const current = previous.catch(() => undefined).then(operation);
+  accountCaptureTails.set(key, current);
+  try {
+    return await current;
+  } finally {
+    if (accountCaptureTails.get(key) === current) accountCaptureTails.delete(key);
+  }
+}
+
 function availablePoolSessions(sessions) {
   const now = Date.now();
   return sessions
@@ -147,6 +168,7 @@ function publicCaptureJob(job) {
     completed: job.completed,
     message: job.message,
     error: job.error,
+    results: job.results,
     createdAt: job.createdAt,
     startedAt: job.startedAt,
     finishedAt: job.finishedAt,
@@ -193,6 +215,7 @@ export function enqueueCaptureOperation(meta, operation) {
     completed: 0,
     message: "等待前面的抓取任务完成。",
     error: "",
+    results: [],
     createdAt: new Date().toISOString(),
     startedAt: null,
     finishedAt: null,
@@ -205,6 +228,7 @@ export function enqueueCaptureOperation(meta, operation) {
     job.message = "抓取任务正在运行。";
     try {
       const result = await operation(job);
+      job.results = result?.run?.items || [];
       job.outcome = result?.run?.status || "success";
       job.status = job.outcome === "failed" ? "failed" : "completed";
       job.message = result?.run?.message || "抓取任务已完成。";
@@ -229,6 +253,35 @@ function summarizeResults(results) {
   const success = results.filter((result) => result.snapshot).length;
   const failed = results.length - success;
   return { total: results.length, success, failed };
+}
+
+function safeItemIdFromUrl(url) {
+  try {
+    return itemIdFromProductUrl(url);
+  } catch {
+    return "";
+  }
+}
+
+export function captureResultItem(result) {
+  const product = result?.product || {};
+  const snapshot = result?.snapshot || null;
+  const buyerShowFailed = snapshot?.buyerShowCapture?.status === "failed";
+  const status = snapshot ? (buyerShowFailed ? "partial" : "success") : "failed";
+  return {
+    productId: product.id || "",
+    requestedItemId: safeItemIdFromUrl(product.url),
+    itemId: snapshot?.itemId || product.itemId || "",
+    name: product.name || product.itemId || product.id || "未知商品",
+    accountType: product.accountType || "normal",
+    status,
+    message: status === "failed"
+      ? product.lastError || "抓取失败，未返回可保存结果。"
+      : buyerShowFailed
+        ? `价格与素材已更新，买家秀失败：${snapshot.buyerShowCapture.failureCode || "未知原因"}`
+        : "价格、SKU 与素材抓取成功。",
+    capturedAt: snapshot?.capturedAt || product.updatedAt || new Date().toISOString(),
+  };
 }
 
 export function orderedCaptureCandidates(products, productIds, includeDisabled = false) {
@@ -279,6 +332,7 @@ export function buildRunRecord({ source, scope, startedAt, results, message }) {
     startedAt,
     finishedAt: new Date().toISOString(),
     ...summary,
+    items: results.map(captureResultItem),
     message:
       message ||
       `抓取 ${summary.total} 个商品，成功 ${summary.success} 个，失败 ${summary.failed} 个。${buyerShowFailures ? ` 其中 ${buyerShowFailures} 个商品的买家秀本次未获取，价格与素材已正常更新。` : ""}`,
@@ -412,6 +466,10 @@ export function sessionsForProduct(activeSessions, accountType = "normal", rotat
   const normal = rotate(activeSessions.filter((session) => (session.accountType || "normal") === "normal"));
   if (accountType === "normal") return normal;
   return [...normal, ...rotate(activeSessions.filter((session) => session.accountType === accountType))];
+}
+
+export function snapshotHasVerifiedNormalPrice(snapshot) {
+  return (snapshot?.skuPrices || []).some((sku) => verifiedChannel(sku, "normal"));
 }
 
 export function hasTrustedAccountBaseline(snapshots, accountType = "normal") {
@@ -573,17 +631,24 @@ export async function captureProduct(product, authSessions = [], { captureProtec
       ? [[null]]
       : Array.from(Map.groupBy(sessions, (session) => session.accountType || "normal").values());
     for (const group of sessionGroups) {
-      for (const session of group.slice(0, 2)) {
-        if (session) session.lastUsedAt = new Date().toISOString();
+      const attempts = group[0] && group.length === 1 ? [group[0], group[0]] : group.slice(0, 2);
+      for (let attempt = 0; attempt < attempts.length; attempt += 1) {
+        const session = attempts[attempt];
         try {
-          const capturedSnapshot = await scrapeTmallProduct(product, session);
+          const capturedSnapshot = await withAccountCaptureLock(session, async () => {
+            if (session) session.lastUsedAt = new Date().toISOString();
+            return scrapeTmallProduct(product, session);
+          });
+          if (!snapshotHasVerifiedNormalPrice(capturedSnapshot)) {
+            throw new Error("页面未返回可验证的 SKU 普通价。已丢弃本次页面结果并切换账号或重试。");
+          }
           snapshots.push({
             session,
             snapshot: capturedSnapshot,
           });
           break;
         } catch (error) {
-          accountErrors.push({ sessionId: session?.id || "guest", accountName: session?.name || "未登录前台", message: error.message });
+          accountErrors.push({ sessionId: session?.id || "guest", accountName: session?.name || "未登录前台", attempt: attempt + 1, message: error.message });
           if (session) {
             session.lastFailureAt = new Date().toISOString();
             session.consecutiveFailures = Number(session.consecutiveFailures || 0) + 1;
@@ -602,7 +667,10 @@ export async function captureProduct(product, authSessions = [], { captureProtec
     if (!snapshots.length) throw new Error(accountErrors.map((error) => `${error.accountName}：${error.message}`).join("；"));
     const targetAccountType = product.accountType || "normal";
     if (!hasTrustedAccountBaseline(snapshots, targetAccountType)) {
-      const diagnostic = accountCaptureDiagnostic(snapshots);
+      const diagnostic = [
+        accountCaptureDiagnostic(snapshots),
+        ...accountErrors.map((error) => `${error.accountName}第 ${error.attempt} 次：${error.message}`),
+      ].filter(Boolean).join("；");
       if (targetAccountType === "normal") throw new Error("普通价格缺少可验证的 SKU 证据，本次结果已拒绝保存，避免把标价误当普通价。请重试抓取；若持续失败，请检查普通账号登录状态。");
       if (!hasTrustedAccountBaseline(snapshots, "normal")) {
         throw new Error(`${targetAccountType === "gift" ? "礼金" : "88VIP"}商品缺少普通账号的可验证 SKU 基准。${diagnostic}`);

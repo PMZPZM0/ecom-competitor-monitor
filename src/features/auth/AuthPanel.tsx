@@ -432,11 +432,11 @@ export function AuthPanel({ sessions, onSaved, onActivate, onDelete, monitor }: 
           </div>
           <div className="border-t border-slate-100 p-4 xl:border-r xl:border-t-0">
             <div className="text-xs font-semibold text-slate-800">批量抓取</div>
-            <p className="mt-2 text-xs leading-5 text-slate-500">按输入顺序每组最多并发 5 个，其余排队。批量任务跳过本地保护倒计时，但不会绕过淘宝登录验证、滑块或访问限制。</p>
+            <p className="mt-2 text-xs leading-5 text-slate-500">同一账号严格按顺序抓取，不同账号自动并行，调度上限为 5 个。批量任务跳过本地保护倒计时，但不会绕过淘宝登录验证、滑块或访问限制。</p>
           </div>
           <div className="border-t border-slate-100 p-4 md:border-l md:border-slate-100 xl:border-l-0 xl:border-t-0">
             <div className="text-xs font-semibold text-slate-800">自动监控</div>
-            <p className="mt-2 text-xs leading-5 text-slate-500">每组最多并发 5 个，其余排队，并遵守对应账号池的保护时间。将全局或该账号池设为“关闭保护”后，自动监控也不再使用本地倒计时。</p>
+            <p className="mt-2 text-xs leading-5 text-slate-500">同一账号严格按顺序抓取，不同账号自动并行，调度上限为 5 个，并遵守对应账号池的保护时间。关闭保护只取消本地倒计时，不会取消账号隔离。</p>
           </div>
         </div>
       </details>

@@ -27,7 +27,9 @@ import {
   runInCaptureGroups,
   scheduleProduct,
   sessionsForProduct,
+  snapshotHasVerifiedNormalPrice,
   snapshotAllowsPriceAlerts,
+  withAccountCaptureLock,
 } from "./monitorService.js";
 
 test("capture queue keeps running work and starts the next task in order", async () => {
@@ -40,7 +42,7 @@ test("capture queue keeps running work and starts the next task in order", async
     markStarted();
     await new Promise((resolve) => { releaseFirst = resolve; });
     events.push("first-end");
-    return { run: { status: "success", message: "first done" } };
+    return { run: { status: "success", message: "first done", items: [{ productId: "p1", status: "success" }] } };
   });
   await firstStarted;
   const second = enqueueCaptureOperation({ source: "queue-test-two", productIds: ["p2"] }, async () => {
@@ -55,6 +57,7 @@ test("capture queue keeps running work and starts the next task in order", async
   releaseFirst();
   await Promise.all([first, second]);
   assert.deepEqual(events, ["first-start", "first-end", "second-start"]);
+  assert.deepEqual(getCaptureQueueStatus().jobs.find((job) => job.source === "queue-test-one")?.results, [{ productId: "p1", status: "success" }]);
   assert.equal(getCaptureQueueStatus().jobs.find((job) => job.source === "queue-test-two")?.status, "completed");
   assert.equal(getCaptureQueueStatus(Date.now() + 5_001).jobs.some((job) => job.source.startsWith("queue-test-")), false);
   assert.equal(clearFinishedCaptureJobs(), 0);
@@ -359,6 +362,44 @@ test("run record is partial when price succeeds but buyer-show capture fails", (
   });
   assert.equal(run.status, "partial");
   assert.match(run.message, /买家秀本次未获取/);
+  assert.equal(run.items[0].status, "partial");
+  assert.match(run.items[0].message, /买家秀失败/);
+});
+
+test("run record permanently keeps each failed product reason", () => {
+  const run = buildRunRecord({
+    source: "manual-batch",
+    scope: "selected-products",
+    startedAt: "2026-07-15T08:00:00.000Z",
+    results: [{
+      product: {
+        id: "p1",
+        name: "失败商品",
+        url: "https://detail.tmall.com/item.htm?id=1006331369273",
+        accountType: "vip88",
+        lastError: "商品身份校验失败：避免串品。",
+        updatedAt: "2026-07-15T08:01:00.000Z",
+      },
+      snapshot: null,
+    }],
+  });
+  assert.deepEqual(run.items[0], {
+    productId: "p1",
+    requestedItemId: "1006331369273",
+    itemId: "",
+    name: "失败商品",
+    accountType: "vip88",
+    status: "failed",
+    message: "商品身份校验失败：避免串品。",
+    capturedAt: "2026-07-15T08:01:00.000Z",
+  });
+});
+
+test("verified-price guard accepts every account type only with normal SKU evidence", () => {
+  for (const accountType of ["normal", "gift", "vip88"]) {
+    assert.equal(snapshotHasVerifiedNormalPrice({ accountType, skuPrices: [verifiedSku({ skuId: "sku-1" }, ["normal"])] }), true);
+    assert.equal(snapshotHasVerifiedNormalPrice({ accountType, skuPrices: [{ skuId: "sku-1", resolutionStatus: "ambiguous" }] }), false);
+  }
 });
 
 test("runInCaptureGroups limits concurrency to five and preserves order", async () => {
@@ -373,4 +414,36 @@ test("runInCaptureGroups limits concurrency to five and preserves order", async 
   });
   assert.equal(maximum, 5);
   assert.deepEqual(results, Array.from({ length: 12 }, (_, index) => index));
+});
+
+test("account capture lock serializes one browser while other accounts stay parallel", async () => {
+  const events = [];
+  let releaseFirst;
+  let markFirstStarted;
+  const firstStarted = new Promise((resolve) => { markFirstStarted = resolve; });
+  const sharedBrowserA = { id: "normal", accountType: "normal", browserProfileKey: "shared", browserPort: 9223 };
+  const sharedBrowserB = { id: "gift", accountType: "gift", browserProfileKey: "shared", browserPort: 9223 };
+  const otherBrowser = { id: "vip", accountType: "vip88", browserProfileKey: "other", browserPort: 9224 };
+
+  const first = withAccountCaptureLock(sharedBrowserA, async () => {
+    events.push("shared-first-start");
+    markFirstStarted();
+    await new Promise((resolve) => { releaseFirst = resolve; });
+    events.push("shared-first-end");
+  });
+  await firstStarted;
+  const second = withAccountCaptureLock(sharedBrowserB, async () => { events.push("shared-second"); });
+  const other = withAccountCaptureLock(otherBrowser, async () => { events.push("other-account"); });
+  await other;
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.deepEqual(events, ["shared-first-start", "other-account"]);
+  releaseFirst();
+  await Promise.all([first, second]);
+  assert.deepEqual(events, ["shared-first-start", "other-account", "shared-first-end", "shared-second"]);
+});
+
+test("account capture lock releases the browser after a failed capture", async () => {
+  const session = { id: "normal", browserProfileKey: "recovery", browserPort: 9225 };
+  await assert.rejects(withAccountCaptureLock(session, async () => { throw new Error("capture failed"); }), /capture failed/);
+  assert.equal(await withAccountCaptureLock(session, async () => "recovered"), "recovered");
 });

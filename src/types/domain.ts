@@ -258,6 +258,17 @@ export type Analysis = {
   createdAt: string
 }
 
+export type RunItem = {
+  productId: string
+  requestedItemId: string
+  itemId: string
+  name: string
+  accountType: 'normal' | 'gift' | 'vip88'
+  status: 'success' | 'partial' | 'failed'
+  message: string
+  capturedAt: string
+}
+
 export type RunRecord = {
   id: string
   source: 'manual-all' | 'manual-batch' | 'manual-product' | 'single-product' | 'scheduled'
@@ -269,6 +280,7 @@ export type RunRecord = {
   success: number
   failed: number
   message: string
+  items?: RunItem[]
 }
 
 export type CaptureQueueJob = {
@@ -284,6 +296,7 @@ export type CaptureQueueJob = {
   completed: number
   message: string
   error: string
+  results: RunItem[]
   createdAt: string
   startedAt: string | null
   finishedAt: string | null

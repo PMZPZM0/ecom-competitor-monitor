@@ -33,7 +33,7 @@ export const api = {
   addProduct: (payload: { name?: string; url: string; group?: string; accountType: 'normal' | 'gift' | 'vip88'; captureBuyerShows: boolean }) =>
     request<Product>('/api/products', { method: 'POST', body: JSON.stringify(payload) }),
   addProductsBatch: (payload: { urls: string[]; group: string; accountType: 'normal' | 'gift' | 'vip88'; captureBuyerShows: boolean }) =>
-    request<{ total: number; created: number; skipped: number; success: number; failed: number; message: string }>('/api/products/batch', { method: 'POST', body: JSON.stringify(payload) }),
+    request<{ total: number; created: number; skipped: number; success: number; failed: number; message: string; run: RunRecord | null; items: NonNullable<RunRecord['items']> }>('/api/products/batch', { method: 'POST', body: JSON.stringify(payload) }),
   updateProduct: (id: string, payload: Partial<Product>) =>
     request<Product>(`/api/products/${id}`, { method: 'PATCH', body: JSON.stringify(payload) }),
   deleteProduct: (id: string) => request<void>(`/api/products/${id}`, { method: 'DELETE' }),

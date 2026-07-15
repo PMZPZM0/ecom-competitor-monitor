@@ -3,7 +3,7 @@ import { CalendarClock, ChevronLeft, ChevronRight, CircleAlert, CircleCheck, Clo
 import { Badge } from '../../components/ui/badge'
 import { Button } from '../../components/ui/button'
 import { Input } from '../../components/ui/input'
-import type { AuthSession, Overview, Product } from '../../types/domain'
+import type { AuthSession, Overview, Product, RunRecord } from '../../types/domain'
 import { formatProtectionCountdown, productCaptureProtectionUntil } from '../products/captureProtection'
 import { productImages, productItemId, productModel, productShopName, productTitle } from '../products/productDisplayUtils'
 import { MonitorScheduleDialog } from './MonitorScheduleDialog'
@@ -15,7 +15,7 @@ type Props = {
   busyProductId?: string
   batchBusy?: boolean
   onCapture: (product: Product) => Promise<Product | void>
-  onCaptureBatch: (products: Product[]) => Promise<void>
+  onCaptureBatch: (products: Product[]) => Promise<RunRecord | void>
   onPauseBatch: (products: Product[]) => Promise<void>
   onSchedule: (product: Product, mode: NonNullable<Product['monitorScheduleMode']>, intervalMinutes: number, monitorStartAt: string | null) => Promise<void>
   onToggle: (product: Product) => Promise<void>
@@ -122,10 +122,10 @@ export function MonitorQueue({ products, monitor, authSessions, busyProductId, b
   async function captureSelected() {
     if (!selectedProducts.length) return
     setActionProductId('batch')
-    setFeedback({ tone: 'progress', message: `正在按队列顺序抓取 ${selectedProducts.length} 个商品，每组最多 5 个...` })
+    setFeedback({ tone: 'progress', message: `正在抓取 ${selectedProducts.length} 个商品；同一账号按顺序执行，不同账号并行...` })
     try {
-      await onCaptureBatch(selectedProducts)
-      setFeedback({ tone: 'success', message: `已完成 ${selectedProducts.length} 个队列商品的批量抓取。` })
+      const run = await onCaptureBatch(selectedProducts)
+      setFeedback({ tone: run?.failed ? 'error' : 'success', message: run?.message || `已完成 ${selectedProducts.length} 个队列商品的批量抓取。` })
       setSelectedIds(new Set())
     } catch (error) {
       setFeedback({ tone: 'error', message: error instanceof Error ? error.message : '批量抓取失败。' })

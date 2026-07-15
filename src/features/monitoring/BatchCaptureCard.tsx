@@ -12,7 +12,7 @@ type Payload = { urls: string[]; group: string; accountType: 'normal' | 'gift' |
 type Props = {
   sessions: AuthSession[]
   busy: boolean
-  onRun: (payload: Payload) => Promise<void>
+  onRun: (payload: Payload) => Promise<{ failed: number; message: string }>
 }
 
 export function BatchCaptureCard({ sessions, busy, onRun }: Props) {
@@ -33,15 +33,15 @@ export function BatchCaptureCard({ sessions, busy, onRun }: Props) {
       }
       const available = sessions.some((session) => (session.enabled ?? session.active) && (session.accountType || 'normal') === accountType)
       if (!available) throw new Error(`尚未授权${accountType === 'gift' ? '礼金' : accountType === 'vip88' ? '88VIP' : '普通'}账号。`)
-      await onRun({ urls, group, accountType, captureBuyerShows })
+      const result = await onRun({ urls, group, accountType, captureBuyerShows })
       setRawUrls('')
-      setStatus({ tone: 'success', message: '批量商品已创建，抓取结果已更新。' })
+      setStatus({ tone: result.failed ? 'error' : 'success', message: result.message })
     } catch (caught) { setStatus({ tone: 'error', message: caught instanceof Error ? caught.message : '批量添加失败' }) }
   }
 
   return (
     <Card className="flex h-full flex-col">
-      <CardHeader className="flex min-h-[78px] flex-row items-start justify-between gap-4"><div><CardTitle className="flex items-center gap-2"><Layers3 className="h-4 w-4 text-blue-600" />批量添加并抓取</CardTitle><div className="mt-1 text-sm text-slate-500">粘贴新商品链接，一行一个；按队列自动识别标题、店铺、型号和 SKU。</div></div><Badge className="border-blue-100 bg-blue-50 text-blue-700">{urls.length}/30 条</Badge></CardHeader>
+      <CardHeader className="flex min-h-[78px] flex-row items-start justify-between gap-4"><div><CardTitle className="flex items-center gap-2"><Layers3 className="h-4 w-4 text-blue-600" />批量添加并抓取</CardTitle><div className="mt-1 text-sm text-slate-500">粘贴新商品链接，一行一个；同一账号按顺序抓取，不同账号自动并行。</div></div><Badge className="border-blue-100 bg-blue-50 text-blue-700">{urls.length}/30 条</Badge></CardHeader>
       <CardContent className="flex flex-1 flex-col gap-3">
         <label className="grid gap-1 text-sm font-medium text-slate-700">新商品链接
           <Textarea className="min-h-20 resize-y font-mono" value={rawUrls} onChange={(event) => setRawUrls(event.target.value.split(/\r?\n/).map(normalizeProductUrlIfPossible).join('\n'))} onBlur={() => setRawUrls(urls.join('\n'))} placeholder={'https://detail.tmall.com/item.htm?id=...\nhttps://item.taobao.com/item.htm?id=...'} />

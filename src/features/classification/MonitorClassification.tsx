@@ -6,7 +6,7 @@ import { Card, CardContent, CardHeader, CardTitle } from '../../components/ui/ca
 import { Input } from '../../components/ui/input'
 import { currency } from '../../lib/utils'
 import { downloadFile } from '../../lib/download'
-import type { AuthSession, Overview, Product } from '../../types/domain'
+import type { AuthSession, Overview, Product, RunRecord } from '../../types/domain'
 import { ImagePreview, ShopLogo, type Preview } from '../products/productDisplay'
 import { ProductMonitorCard } from '../products/ProductMonitorCard'
 import { downloadBuyerShowsBatchHref, productHasCoinBenefit, productModel, productShopName } from '../products/productDisplayUtils'
@@ -23,7 +23,7 @@ type Props = {
   onRetryBuyerShows: (product: Product) => Promise<Product>
   onDelete: (product: Product) => Promise<void>
   onDeleteBatch: (products: Product[]) => Promise<void>
-  onCaptureBatch: (products: Product[]) => Promise<void>
+  onCaptureBatch: (products: Product[]) => Promise<RunRecord | void>
   batchBusy?: boolean
   busyProductId?: string
   authSessions: AuthSession[]
@@ -177,8 +177,8 @@ export function MonitorClassification({ products, monitor, onToggle, onToggleGlo
     const selectedProducts = sortedProducts.filter((product) => selectedIds.has(product.id))
     setBatchFeedback({ tone: 'progress', message: `已加入 ${selectedProducts.length} 个商品，正在按队列抓取价格和素材...` })
     try {
-      await onCaptureBatch(selectedProducts)
-      setBatchFeedback({ tone: 'success', message: `${selectedProducts.length} 个商品的批量抓取任务已完成。` })
+      const run = await onCaptureBatch(selectedProducts)
+      setBatchFeedback({ tone: run?.failed ? 'error' : 'success', message: run?.message || `${selectedProducts.length} 个商品的批量抓取任务已完成。` })
       setSelectedIds(new Set())
     } catch (error) {
       setBatchFeedback({ tone: 'error', message: error instanceof Error ? error.message : '批量抓取失败。' })
@@ -251,7 +251,7 @@ export function MonitorClassification({ products, monitor, onToggle, onToggleGlo
                 {productSortOptions.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}
               </select>
               <Button type="button" variant="secondary" size="sm" onClick={toggleVisibleSelection} disabled={!pageProducts.length}>{allVisibleSelected ? '取消本页全选' : '全选本页'}</Button>
-              <Button type="button" size="sm" onClick={captureSelected} disabled={!selectedIds.size || selectedIds.size > 20 || batchBusy} title={selectedIds.size > 20 ? '为降低访问风险，单次最多抓取 20 个商品' : '选中商品将按顺序限速抓取'}><Play className="h-4 w-4" />{batchBusy ? '队列抓取中' : selectedIds.size > 20 ? '最多选择 20 个' : `批量抓取（${selectedIds.size}）`}</Button>
+              <Button type="button" size="sm" onClick={captureSelected} disabled={!selectedIds.size || selectedIds.size > 20 || batchBusy} title={selectedIds.size > 20 ? '为降低访问风险，单次最多抓取 20 个商品' : '同一账号按顺序抓取，不同账号自动并行'}><Play className="h-4 w-4" />{batchBusy ? '队列抓取中' : selectedIds.size > 20 ? '最多选择 20 个' : `批量抓取（${selectedIds.size}）`}</Button>
               <Button type="button" variant="secondary" size="sm" onClick={downloadSelectedBuyerShows} disabled={!selectedIds.size || batchFeedback?.tone === 'progress'} title="下载选中商品的买家秀 ZIP"><Download className="h-4 w-4" />{batchFeedback?.tone === 'progress' ? '任务处理中' : `批量下载买家秀（${selectedIds.size}）`}</Button>
               <Button type="button" variant="danger" size="sm" onClick={deleteSelected} disabled={!selectedIds.size}><Trash2 className="h-4 w-4" />批量删除（{selectedIds.size}）</Button>
             </div>

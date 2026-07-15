@@ -1,9 +1,10 @@
 import * as cheerio from "cheerio";
 import crypto from "node:crypto";
+import { assertMatchingProductId } from "../utils/productUrl.js";
 import { getRenderedHtml, isTaobaoLoginDocument } from "./browserService.js";
 import { applyPriceResolution, PRICE_PARSER_VERSION, resolveEmbeddedSkuPriceEvidence, resolveSkuPriceEvidence } from "./priceResolver.js";
 
-export const SCRAPER_VERSION = "2.0.4";
+export const SCRAPER_VERSION = "2.0.5";
 
 const userAgent =
   "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126 Safari/537.36";
@@ -1754,6 +1755,7 @@ export async function scrapeTmallBuyerShows(product, authSession) {
   }
   const html = page.html || "";
   const itemId = extractItemId(page.finalUrl, product.url, html);
+  assertMatchingProductId(product.url, itemId, page.finalUrl);
   const existingImages = [
     product.lastSnapshot?.mainImage800,
     product.lastSnapshot?.mainImage,
@@ -1779,6 +1781,7 @@ export async function scrapeTmallProduct(product, authSession) {
   const pageCaptureCompletedAt = Date.now();
   const { html } = page;
   const itemId = extractItemId(page.finalUrl, product.url, html);
+  assertMatchingProductId(product.url, itemId, page.finalUrl);
 
   if ((/login|验证|captcha|滑块/i.test(page.finalUrl) || /扫码登录|密码登录|安全验证|请完成验证/i.test(html)) && !/skuCore|skuBase/i.test(html)) {
     throw new Error("需要登录或触发验证，请在账号授权中更新淘宝会话后重试。");

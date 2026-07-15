@@ -307,7 +307,8 @@ app.post("/api/products/batch", async (req, res) => {
     skipped: uniqueUrls.length - created.length,
     success,
     failed: results.length - success,
-    results,
+    run: queueResult?.run || null,
+    items: queueResult?.run?.items || [],
     message: `提交 ${uniqueUrls.length} 条，新建 ${created.length} 条，抓取成功 ${success} 条，失败 ${results.length - success} 条，重复跳过 ${uniqueUrls.length - created.length} 条。`,
   });
 });
@@ -596,7 +597,7 @@ app.get("/api/products/:id/snapshots", async (req, res) => {
 app.post("/api/products/batch-capture", async (req, res) => {
   const { ids } = z.object({ ids: z.array(z.string().min(1)).min(1).max(20) }).parse(req.body);
   const result = await runMonitorOnce({ source: "manual-batch", productIds: [...new Set(ids)], includeDisabled: true });
-  res.json({ ok: true, ...result });
+  res.json({ ok: true, run: result.run });
 });
 
 app.patch("/api/monitor/settings", async (req, res) => {

@@ -118,12 +118,12 @@ export function HelpCenter({ onNavigate }: { onNavigate: (page: 'auth' | 'overvi
 
         <Section id="guide-queue" title="监控队列怎么用" summary="只看已启用商品、计划时间和执行顺序" icon={ListChecks}>
           <div className="flex items-start gap-3"><ListChecks className="mt-1 h-5 w-5 shrink-0 text-blue-600" /><p>“监控队列”只显示已启用商品，默认按下次抓取时间排列。全局暂停时商品仍保留在队列中，但状态会统一显示“等待全局开启”。</p></div>
-          <Checklist items={['队列序号表示当前页面中的执行先后；下次时间相同的商品仍受最多 5 个并发限制。', '“抓取”只立即执行当前商品，并遵守账号状态和采集保护。', '“移出”只暂停本商品自动监控，商品卡片、历史价格、监控价和计划都保留。', '在总览或分类重新点击“启用本商品”，商品会立即回到队列。']} />
+          <Checklist items={['队列序号表示当前页面中的执行先后；同一账号严格按顺序抓取，不同账号才会并行。', '“抓取”只立即执行当前商品，并遵守账号状态和采集保护。', '“移出”只暂停本商品自动监控，商品卡片、历史价格、监控价和计划都保留。', '在总览或分类重新点击“启用本商品”，商品会立即回到队列。']} />
         </Section>
 
         <Section id="guide-capture-queue" title="抓取队列怎么用" summary="查看当前排队和进度，刷新页面不会丢任务" icon={TimerReset}>
           <div className="flex items-start gap-3"><ListChecks className="mt-1 h-5 w-5 shrink-0 text-blue-600" /><p>“抓取队列”记录单品、批量和定时抓取的排队顺序、实时进度与结果。任务由后端执行，刷新页面或切换菜单只会重载界面，不会取消任务。</p></div>
-          <Checklist items={['同一时间执行一个队列任务；批量任务内部仍最多并发 5 个商品。', '完成或失败项保留 5 秒用于确认结果，随后自动移出；长期结果在“数据记录”查看。', '退出整个软件会停止后端进程；未完成任务不会自动续跑，重新打开后按失败记录重试。']} />
+          <Checklist items={['同一时间执行一个队列任务；批量任务按账号隔离，同一账号串行、不同账号并行，调度上限为 5 个。', '完成或失败项保留 5 秒后自动移出；“数据记录”会长期保存逐商品结果和错误，并提供“重试失败商品”。', '退出整个软件会停止后端进程；未完成任务不会自动续跑，重新打开后按失败记录重试。']} />
         </Section>
 
         <Section id="guide-feishu" title="飞书文档与机器人提醒" summary="文档每次写入，机器人只在低于监控价时提醒" icon={BellRing}>
@@ -143,7 +143,7 @@ export function HelpCenter({ onNavigate }: { onNavigate: (page: 'auth' | 'overvi
 
         <Section id="guide-risk" title="采集保护、并发和浏览器" summary="这是软件抓取间隔，不代表淘宝账号被风控" icon={ShieldCheck}>
           <div className="flex items-start gap-3"><ShieldCheck className="mt-1 h-5 w-5 shrink-0 text-blue-600" /><p>“采集保护”是本软件设置的访问间隔，不等于淘宝账号被风控。倒计时期间手动抓取按钮会说明剩余时间，可在账号授权页按账号类型调整或关闭。</p></div>
-          <Checklist items={['批量添加、批量抓取和自动监控每批最多同时处理 5 个商品，其余排队。', '每个账号使用独立浏览器资料目录，抓取窗口在后台或最小化运行。', '频繁刷新、账号掉线、验证码或登录跳转属于平台状态；软件不会绕过安全验证。', '长期运行建议保留合理间隔；集中测试后再恢复采集保护。']} />
+          <Checklist items={['批量添加、批量抓取和自动监控都按账号隔离：同一账号严格串行，不同账号最多并行处理 5 个商品。', '每个账号使用独立浏览器资料目录，抓取窗口在后台或最小化运行。', '无有效价格会自动换账号或重试；商品 ID 与最终页面不一致时拒绝保存，避免串品。', '频繁刷新、账号掉线、验证码或登录跳转属于平台状态；软件不会绕过安全验证。', '长期运行建议保留合理间隔；集中测试后再恢复采集保护。']} />
         </Section>
 
         <Section id="guide-update" title="检查并安装新版本" summary="自动检查、选择对应系统安装包并覆盖更新" icon={CloudDownload}>

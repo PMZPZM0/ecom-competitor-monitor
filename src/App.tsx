@@ -20,7 +20,7 @@ import { MonitorQueue } from './features/monitoring/MonitorQueue'
 import { CaptureQueue } from './features/monitoring/CaptureQueue'
 import { HelpCenter } from './features/help/HelpCenter'
 import { UpdateDialog } from './features/updates/UpdateDialog'
-import type { AuthSession, Overview, Product, UpdateInfo } from './types/domain'
+import type { AuthSession, Overview, Product, RunRecord, UpdateInfo } from './types/domain'
 
 const navItems = [
   { id: 'guide', label: '使用说明（先看）', icon: BookOpen, title: '使用说明', subtitle: '第一次使用请从这里开始，按顺序完成账号授权、商品抓取和自动监控。' },
@@ -145,14 +145,16 @@ function App() {
   async function addProductsBatch(payload: { urls: string[]; group: string; accountType: 'normal' | 'gift' | 'vip88'; captureBuyerShows: boolean }) {
     setBusy(true)
     setError('')
-    setNotice(`正在创建并抓取 ${payload.urls.length} 个新商品${payload.captureBuyerShows ? '（包含买家秀）' : ''}，每组最多并发 5 个，其余排队...`)
+    setNotice(`正在创建并抓取 ${payload.urls.length} 个新商品${payload.captureBuyerShows ? '（包含买家秀）' : ''}；同一账号按顺序执行，不同账号并行...`)
     try {
       const result = await api.addProductsBatch(payload)
       setNotice(result.message)
       await refresh()
+      return result
     } catch (err) {
       setNotice('')
       setError(err instanceof Error ? err.message : '批量抓取失败')
+      throw err
     } finally { setBusy(false) }
   }
 
@@ -255,12 +257,13 @@ function App() {
     setBusy(true)
     if (showFeedback) {
       setError('')
-      setNotice(`正在抓取 ${products.length} 个选中商品，每组最多并发 5 个，其余排队...`)
+      setNotice(`正在抓取 ${products.length} 个选中商品；同一账号按顺序执行，不同账号并行...`)
     }
     try {
       const result = await api.captureProductsBatch(products.map((product) => product.id))
       if (showFeedback) setNotice(result.run.message)
       await refresh()
+      return result.run
     } catch (err) {
       if (showFeedback) {
         setNotice('')
@@ -269,6 +272,20 @@ function App() {
       throw err
     } finally {
       setBusy(false)
+    }
+  }
+
+  async function retryFailedRun(run: RunRecord) {
+    const failedIds = new Set((run.items || []).filter((item) => item.status === 'failed').map((item) => item.productId))
+    const failedProducts = data.products.filter((product) => failedIds.has(product.id))
+    if (!failedProducts.length) {
+      setError('失败商品已被删除，无法重新抓取。')
+      return
+    }
+    try {
+      await captureProductsBatch(failedProducts)
+    } catch {
+      // captureProductsBatch already exposes the failure in the global status area.
     }
   }
 
@@ -413,7 +430,7 @@ function App() {
     if (activePage === 'records') {
       return (
         <div className="space-y-5">
-          <RunLog runs={runs} />
+          <RunLog runs={runs} busy={busy} onRetryFailed={retryFailedRun} />
           <DataRecords snapshots={data.snapshots} products={data.products} onClear={clearSnapshots} />
         </div>
       )
