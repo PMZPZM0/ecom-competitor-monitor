@@ -1,8 +1,10 @@
 import crypto from "node:crypto";
 
-export const PRICE_PARSER_VERSION = "evidence-v1.3";
+export const PRICE_PARSER_VERSION = "evidence-v1.4";
 
 const endpoint = "mtop.taobao.pcdetail.data.adjust";
+const embeddedEndpoint = "tmall-ssr-sku";
+const embeddedPlatformTopUpLabel = /^平台(?:加补|补贴)后(?:价)?$/;
 const publicPromotionLabels = new Map([
   ["spsd4plan", "平台活动立减"],
   ["spsd4cjmj", "超级立减"],
@@ -280,6 +282,79 @@ export function resolveSkuPriceEvidence(payloads, options = {}) {
   return { ...verified[0], attempts };
 }
 
+export function resolveEmbeddedSkuPriceEvidence(sku, options = {}) {
+  const itemId = String(options.itemId || "");
+  const skuId = String(options.skuId || "");
+  const accountType = options.accountType || "normal";
+  const sourceSkuId = String(sku?.skuId || "");
+  const priceTitle = String(sku?.priceTitle || "").replace(/\s+/g, "");
+  if (!embeddedPlatformTopUpLabel.test(priceTitle)) {
+    return { matched: false, status: "unavailable", reason: "supported-label-not-observed", evidence: [] };
+  }
+  if (accountType !== "normal") {
+    return { matched: true, status: "unavailable", reason: "normal-account-only", evidence: [] };
+  }
+  if (!itemId || !skuId || sourceSkuId !== skuId) {
+    return ambiguous("embedded-sku-mismatch", { expectedSkuId: skuId, responseSkuId: sourceSkuId });
+  }
+
+  const listCents = yuanToCents(sku?.originalPrice);
+  const displayedCents = yuanToCents(sku?.normalPrice ?? sku?.price);
+  const normalLayerCents = yuanToCents((sku?.priceLayers || []).find((layer) => (
+    layer?.kind !== "discount" && embeddedPlatformTopUpLabel.test(String(layer?.label || "").replace(/\s+/g, ""))
+  ))?.value);
+  const listLayerCents = yuanToCents((sku?.priceLayers || []).find((layer) => (
+    layer?.kind === "original" || String(layer?.label || "").replace(/\s+/g, "") === "优惠前"
+  ))?.value);
+  if (!listCents || !displayedCents || listCents <= displayedCents) return ambiguous("embedded-price-invalid");
+  if (normalLayerCents !== displayedCents || listLayerCents !== listCents) return ambiguous("embedded-price-layer-mismatch");
+
+  const topUpCents = listCents - displayedCents;
+  if (!Number.isSafeInteger(topUpCents) || topUpCents <= 0 || listCents - topUpCents !== displayedCents) {
+    return ambiguous("embedded-formula-does-not-close");
+  }
+
+  const capturedAt = options.capturedAt || new Date().toISOString();
+  const promotion = { code: "ssrPlatformTopUp", amountCents: topUpCents, kind: "public", label: "平台加补" };
+  const formula = promotionFormula("标价", listCents, [promotion], "普通价", displayedCents);
+  const baseEvidence = {
+    itemId,
+    skuId,
+    accountType,
+    endpoint: embeddedEndpoint,
+    selectedSkuVerified: true,
+    capturedAt,
+    promotionCodes: [promotion.code],
+  };
+  const evidence = [
+    makeEvidence(baseEvidence, { kind: "list", valueCents: listCents, source: "ssr-explicit", sourcePath: `$.skuCore.sku2info[${skuId}].price.priceText` }),
+    makeEvidence(baseEvidence, { kind: "normal", valueCents: displayedCents, source: "ssr-explicit", sourcePath: `$.skuCore.sku2info[${skuId}].subPrice.priceText`, formula }),
+  ];
+  return {
+    matched: true,
+    status: "verified",
+    parserVersion: PRICE_PARSER_VERSION,
+    endpoint: embeddedEndpoint,
+    source: "embedded-ssr",
+    itemId,
+    skuId,
+    accountType,
+    channels: {
+      normal: resolvedChannel(displayedCents, formula, evidence.map((item) => item.id)),
+      government: unavailableChannel(),
+      surprise: unavailableChannel(),
+      gift: unavailableChannel(),
+      vip88: unavailableChannel(),
+      coin: unavailableChannel(),
+    },
+    evidence,
+    promotions: [promotion],
+    normalLabel: "普通价",
+    displayedCents,
+    evidenceHash: evidenceId(evidence.map(({ id }) => id)),
+  };
+}
+
 export function applyPriceResolution(sku, resolution) {
   if (!resolution?.matched || resolution.status !== "verified") {
     return resolution?.matched ? { ...sku, resolutionStatus: resolution.status, priceResolution: resolution } : sku;
@@ -290,8 +365,13 @@ export function applyPriceResolution(sku, resolution) {
   };
   const normalPrice = value("normal");
   const normalLabel = resolution.normalLabel || "普通价";
-  const priceLayers = (sku.priceLayers || []).filter((layer) => !/普通价（活动公式）|普通价|淘宝秒杀价|秒杀价|国补价|惊喜立减价|礼金价|88VIP价/.test(layer.label || ""));
-  priceLayers.push({ label: normalLabel, value: normalPrice, kind: "price", source: "pcdetail-adjust" });
+  const resolutionSource = resolution.source || "pcdetail-adjust";
+  const priceLayers = (sku.priceLayers || []).filter((layer) => (
+    !/普通价（活动公式）|普通价|淘宝秒杀价|秒杀价|国补价|惊喜立减价|礼金价|88VIP价|淘金币价|金币价/.test(layer.label || "")
+    && !/^(?:applied-coin|derived-before-coin)$/.test(layer.source || "")
+    && !(resolutionSource === "embedded-ssr" && embeddedPlatformTopUpLabel.test(String(layer.label || "").replace(/\s+/g, "")))
+  ));
+  priceLayers.push({ label: normalLabel, value: normalPrice, kind: "price", source: resolutionSource });
   const channelFields = {
     government: ["governmentPrice", "governmentStatus", "governmentDiscountAmount", "国补价"],
     surprise: ["surprisePrice", "surpriseStatus", "surpriseDiscountAmount", "惊喜立减价"],
@@ -300,7 +380,7 @@ export function applyPriceResolution(sku, resolution) {
   };
   const channelValues = Object.fromEntries(Object.keys(channelFields).map((kind) => [kind, value(kind)]));
   for (const [kind, [, , , label]] of Object.entries(channelFields)) {
-    if (channelValues[kind] != null) priceLayers.push({ label, value: channelValues[kind], kind: "price", source: "pcdetail-adjust" });
+    if (channelValues[kind] != null) priceLayers.push({ label, value: channelValues[kind], kind: "price", source: resolutionSource });
   }
   const result = {
     ...sku,
@@ -320,7 +400,7 @@ export function applyPriceResolution(sku, resolution) {
       surprise: resolution.channels.surprise.formula || "本次未获取明确惊喜立减证据",
       gift: resolution.channels.gift.formula || "本次未获取明确礼金证据",
       vip88: resolution.channels.vip88.formula || "本次未获取明确88VIP证据",
-      coin: resolution.channels.coin.formula || sku.priceCalculation?.coin || "本次未获取明确淘金币证据",
+      coin: resolution.channels.coin.formula || "本次未获取明确淘金币证据",
     },
   };
   for (const [kind, [priceField, statusField, discountField]] of Object.entries(channelFields)) {

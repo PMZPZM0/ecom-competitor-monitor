@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { applyPriceResolution, resolveSkuPriceEvidence } from "./priceResolver.js";
+import { applyPriceResolution, resolveEmbeddedSkuPriceEvidence, resolveSkuPriceEvidence } from "./priceResolver.js";
 
 function payload(skuId, price1, price2, promotions, extra = {}) {
   const data = JSON.stringify({ itemId: "843315272519", skuId });
@@ -236,12 +236,22 @@ test("clears legacy account prices when the verified response has no matching ev
     { promotionName: "spsd4plan", amount: 3000 },
     { promotionName: "spsd4cjmj", amount: 3000 },
   ])], { itemId: "843315272519", skuId, accountType: "normal", selectedSkuVerified: true });
-  const sku = applyPriceResolution({ skuId, surprisePrice: 129, giftPrice: 119, vipPrice: 109, coinPrice: 99, priceLayers: [] }, resolution);
+  const sku = applyPriceResolution({
+    skuId,
+    surprisePrice: 129,
+    giftPrice: 119,
+    vipPrice: 109,
+    coinPrice: 99,
+    priceLayers: [{ label: "淘金币价", value: 99, source: "applied-coin" }],
+    priceCalculation: { coin: "旧淘金币推算" },
+  }, resolution);
   assert.equal(sku.normalPrice, 139);
   assert.equal(sku.surprisePrice, null);
   assert.equal(sku.giftPrice, null);
   assert.equal(sku.vipPrice, null);
   assert.equal(sku.coinPrice, null);
+  assert.equal(sku.priceLayers.some((layer) => /淘金币|金币/.test(layer.label)), false);
+  assert.equal(sku.priceCalculation.coin, "本次未获取明确淘金币证据");
 });
 
 test("resolves normal, surprise and coin prices from uppAcrossPromotion", () => {
@@ -297,4 +307,62 @@ test("response order does not change a verified result", () => {
   const unrelated = payload("another-sku", "100", "100", []);
   const options = { itemId: "843315272519", skuId, accountType: "normal", selectedSkuVerified: true, capturedAt: "2026-07-13T00:00:00.000Z" };
   assert.deepEqual(resolveSkuPriceEvidence([valid, unrelated], options), resolveSkuPriceEvidence([unrelated, valid], options));
+});
+
+function embeddedSku(extra = {}) {
+  return {
+    skuId: "5597954940729",
+    name: "白色",
+    normalPrice: 241.31,
+    originalPrice: 379,
+    priceTitle: "平台加补后",
+    priceLayers: [
+      { label: "平台加补后", value: 241.31, kind: "price" },
+      { label: "优惠前", value: 379, kind: "original" },
+    ],
+    ...extra,
+  };
+}
+
+const embeddedOptions = {
+  itemId: "838302541852",
+  skuId: "5597954940729",
+  accountType: "normal",
+  capturedAt: "2026-07-15T00:00:00.000Z",
+};
+
+test("verifies Tmall Supermarket platform top-up SSR evidence to the cent", () => {
+  const resolution = resolveEmbeddedSkuPriceEvidence(embeddedSku(), embeddedOptions);
+  const sku = applyPriceResolution(embeddedSku(), resolution);
+  assert.equal(resolution.status, "verified");
+  assert.equal(resolution.promotions[0].amountCents, 13769);
+  assert.equal(sku.originalPrice, 379);
+  assert.equal(sku.normalPrice, 241.31);
+  assert.equal(sku.priceCalculation.normal, "标价 379.00 - 平台加补 137.69 = 普通价 241.31");
+  assert.equal(sku.priceLayers.at(-1).source, "embedded-ssr");
+  assert.deepEqual(sku.priceLayers.map(({ label, value }) => ({ label, value })), [
+    { label: "优惠前", value: 379 },
+    { label: "普通价", value: 241.31 },
+  ]);
+});
+
+test("rejects embedded platform top-up evidence outside a normal account capture", () => {
+  const resolution = resolveEmbeddedSkuPriceEvidence(embeddedSku(), { ...embeddedOptions, accountType: "vip88" });
+  assert.equal(resolution.status, "unavailable");
+  assert.equal(resolution.reason, "normal-account-only");
+});
+
+test("rejects embedded SSR prices without the explicit platform top-up label", () => {
+  const resolution = resolveEmbeddedSkuPriceEvidence(embeddedSku({ priceTitle: "到手价" }), embeddedOptions);
+  assert.equal(resolution.matched, false);
+});
+
+test("rejects invalid or internally inconsistent embedded SSR prices", () => {
+  assert.equal(resolveEmbeddedSkuPriceEvidence(embeddedSku({ normalPrice: 379 }), embeddedOptions).reason, "embedded-price-invalid");
+  assert.equal(resolveEmbeddedSkuPriceEvidence(embeddedSku({
+    priceLayers: [
+      { label: "平台加补后", value: 241.3, kind: "price" },
+      { label: "优惠前", value: 379, kind: "original" },
+    ],
+  }), embeddedOptions).reason, "embedded-price-layer-mismatch");
 });

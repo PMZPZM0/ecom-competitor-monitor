@@ -1,9 +1,9 @@
 import * as cheerio from "cheerio";
 import crypto from "node:crypto";
 import { getRenderedHtml, isTaobaoLoginDocument } from "./browserService.js";
-import { applyPriceResolution, PRICE_PARSER_VERSION, resolveSkuPriceEvidence } from "./priceResolver.js";
+import { applyPriceResolution, PRICE_PARSER_VERSION, resolveEmbeddedSkuPriceEvidence, resolveSkuPriceEvidence } from "./priceResolver.js";
 
-export const SCRAPER_VERSION = "2.0.3";
+export const SCRAPER_VERSION = "2.0.4";
 
 const userAgent =
   "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126 Safari/537.36";
@@ -464,7 +464,9 @@ export function filterProductVideoUrls(candidates, productImages = []) {
     const videoOwner = parsed.pathname.match(/\/(?:u|user)\/(\d{6,})\//i)?.[1];
     if (owners.size && videoOwner && !owners.has(videoOwner)) continue;
 
-    const mediaId = parsed.pathname.match(/\/(\d{8,})\.(?:mp4|m3u8)$/i)?.[1];
+    const mediaId = parsed.pathname.match(/\/t\/\d+\/(\d{8,})\.(?:mp4|m3u8)$/i)?.[1]
+      || parsed.pathname.match(/_(\d{8,})_\d+_published_/i)?.[1]
+      || parsed.pathname.match(/\/(\d{8,})\.(?:mp4|m3u8)$/i)?.[1];
     const key = mediaId || `${parsed.hostname}${parsed.pathname}`.toLowerCase();
     if (seen.has(key)) continue;
     seen.add(key);
@@ -768,7 +770,12 @@ function collectCommerceImages(value, images = []) {
   return images;
 }
 
-function extractShopName(html, jsonData, domData) {
+export function extractShopName(html, jsonData, domData, pageUrl = "") {
+  try {
+    if (new URL(pageUrl).hostname.toLowerCase() === "chaoshi.detail.tmall.com") return "天猫超市";
+  } catch {
+    // Continue with page data when the final URL is unavailable.
+  }
   const patterns = [
     /"seller_nickname"\s*:\s*"([^"]+)"/i,
     /"sellerNickname"\s*:\s*"([^"]+)"/i,
@@ -1490,6 +1497,9 @@ export function resolveSkuPrices(layers, fallback) {
 }
 
 export function resolveCoinBenefit(sku) {
+  if (sku.priceResolution?.status === "verified" && sku.priceResolution.channels?.coin?.status !== "verified") {
+    return { coinStatus: "none", coinDiscountAmount: null };
+  }
   const coinLayers = (sku.priceLayers || []).filter((layer) => /淘金币|金币/i.test(layer.label || ""));
   const coinItems = (sku.discountItems || []).filter((item) => /淘金币|金币/i.test(`${item.label || ""} ${item.text || ""}`));
   const explicitDiscount = coinItems.reduce((sum, item) => sum + (Number(item.amount) || 0), 0);
@@ -1763,8 +1773,10 @@ export async function scrapeTmallBuyerShows(product, authSession) {
 }
 
 export async function scrapeTmallProduct(product, authSession) {
-  const startedAt = new Date().toISOString();
+  const startedAtMs = Date.now();
+  const startedAt = new Date(startedAtMs).toISOString();
   const page = await fetchHtml(product, authSession);
+  const pageCaptureCompletedAt = Date.now();
   const { html } = page;
   const itemId = extractItemId(page.finalUrl, product.url, html);
 
@@ -1779,7 +1791,16 @@ export async function scrapeTmallProduct(product, authSession) {
   }
   const structuredSku = extractStructuredSku(html);
   const accountType = authSession?.accountType || "normal";
-  const mobilePromotionCapture = await fetchMobilePromotionPayloads(itemId, structuredSku.skuPrices, authSession);
+  const embeddedResolutions = new Map(structuredSku.skuPrices.map((sku) => [
+    String(sku.skuId),
+    resolveEmbeddedSkuPriceEvidence(sku, { itemId, skuId: sku.skuId, accountType, capturedAt: startedAt }),
+  ]));
+  const unresolvedPromotionSkus = structuredSku.skuPrices.filter((sku) => embeddedResolutions.get(String(sku.skuId))?.status !== "verified");
+  const promotionCaptureStartedAt = Date.now();
+  const mobilePromotionCapture = unresolvedPromotionSkus.length
+    ? await fetchMobilePromotionPayloads(itemId, unresolvedPromotionSkus, authSession)
+    : { networkPayloads: [], skuNetworkPayloads: {}, selectionResults: [] };
+  const promotionCaptureCompletedAt = Date.now();
   const excludedPromotionSkuImages = new Set(structuredSku.skuPrices
     .filter((sku) => isUnselectablePromotionSku(sku, mobilePromotionCapture.selectionResults.find((item) => String(item.skuId) === String(sku.skuId))))
     .map((sku) => sku.image)
@@ -1813,11 +1834,14 @@ export async function scrapeTmallProduct(product, authSession) {
       selectedSkuVerified: Boolean(selection?.responseObserved),
       capturedAt: startedAt,
     });
+    if (resolution.status === "verified") return applyPriceResolution(sku, resolution);
+    const embeddedResolution = embeddedResolutions.get(String(sku.skuId));
+    if (embeddedResolution?.status === "verified") return applyPriceResolution(sku, embeddedResolution);
     if (resolution.matched) return applyPriceResolution(sku, resolution);
     const [resolved] = applyNetworkPromoData([sku], skuPayloads, { accountType: authSession?.accountType || "normal" });
     return calculateAccountPriceScenario(resolved, accountType);
   });
-  const shopName = extractShopName(html, jsonData, domData);
+  const shopName = extractShopName(html, jsonData, domData, page.finalUrl);
   const shopLogo = extractShopLogo(html, jsonData, domData);
   const model = extractModel(html, jsonData, domData);
   const prices = [...jsonData.prices, ...domData.priceMatches].filter((price) => price > 0);
@@ -1826,10 +1850,12 @@ export async function scrapeTmallProduct(product, authSession) {
   const minPrice = allPrices.length ? Math.min(...allPrices) : null;
   const maxPrice = allPrices.length ? Math.max(...allPrices) : null;
   const skuImages = unique([...structuredSku.skuImages, ...jsonData.skuImages]).filter((image) => !excludedPromotionSkuImages.has(image)).slice(0, 40);
+  const mobileDetailStartedAt = Date.now();
   const mobileDetailData = await fetchMobileDetailData(itemId, {
     ...authSession,
     cookie: page.cookieHeader || authSession?.cookie || "",
   }, product.url);
+  const mobileDetailCompletedAt = Date.now();
   if (mobileDetailData) {
     structuredSku.skuPrices = structuredSku.skuPrices.map((sku) => {
       if (sku.resolutionStatus === "verified") return sku;
@@ -1857,6 +1883,7 @@ export async function scrapeTmallProduct(product, authSession) {
   const accountSessionId = authSession?.id || "guest";
   let buyerShowCapture = buyerShowCaptureResult({ status: "skipped", source: "disabled", itemId, sellerId, accountSessionId });
   let buyerShowInteractions = [];
+  const buyerShowStartedAt = Date.now();
   if (product.captureBuyerShows !== false) {
     const observedBuyerShows = buyerShowCaptureFromNetwork(page.buyerShowPayloads || [], { itemId, accountSessionId });
     const directBuyerShows = await fetchTmallBuyerShows(itemId, sellerId, page.cookieHeader || authSession?.cookie || "", product.url, accountSessionId);
@@ -1873,6 +1900,7 @@ export async function scrapeTmallProduct(product, authSession) {
       buyerShowInteractions = [...buyerShowInteractions, ...retry.interactions.map((interaction) => ({ ...interaction, retry: true }))];
     }
   }
+  const buyerShowCompletedAt = Date.now();
   media.buyerShows = buyerShowCapture.items;
   const mainImages = media.mainImages;
   const rawSkuPrices = structuredSku.skuPrices.length
@@ -1943,6 +1971,14 @@ export async function scrapeTmallProduct(product, authSession) {
       skuSelectionCount: mobilePromotionCapture.selectionResults.length,
       skuSelectionResults: mobilePromotionCapture.selectionResults,
       verifiedPriceSkuCount: skuPrices.filter((sku) => sku.resolutionStatus === "verified").length,
+      timingsMs: {
+        pageCapture: pageCaptureCompletedAt - startedAtMs,
+        promotionCapture: promotionCaptureCompletedAt - promotionCaptureStartedAt,
+        mobileDetail: mobileDetailCompletedAt - mobileDetailStartedAt,
+        buyerShow: buyerShowCompletedAt - buyerShowStartedAt,
+        total: Date.now() - startedAtMs,
+      },
+      promotionCaptureSkipped: unresolvedPromotionSkus.length === 0,
     },
   };
 }

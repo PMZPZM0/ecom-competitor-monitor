@@ -1,6 +1,10 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { applyAppliedCoinDiscount, applyNetworkPromoData, applyVisibleDiscountItems, applyVisibleSurprisePrice, buyerShowCaptureFromNetwork, buyerShowsFromRateDetail, calculateAccountPriceScenario, calculatePriceScenarios, collectDiscountItems, collectDiscountItemsFromText, collectProductProgramItems, collectVisibleSurprisePrices, extractBuyerShowItems, extractSelectedSkuId, filterProductVideoUrls, isUnselectablePromotionSku, resolveCoinBenefit, resolveSkuPrices, selectGalleryImages, selectSquareMainImage, sellerIdFromProductMedia } from "./tmallScraper.js";
+import { applyAppliedCoinDiscount, applyNetworkPromoData, applyVisibleDiscountItems, applyVisibleSurprisePrice, buyerShowCaptureFromNetwork, buyerShowsFromRateDetail, calculateAccountPriceScenario, calculatePriceScenarios, collectDiscountItems, collectDiscountItemsFromText, collectProductProgramItems, collectVisibleSurprisePrices, extractBuyerShowItems, extractSelectedSkuId, extractShopName, filterProductVideoUrls, isUnselectablePromotionSku, resolveCoinBenefit, resolveSkuPrices, selectGalleryImages, selectSquareMainImage, sellerIdFromProductMedia } from "./tmallScraper.js";
+
+test("Tmall Supermarket final URLs override generic shop-page noise", () => {
+  assert.equal(extractShopName('{"shopName":"免费开店"}', { shopName: "免费开店" }, { shopName: "" }, "https://chaoshi.detail.tmall.com/item.htm?id=838302541852"), "天猫超市");
+});
 
 test("filters only an unavailable review-rebate pseudo SKU", () => {
   const failedSelection = { selected: false, reason: "missing-value:44252240468" };
@@ -499,6 +503,16 @@ test("filterProductVideoUrls rejects placeholder and unrelated seller videos", (
   ]);
 });
 
+test("filterProductVideoUrls deduplicates Taobao play and Tmall Supermarket CDN variants", () => {
+  const videos = filterProductVideoUrls([
+    "https://cloud.video.taobao.com/play/u/725677994/p/2/e/6/t/1/533410081214.mp4?appKey=38829",
+    "https://tmallmart.cloudvideocdn.taobao.com/path/20250909_abc_533410081214_326956665592922_published_mp4_264_hd_taobao.mp4?auth_key=masked",
+  ]);
+  assert.deepEqual(videos, [
+    "https://cloud.video.taobao.com/play/u/725677994/p/2/e/6/t/1/533410081214.mp4?appKey=38829",
+  ]);
+});
+
 test("extractBuyerShowItems keeps only review content with real media or copy", () => {
   const html = `<div class="rate-item"><p>锅很好用，发货快</p><img src="https://img.alicdn.com/imgextra/i1/1234567890/a.jpg" /><video src="https://cloud.video.taobao.com/play/u/1234567890/p/2/123456789.mp4"></video></div><div class="rate-item"><span> </span></div>`;
   assert.deepEqual(extractBuyerShowItems(html), [{
@@ -557,6 +571,16 @@ test("buyerShowsFromRateDetail supports nested lists and object media fields", (
     sku: "",
     createdAt: "",
   }]);
+});
+
+test("resolveCoinBenefit does not revive an unverified coin price after authoritative resolution", () => {
+  assert.deepEqual(resolveCoinBenefit({
+    normalPrice: 241.31,
+    coinPrice: null,
+    priceLayers: [{ label: "淘金币价", value: 241.31 }],
+    discountItems: [{ label: "淘金币抵扣", amount: 3.79 }],
+    priceResolution: { status: "verified", channels: { coin: { status: "unavailable" } } },
+  }), { coinStatus: "none", coinDiscountAmount: null });
 });
 
 test("buyerShowsFromRateDetail supports the current Tmall feedback and feedPic fields", () => {
