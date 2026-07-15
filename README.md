@@ -12,7 +12,7 @@
 - Intel 芯片 Mac：选择文件名包含 `mac-x64.dmg` 的安装包。
 - Apple M 系列芯片 Mac：选择文件名包含 `mac-arm64.dmg` 的安装包。
 
-> `v1.0.11` 的 macOS 包未完成 Apple 签名与公证，可能被 Gatekeeper 提示“已损坏”。临时处理方法见[使用说明](docs/USER_GUIDE.md#macos-提示应用已损坏无法打开)；后续 macOS Release 缺少签名凭据时会直接停止发布，不再上传不可正常双击打开的包。
+> macOS 安装包已完成 ad-hoc 完整性签名，但未使用 Apple Developer ID 公证。首次启动请右键应用选择“打开”；若仍被拦截，请到“系统设置 > 隐私与安全性”点击“仍要打开”。详见[使用说明](docs/USER_GUIDE.md#macos-首次打开提示无法验证开发者)。
 
 ## 界面预览
 

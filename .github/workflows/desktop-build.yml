@@ -32,11 +32,7 @@ jobs:
   macos:
     runs-on: macos-14
     env:
-      CSC_LINK: ${{ secrets.MACOS_CERTIFICATE }}
-      CSC_KEY_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
-      APPLE_ID: ${{ secrets.APPLE_ID }}
-      APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
-      APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+      CSC_IDENTITY_AUTO_DISCOVERY: false
     strategy:
       fail-fast: false
       matrix:
@@ -47,17 +43,6 @@ jobs:
         with:
           node-version: 22
           cache: npm
-      - name: Require Apple signing and notarization credentials
-        shell: bash
-        run: |
-          missing=()
-          for name in CSC_LINK CSC_KEY_PASSWORD APPLE_ID APPLE_APP_SPECIFIC_PASSWORD APPLE_TEAM_ID; do
-            if [[ -z "${!name}" ]]; then missing+=("$name"); fi
-          done
-          if (( ${#missing[@]} )); then
-            echo "::error::Missing required macOS release secrets: ${missing[*]}"
-            exit 1
-          fi
       - run: npm ci
       - run: npm test
       - run: npm run lint
@@ -67,16 +52,18 @@ jobs:
         run: |
           test -d node_modules/@img/sharp-darwin-${{ matrix.arch }}
           test -d node_modules/@img/sharp-libvips-darwin-${{ matrix.arch }}
-      - name: Build signed and notarized macOS package
+      - name: Build ad-hoc signed macOS package
         run: npm run pack:mac -- --${{ matrix.arch }} --publish never
-      - name: Verify Apple signature and notarization ticket
+      - name: Verify ad-hoc signature and DMG integrity
         shell: bash
         run: |
           app_path="$(find release -type d -name '电商竞品监控.app' -print -quit)"
           test -n "$app_path"
           codesign --verify --deep --strict --verbose=2 "$app_path"
-          spctl --assess --type execute --verbose=2 "$app_path"
-          xcrun stapler validate "$app_path"
+          codesign -dv --verbose=4 "$app_path" 2>&1 | grep -q 'Signature=adhoc'
+          dmg_path="$(find release -maxdepth 1 -type f -name '*.dmg' -print -quit)"
+          test -n "$dmg_path"
+          hdiutil verify "$dmg_path"
       - uses: actions/upload-artifact@v4
         with:
           name: 电商竞品监控-macOS-${{ matrix.arch }}
