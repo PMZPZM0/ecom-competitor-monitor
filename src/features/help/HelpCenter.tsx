@@ -159,7 +159,7 @@ export function HelpCenter({ onNavigate }: { onNavigate: (page: 'auth' | 'overvi
               ['计划不执行', '检查页面顶部全局自动监控 → 检查本商品已启用 → 检查开始时间和周期 → 到监控队列查看下次时间。'],
               ['飞书没有消息', '发送测试 → 检查 SKU 监控价 → 确认本次价格低于阈值 → 检查提醒开关和冷却。'],
               ['账号检测正常但商品要求登录', '该商品可能出现临时登录跳转或平台验证；先重新授权对应账号，再单品重试，不要降低价格验证规则。'],
-              ['macOS 无法打开或运行很慢', '在系统设置的隐私与安全性中允许打开；首次启动和首次浏览器授权会较慢，避免同时启动多个抓取任务。'],
+              ['macOS 提示已损坏或运行很慢', '“已损坏”表示旧包缺少 Apple 签名与公证，请下载最新的 mac-arm64 安装包；可信旧包的临时处理命令见完整使用说明。首次浏览器授权会较慢，避免同时启动多个抓取任务。'],
             ].map(([title, text]) => <details key={title} className="group border-b border-slate-200 pb-3"><summary className="cursor-pointer list-none font-semibold text-slate-900">{title}</summary><p className="mt-2 text-slate-600">{text}</p></details>)}
           </div>
         </Section>

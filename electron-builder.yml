@@ -35,6 +35,6 @@ mac:
     - zip
   category: public.app-category.business
   icon: public/app-icon.png
-  identity: null
-  hardenedRuntime: false
+  hardenedRuntime: true
   gatekeeperAssess: false
+  notarize: true
