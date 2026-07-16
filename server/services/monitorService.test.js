@@ -13,9 +13,10 @@ import {
   historicalPrimaryImages,
   historicalProductMedia,
   hasTrustedAccountBaseline,
-  isFeishuAlertCoolingDown,
   mergeAccountSnapshots,
+  mergeCapturedProduct,
   mergeBuyerShowHistory,
+  notifyBelowThreshold,
   preserveBuyerShowHistory,
   nextProductScheduleAt,
   orderedCaptureCandidates,
@@ -26,11 +27,13 @@ import {
   riskCooldownMs,
   runInCaptureGroups,
   scheduleProduct,
+  setSkuMonitorPrice,
   sessionsForProduct,
   snapshotHasVerifiedNormalPrice,
   snapshotAllowsPriceAlerts,
   withAccountCaptureLock,
 } from "./monitorService.js";
+import { updateFeishuConfig } from "./feishuService.js";
 
 test("capture queue keeps running work and starts the next task in order", async () => {
   const events = [];
@@ -95,6 +98,57 @@ test("single-run and interval schedules are mutually exclusive", () => {
   assert.equal(nextProductScheduleAt(once, 60, now), "2026-07-12T08:30:00.000Z");
   assert.equal(nextProductScheduleAt(interval, 60, now), "2026-07-12T10:00:00.000Z");
   assert.equal(nextProductScheduleAt({ enabled: true }, 60, now), "2026-07-12T09:00:00.000Z");
+});
+
+test("capture completion preserves monitor prices and settings saved while capture was running", () => {
+  const current = {
+    id: "p1",
+    name: "旧标题",
+    enabled: false,
+    accountType: "vip88",
+    captureBuyerShows: false,
+    captureMediaAssets: true,
+    monitorScheduleMode: "once",
+    monitorStartAt: "2026-07-16T10:00:00.000Z",
+    skuMonitorPrices: { sku1: 139.99, sku2: 159 },
+  };
+  const captured = {
+    ...current,
+    name: "抓取后的标题",
+    enabled: true,
+    accountType: "normal",
+    captureBuyerShows: true,
+    captureMediaAssets: false,
+    skuMonitorPrices: {},
+    mainImage: "main.jpg",
+    lastStatus: "ok",
+    lastError: "",
+    lastSnapshot: { capturedAt: "2026-07-16T09:00:00.000Z" },
+    updatedAt: "2026-07-16T09:00:00.000Z",
+  };
+
+  const merged = mergeCapturedProduct(current, captured);
+
+  assert.equal(merged.name, "抓取后的标题");
+  assert.equal(merged.mainImage, "main.jpg");
+  assert.equal(merged.lastStatus, "ok");
+  assert.deepEqual(merged.skuMonitorPrices, { sku1: 139.99, sku2: 159 });
+  assert.equal(merged.enabled, false);
+  assert.equal(merged.accountType, "vip88");
+  assert.equal(merged.captureBuyerShows, false);
+  assert.equal(merged.captureMediaAssets, true);
+  assert.equal(merged.monitorScheduleMode, "once");
+});
+
+test("SKU monitor price updates merge independently and support clearing one SKU", () => {
+  const first = setSkuMonitorPrice({ id: "p1", monitorPrice: 99, skuMonitorPrices: { sku1: 139 } }, "sku2", 159);
+  const second = setSkuMonitorPrice(first, "sku1", 138.99);
+  const cleared = setSkuMonitorPrice(second, "sku2", null);
+
+  assert.deepEqual(first.skuMonitorPrices, { sku1: 139, sku2: 159 });
+  assert.deepEqual(second.skuMonitorPrices, { sku1: 138.99, sku2: 159 });
+  assert.deepEqual(cleared.skuMonitorPrices, { sku1: 138.99 });
+  assert.equal(cleared.monitorPrice, null);
 });
 
 test("global pause preserves a single-run time and resume restores that exact time", () => {
@@ -302,12 +356,31 @@ test("anonymous public-price snapshots never trigger account price alerts", () =
   assert.equal(snapshotAllowsPriceAlerts({ accessMode: "authenticated", resolutionStatus: "verified" }), true);
 });
 
-test("Feishu reminder cooldown can be disabled without affecting capture scheduling", () => {
-  const now = Date.parse("2026-07-12T08:00:00.000Z");
-  const logs = [{ productId: "p1", skuId: "s1", type: "below-threshold", status: "sent", createdAt: "2026-07-12T07:30:00.000Z" }];
-  assert.equal(isFeishuAlertCoolingDown({ cooldownEnabled: true, cooldownMinutes: 120 }, logs, "p1", "s1", now), true);
-  assert.equal(isFeishuAlertCoolingDown({ cooldownEnabled: false, cooldownMinutes: 120 }, logs, "p1", "s1", now), false);
-  assert.equal(scheduleProduct({ id: "p1", enabled: true }, { running: true, intervalMinutes: 60 }, { now }).nextMonitorAt, "2026-07-12T09:00:00.000Z");
+test("each verified below-threshold capture sends a Feishu reminder", async () => {
+  const originalFetch = globalThis.fetch;
+  let sendCount = 0;
+  globalThis.fetch = async () => {
+    sendCount += 1;
+    return { ok: true, status: 200, json: async () => ({ code: 0 }) };
+  };
+  try {
+    const current = {
+      feishu: updateFeishuConfig({}, { enabled: true, webhookUrl: "https://open.feishu.cn/open-apis/bot/v2/hook/test" }),
+      notificationLogs: [],
+    };
+    const product = { id: "p1", accountType: "normal", name: "测试商品", url: "https://detail.tmall.com/item.htm?id=1", skuMonitorPrices: { s1: 100 } };
+    const snapshot = { accessMode: "authenticated", resolutionStatus: "verified", skuPrices: [verifiedSku({ skuId: "s1", name: "标准款", price: 90, normalPrice: 90 })] };
+
+    const firstLogs = await notifyBelowThreshold(current, product, snapshot, "test-first");
+    current.notificationLogs.push(...firstLogs);
+    const secondLogs = await notifyBelowThreshold(current, product, snapshot, "test-second");
+
+    assert.equal(sendCount, 2);
+    assert.deepEqual(firstLogs.map((log) => log.status), ["sent"]);
+    assert.deepEqual(secondLogs.map((log) => log.status), ["sent"]);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
 });
 
 test("buyer-show history is retained when a new capture only sees sparse text", () => {

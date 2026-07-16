@@ -5,7 +5,7 @@ import { fileURLToPath } from "node:url";
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const dataDir = path.resolve(process.env.ECOM_MONITOR_DATA_DIR || path.resolve(__dirname, "../data"));
 const dbPath = path.join(dataDir, "db.json");
-export const DB_SCHEMA_VERSION = 2;
+export const DB_SCHEMA_VERSION = 3;
 
 let readyPromise = null;
 let mutationQueue = Promise.resolve();
@@ -21,8 +21,6 @@ const initialData = {
     enabled: false,
     webhookUrlEncrypted: "",
     signingSecretEncrypted: "",
-    cooldownEnabled: true,
-    cooldownMinutes: 120,
     lastTestedAt: null,
     documentEnabled: false,
     documentId: "",
@@ -37,11 +35,11 @@ const initialData = {
   },
   monitor: {
     intervalMinutes: 60,
-    captureProtectionMinutes: 3,
+    captureProtectionMinutes: 0,
     captureProtectionByAccount: {
-      normal: null,
-      vip88: null,
-      gift: null,
+      normal: 0,
+      vip88: 0,
+      gift: 0,
     },
     running: true,
     lastRunAt: null,
@@ -57,6 +55,9 @@ function markLegacySnapshot(snapshot) {
 export function migrateDbDocument(parsed) {
   const fromVersion = Number(parsed?.schemaVersion || 1);
   if (fromVersion >= DB_SCHEMA_VERSION) return { data: parsed, migrated: false, fromVersion };
+  const feishu = { ...(parsed.feishu || {}) };
+  delete feishu.cooldownEnabled;
+  delete feishu.cooldownMinutes;
   const data = {
     ...parsed,
     schemaVersion: DB_SCHEMA_VERSION,
@@ -65,6 +66,7 @@ export function migrateDbDocument(parsed) {
       ...product,
       lastSnapshot: markLegacySnapshot(product.lastSnapshot),
     })),
+    feishu,
   };
   return { data, migrated: true, fromVersion };
 }

@@ -11,7 +11,7 @@ import { loadEnv } from "./utils/env.js";
 import { dbRuntimeInfo, newId, readDb, updateDb } from "./storage/db.js";
 import { analyzeData } from "./services/analysisService.js";
 import { buildTaobaoOAuthUrl, maskSecret } from "./services/authService.js";
-import { clearFinishedCaptureJobs, getCaptureQueueStatus, preserveBuyerShowHistory, rescheduleMonitor, resolveCaptureProtectionMinutes, runMonitorOnce, runProductOnce, scheduleProduct, startScheduler, stopScheduler } from "./services/monitorService.js";
+import { clearFinishedCaptureJobs, getCaptureQueueStatus, preserveBuyerShowHistory, rescheduleMonitor, resolveCaptureProtectionMinutes, runMonitorOnce, runProductOnce, scheduleProduct, setSkuMonitorPrice, startScheduler, stopScheduler } from "./services/monitorService.js";
 import { createNotificationLog, effectivePriceForSku, publicFeishuConfig, sendFeishuNotification, updateFeishuConfig } from "./services/feishuService.js";
 import { appendPriceDocument, cliStatus, createPriceDocument, readAuthQr, startCliLogin, startCliSetup } from "./services/larkCliService.js";
 import { browserRuntimeInfo, checkTaobaoSession, closeAccountBrowser, getTaobaoAuthState, isTaobaoLoginUrl, keepAccountBrowserWarm, minimizeAccountBrowser, openProductInAccountChrome, openTaobaoLogin } from "./services/browserService.js";
@@ -84,6 +84,7 @@ const productSchema = z.object({
   group: z.string().optional().default("默认分组"),
   accountType: z.enum(["normal", "gift", "vip88"]).default("normal"),
   captureBuyerShows: z.boolean().default(true),
+  captureMediaAssets: z.boolean().default(false),
 });
 
 function safeFilename(value, fallback = "tmall") {
@@ -234,7 +235,7 @@ app.get("/api/overview", async (_req, res) => {
       hasApiKey: Boolean(db.modelConfig.apiKey || process.env.OPENAI_API_KEY),
   },
     feishu: publicFeishuConfig(db.feishu),
-    notificationLogs: db.notificationLogs.slice(-80).reverse(),
+    notificationLogs: db.notificationLogs.filter((log) => log.status !== "suppressed").slice(-80).reverse(),
     monitor: db.monitor,
     captureQueue: getCaptureQueueStatus(),
     runtime: runtimeInfo(),
@@ -269,6 +270,7 @@ app.post("/api/products/batch", async (req, res) => {
     group: z.string().min(1).default("核心竞品"),
     accountType: z.enum(["normal", "gift", "vip88"]).default("normal"),
     captureBuyerShows: z.boolean().default(true),
+    captureMediaAssets: z.boolean().default(false),
   });
   const parsed = schema.parse(req.body);
   const uniqueUrls = [...new Set(parsed.urls.map(normalizeProductUrl))];
@@ -285,6 +287,7 @@ app.post("/api/products/batch", async (req, res) => {
     group: parsed.group,
     accountType: parsed.accountType,
     captureBuyerShows: parsed.captureBuyerShows,
+    captureMediaAssets: parsed.captureMediaAssets,
     enabled: false,
     mainImage: "",
     lastStatus: "pending",
@@ -337,6 +340,7 @@ app.patch("/api/products/:id", async (req, res) => {
     group: z.string().min(1).optional(),
     accountType: z.enum(["normal", "gift", "vip88"]).optional(),
     captureBuyerShows: z.boolean().optional(),
+    captureMediaAssets: z.boolean().optional(),
     enabled: z.boolean().optional(),
     monitorScheduleMode: z.enum(["once", "interval"]).optional(),
     monitorIntervalMinutes: z.number().int().min(30).max(1440).nullable().optional(),
@@ -366,14 +370,27 @@ app.patch("/api/products/:id", async (req, res) => {
   res.json(updated);
 });
 
+app.patch("/api/products/:id/sku-monitor-price", async (req, res) => {
+  const { skuId, value } = z.object({ skuId: z.string().min(1), value: z.number().positive().nullable() }).parse(req.body);
+  let updated = null;
+  await updateDb((db) => {
+    db.products = db.products.map((product) => {
+      if (product.id !== req.params.id) return product;
+      updated = { ...setSkuMonitorPrice(product, skuId, value), updatedAt: new Date().toISOString() };
+      return updated;
+    });
+    return db;
+  });
+  if (!updated) return res.status(404).json({ message: "商品不存在。" });
+  res.json(updated);
+});
+
 app.patch("/api/feishu/settings", async (req, res) => {
   const schema = z.object({
     enabled: z.boolean().optional(),
     webhookUrl: z.string().url().optional(),
     signingSecret: z.string().min(1).max(500).optional(),
     clearSigningSecret: z.boolean().optional(),
-    cooldownEnabled: z.boolean().optional(),
-    cooldownMinutes: z.number().int().min(1).max(1440).optional(),
     documentEnabled: z.boolean().optional(),
   });
   const patch = schema.parse(req.body);
@@ -1030,6 +1047,10 @@ app.get("/api/download-image", async (req, res) => {
 app.get("/api/products/:id/download-media", async (req, res) => {
   const db = await readDb();
   const product = db.products.find((item) => item.id === req.params.id);
+  if (product && product.captureMediaAssets !== true) {
+    res.status(409).json({ message: "该商品未开启完整素材抓取，请先在商品卡片开启并重新抓取。" });
+    return;
+  }
   if (!product?.lastSnapshot) {
     res.status(404).json({ message: "商品暂无可下载的抓取素材。" });
     return;

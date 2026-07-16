@@ -1,39 +1,28 @@
 import { useState } from 'react'
-import { CircleAlert, CircleCheck, Crown, Gift, Hash, Images, Link2, LoaderCircle, Plus, Search, UserRound } from 'lucide-react'
+import { Archive, CircleAlert, CircleCheck, Crown, Gift, Hash, Images, Link2, LoaderCircle, Plus, Search, UserRound } from 'lucide-react'
 import { Button } from '../../components/ui/button'
 import { Card, CardContent, CardHeader, CardTitle } from '../../components/ui/card'
 import { Input } from '../../components/ui/input'
-import { normalizeProductUrl, normalizeProductUrlIfPossible } from '../../lib/productUrl'
+import { itemIdFromProductInput, normalizeProductUrl, normalizeProductUrlIfPossible, productUrlForItemId, type ProductPlatform } from '../../lib/productUrl'
 import type { AuthSession } from '../../types/domain'
 
 type AccountType = 'normal' | 'gift' | 'vip88'
-type Platform = 'tmall' | 'taobao'
 type InputMode = 'link' | 'id'
 
 type Props = {
   sessions: AuthSession[]
-  onAdd: (payload: { name?: string; url: string; group?: string; accountType: AccountType; captureBuyerShows: boolean }) => Promise<void>
+  onAdd: (payload: { name?: string; url: string; group?: string; accountType: AccountType; captureBuyerShows: boolean; captureMediaAssets: boolean }) => Promise<void>
+  onRequireAuth: (accountType: AccountType) => void
 }
 
-const prefixes: Record<Platform, string> = {
-  tmall: 'https://detail.tmall.com/item.htm?id=',
-  taobao: 'https://item.taobao.com/item.htm?id=',
-}
-
-function itemIdFromInput(value: string) {
-  return value.trim().match(/^\d{6,20}$/)?.[0]
-    || value.match(/(?:[?&]|\b)(?:id|itemId)=(\d{6,20})/i)?.[1]
-    || ''
-}
-
-export function ProductForm({ sessions, onAdd }: Props) {
+export function ProductForm({ sessions, onAdd, onRequireAuth }: Props) {
   const [inputMode, setInputMode] = useState<InputMode>('link')
-  const [platform, setPlatform] = useState<Platform>('tmall')
+  const [platform, setPlatform] = useState<ProductPlatform>('tmall')
   const [linkInput, setLinkInput] = useState('')
   const [idInput, setIdInput] = useState('')
-  const [group, setGroup] = useState('核心竞品')
   const [accountType, setAccountType] = useState<AccountType>('normal')
   const [captureBuyerShows, setCaptureBuyerShows] = useState(false)
+  const [captureMediaAssets, setCaptureMediaAssets] = useState(false)
   const [submitting, setSubmitting] = useState(false)
   const [status, setStatus] = useState<{ tone: 'progress' | 'success' | 'error'; message: string } | null>(null)
 
@@ -47,15 +36,18 @@ export function ProductForm({ sessions, onAdd }: Props) {
   async function submit(event: React.FormEvent) {
     event.preventDefault()
     setSubmitting(true)
-    setStatus({ tone: 'progress', message: captureBuyerShows ? '正在创建商品并抓取价格、素材和买家秀...' : '正在创建商品并抓取价格与素材...' })
+    setStatus({ tone: 'progress', message: `正在抓取价格、800 主图和 SKU 图${captureMediaAssets ? '、完整素材' : ''}${captureBuyerShows ? '、买家秀' : ''}...` })
     try {
       const productInput = inputMode === 'id' ? idInput : linkInput
-      const itemId = itemIdFromInput(productInput)
+      const itemId = itemIdFromProductInput(productInput)
       if (!itemId) throw new Error('请输入 6 至 20 位商品 ID，或粘贴淘宝/天猫商品链接。')
-      const normalizedUrl = normalizeProductUrl(inputMode === 'id' ? `${prefixes[platform]}${itemId}` : productInput)
-      const available = sessions.some((session) => (session.enabled ?? session.active) && (session.accountType || 'normal') === accountType)
-      if (!available) throw new Error(`尚未授权${accountType === 'gift' ? '礼金' : accountType === 'vip88' ? '88VIP' : '普通'}账号，请先到账号授权页面登录。`)
-      await onAdd({ url: normalizedUrl, group, accountType, captureBuyerShows })
+      const normalizedUrl = inputMode === 'id' ? productUrlForItemId(itemId, platform) : normalizeProductUrl(productInput)
+      const available = sessions.some((session) => (session.enabled ?? session.active) && session.loginStatus !== 'expired' && (session.accountType || 'normal') === accountType)
+      if (!available) {
+        onRequireAuth(accountType)
+        throw new Error(`尚未授权${accountType === 'gift' ? '礼金' : accountType === 'vip88' ? '88VIP' : '普通'}账号，请先到账号授权页面登录。`)
+      }
+      await onAdd({ url: normalizedUrl, accountType, captureBuyerShows, captureMediaAssets })
       if (inputMode === 'id') setIdInput('')
       else setLinkInput('')
       setStatus({ tone: 'success', message: '商品已添加，首次抓取结果已更新到下方列表。' })
@@ -67,7 +59,7 @@ export function ProductForm({ sessions, onAdd }: Props) {
   }
 
   const productInput = inputMode === 'id' ? idInput : linkInput
-  const itemId = itemIdFromInput(productInput)
+  const itemId = itemIdFromProductInput(productInput)
 
   return (
     <Card className="flex h-full flex-col">
@@ -111,7 +103,7 @@ export function ProductForm({ sessions, onAdd }: Props) {
               <div className="grid grid-cols-[minmax(0,1fr)_124px] gap-2">
                 <div className="relative">
                   <Hash className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400" />
-                  <Input value={idInput} onChange={(event) => setIdInput(event.target.value.replace(/\D/g, '').slice(0, 20))} className="pl-9 font-mono tabular-nums" inputMode="numeric" placeholder="输入纯数字 ID" required />
+                  <Input value={idInput} onChange={(event) => setIdInput(event.target.value)} className="pl-9 font-mono tabular-nums" inputMode="numeric" placeholder="输入纯数字 ID" required />
                 </div>
                 <div className="inline-flex rounded-md bg-slate-100 p-1" aria-label="商品平台">
                   {(['tmall', 'taobao'] as const).map((item) => <button key={item} type="button" onClick={() => setPlatform(item)} className={`flex-1 rounded px-2 text-xs font-medium ${platform === item ? 'bg-white text-blue-700 shadow-sm' : 'text-slate-500 hover:text-slate-800'}`}>{item === 'tmall' ? '天猫' : '淘宝'}</button>)}
@@ -120,7 +112,6 @@ export function ProductForm({ sessions, onAdd }: Props) {
               <span className="min-h-5 text-xs font-normal leading-5 text-slate-500">只输入数字即可，系统会在后台自动补全{platform === 'tmall' ? '天猫' : '淘宝'}商品地址。</span>
             </label>
           )}
-          <label className="grid gap-1 text-sm font-medium text-slate-700">分组<Input value={group} onChange={(event) => setGroup(event.target.value)} placeholder="核心竞品" /></label>
           <fieldset className="grid gap-2">
             <legend className="text-sm font-medium text-slate-700">价格账号</legend>
             <div className="grid grid-cols-3 gap-2">
@@ -135,14 +126,20 @@ export function ProductForm({ sessions, onAdd }: Props) {
               })}
             </div>
           </fieldset>
-          <label className="flex min-h-10 cursor-pointer items-center gap-2 rounded-md bg-slate-50 px-3 text-sm text-slate-700">
-            <input type="checkbox" checked={captureBuyerShows} onChange={(event) => setCaptureBuyerShows(event.target.checked)} className="h-4 w-4 accent-blue-600" />
-            <Images className="h-4 w-4 text-slate-500" />
-            <span className="font-medium">同时抓取买家秀</span>
-            <span className="text-xs text-slate-400">可选，会增加抓取时间</span>
-          </label>
-          <div className="mt-auto flex items-center gap-3 pt-1">
-            <Button type="submit" disabled={submitting || !itemId} className="min-w-44"><Plus className="h-4 w-4" />{submitting ? '抓取中' : '添加并立即抓取'}</Button>
+          <div className="grid gap-2 sm:grid-cols-2">
+            <label className="flex min-h-12 cursor-pointer items-center gap-2 rounded-md bg-slate-50 px-3 text-sm text-slate-700">
+              <input type="checkbox" checked={captureMediaAssets} onChange={(event) => setCaptureMediaAssets(event.target.checked)} className="h-4 w-4 accent-blue-600" />
+              <Archive className="h-4 w-4 shrink-0 text-slate-500" />
+              <span><span className="block font-medium">抓取完整素材</span><span className="block text-xs text-slate-400">750 主图、详情图、视频</span></span>
+            </label>
+            <label className="flex min-h-12 cursor-pointer items-center gap-2 rounded-md bg-slate-50 px-3 text-sm text-slate-700">
+              <input type="checkbox" checked={captureBuyerShows} onChange={(event) => setCaptureBuyerShows(event.target.checked)} className="h-4 w-4 accent-blue-600" />
+              <Images className="h-4 w-4 shrink-0 text-slate-500" />
+              <span><span className="block font-medium">同时抓取买家秀</span><span className="block text-xs text-slate-400">独立可选，会增加时间</span></span>
+            </label>
+          </div>
+          <div className="mt-auto grid gap-2 pt-1">
+            <Button type="submit" disabled={submitting || !itemId} className="w-full"><Plus className="h-4 w-4" />{submitting ? '抓取中' : '添加并立即抓取'}</Button>
             {status && <div className={`flex min-w-0 items-center gap-1.5 text-xs ${status.tone === 'progress' ? 'text-blue-700' : status.tone === 'success' ? 'text-emerald-700' : 'text-red-700'}`} role={status.tone === 'error' ? 'alert' : 'status'} aria-live="polite">{status.tone === 'progress' ? <LoaderCircle className="h-4 w-4 shrink-0 animate-spin" /> : status.tone === 'success' ? <CircleCheck className="h-4 w-4 shrink-0" /> : <CircleAlert className="h-4 w-4 shrink-0" />}<span className="line-clamp-2">{status.message}</span></div>}
           </div>
         </form>

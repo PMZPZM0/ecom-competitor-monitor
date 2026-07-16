@@ -1,3 +1,19 @@
+export type ProductPlatform = 'tmall' | 'taobao'
+
+export function itemIdFromProductInput(value: string) {
+  return value.trim().match(/^\d{6,20}$/)?.[0]
+    || value.match(/(?:[?&]|\b)(?:id|itemId)=(\d{6,20})(?!\d)/i)?.[1]
+    || ''
+}
+
+export function productUrlForItemId(value: string, platform: ProductPlatform) {
+  const itemId = itemIdFromProductInput(value)
+  if (!itemId) throw new Error('请输入 6 至 20 位商品 ID。')
+  return platform === 'tmall'
+    ? `https://detail.tmall.com/item.htm?id=${itemId}`
+    : `https://item.taobao.com/item.htm?id=${itemId}`
+}
+
 export function normalizeProductUrl(value: string) {
   const candidate = value.trim().match(/https?:\/\/[^\s]+/i)?.[0] || value.trim()
   const url = new URL(candidate)

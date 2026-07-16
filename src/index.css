@@ -28,6 +28,52 @@ body {
   font-variant-numeric: tabular-nums;
 }
 
+.product-monitor-card {
+  container-type: inline-size;
+}
+
+.product-monitor-header-grid {
+  display: grid;
+  gap: 0.75rem;
+}
+
+.product-monitor-command-deck {
+  border-top: 1px solid #e2e8f0;
+  padding-top: 0.75rem;
+}
+
+.product-monitor-content {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+}
+
+@container (min-width: 1200px) {
+  .product-monitor-header-grid {
+    grid-template-columns: minmax(0, 1fr) 650px;
+    align-items: start;
+    gap: 1rem;
+  }
+
+  .product-monitor-command-deck {
+    align-self: stretch;
+    border-top: 0;
+    display: flex;
+    flex-direction: column;
+    justify-content: space-between;
+    padding-top: 0;
+  }
+
+  .product-monitor-schedule-row {
+    margin-top: 0;
+  }
+}
+
+@container (min-width: 760px) {
+  .product-monitor-content {
+    grid-template-columns: 270px minmax(0, 1fr);
+  }
+}
+
 button,
 input,
 textarea {
@@ -48,6 +94,6 @@ textarea {
   .app-sidebar { width: 4rem; }
   .app-sidebar .brand-copy,
   .app-sidebar .nav-label { display: none; }
-  .app-sidebar nav button { justify-content: center; padding-inline: 0; }
+  .app-sidebar button { justify-content: center; padding-inline: 0; }
   .app-main { margin-left: 4rem; }
 }

@@ -83,6 +83,30 @@ export function scheduleProducts(products, monitor, options = {}) {
   return products.map((product) => scheduleProduct(product, monitor, options));
 }
 
+export function mergeCapturedProduct(current, captured) {
+  return {
+    ...current,
+    name: captured.name,
+    shopName: captured.shopName,
+    shopLogo: captured.shopLogo,
+    model: captured.model,
+    itemId: captured.itemId,
+    autoGroup: captured.autoGroup,
+    mainImage: captured.mainImage,
+    lastStatus: captured.lastStatus,
+    lastError: captured.lastError,
+    lastSnapshot: captured.lastSnapshot,
+    updatedAt: captured.updatedAt,
+  };
+}
+
+export function setSkuMonitorPrice(product, skuId, value) {
+  const skuMonitorPrices = { ...(product.skuMonitorPrices || {}) };
+  if (value === null) delete skuMonitorPrices[skuId];
+  else skuMonitorPrices[skuId] = value;
+  return { ...product, skuMonitorPrices, monitorPrice: null };
+}
+
 export function dueProductIds(products, now = Date.now()) {
   return products
     .filter((product) => product.enabled && Number.isFinite(Date.parse(product.nextMonitorAt || "")) && Date.parse(product.nextMonitorAt) <= now)
@@ -570,15 +594,7 @@ export function snapshotAllowsPriceAlerts(snapshot) {
   return snapshot?.accessMode !== "anonymous" && ["verified", "partial"].includes(snapshot?.resolutionStatus);
 }
 
-export function isFeishuAlertCoolingDown(feishu, notificationLogs, productId, skuId, now = Date.now()) {
-  if (feishu?.cooldownEnabled === false) return false;
-  const cooldownMs = Math.max(1, Number(feishu?.cooldownMinutes) || 120) * 60_000;
-  return (notificationLogs || []).some((log) =>
-    log.productId === productId && log.skuId === skuId && log.type === "below-threshold" && log.status === "sent" && now - new Date(log.createdAt).getTime() < cooldownMs,
-  );
-}
-
-async function notifyBelowThreshold(current, product, snapshot, source) {
+export async function notifyBelowThreshold(current, product, snapshot, source) {
   if (!snapshotAllowsPriceAlerts(snapshot)) return [];
   if (!current.feishu.enabled) return [];
   const skuThresholds = product.skuMonitorPrices || {};
@@ -590,11 +606,6 @@ async function notifyBelowThreshold(current, product, snapshot, source) {
     const price = effective?.value;
     if (!Number.isFinite(threshold) || threshold <= 0 || !Number.isFinite(price) || price >= threshold) continue;
 
-    const sentRecently = isFeishuAlertCoolingDown(current.feishu, current.notificationLogs, product.id, sku.skuId);
-    if (sentRecently) {
-      alerts.push(createNotificationLog({ productId: product.id, skuId: sku.skuId, type: "below-threshold", status: "suppressed", message: `SKU「${sku.name || sku.skuId}」价格仍低于监控价，处于飞书提醒冷却期。`, price, threshold, source }));
-      continue;
-    }
     pending.push({ sku, price, threshold, priceLabel: effective.label });
   }
   if (!pending.length) return alerts;
@@ -741,8 +752,8 @@ async function runMonitorUnlocked({ source = "manual", productIds = null, includ
     const captureCandidate = {
       ...product,
       knownPrimaryImages: historicalPrimaryImages(data.snapshots, product.id),
-      knownGalleryImages: Array.from(new Set([...(product.lastSnapshot?.gallery750Images || []), ...historicalProductMedia(data.snapshots, product.id).galleryImages])),
-      knownVideoUrls: Array.from(new Set([...(product.lastSnapshot?.videoUrls || []), ...historicalProductMedia(data.snapshots, product.id).videoUrls])),
+      knownGalleryImages: product.captureMediaAssets === true ? Array.from(new Set([...(product.lastSnapshot?.gallery750Images || []), ...historicalProductMedia(data.snapshots, product.id).galleryImages])) : [],
+      knownVideoUrls: product.captureMediaAssets === true ? Array.from(new Set([...(product.lastSnapshot?.videoUrls || []), ...historicalProductMedia(data.snapshots, product.id).videoUrls])) : [],
     };
     const accountType = product.accountType || "normal";
     const productSessions = sessionsForProduct(activeSessions, accountType, productIndex);
@@ -771,23 +782,18 @@ async function runMonitorUnlocked({ source = "manual", productIds = null, includ
     persistSessionHealth(current, activeSessions);
     for (const result of results) {
       const index = current.products.findIndex((product) => product.id === result.product.id);
+      let savedProduct = result.product;
       if (index >= 0) {
-        const persisted = current.products[index];
-        current.products[index] = {
-          ...result.product,
-          enabled: persisted.enabled,
-          monitorIntervalMinutes: persisted.monitorIntervalMinutes,
-          monitorStartAt: persisted.monitorStartAt,
-          nextMonitorAt: persisted.nextMonitorAt,
-        };
+        savedProduct = mergeCapturedProduct(current.products[index], result.product);
+        current.products[index] = savedProduct;
       }
       if (result.snapshot) {
         current.snapshots.push(result.snapshot);
-        const logs = await notifyBelowThreshold(current, result.product, result.snapshot, source);
+        const logs = await notifyBelowThreshold(current, savedProduct, result.snapshot, source);
         current.notificationLogs.push(...logs);
         if (snapshotAllowsPriceAlerts(result.snapshot) && current.feishu.documentEnabled && current.feishu.documentId) {
           try {
-            await appendPriceDocument(current.feishu.documentId, result.product, result.snapshot);
+            await appendPriceDocument(current.feishu.documentId, savedProduct, result.snapshot);
             current.feishu.lastDocumentSyncAt = new Date().toISOString();
             current.notificationLogs.push(createNotificationLog({ productId: result.product.id, type: "document-sync", status: "sent", message: "价格快照已写入飞书文档。", source }));
           } catch (error) {
@@ -833,8 +839,8 @@ async function runProductUnlocked(productId, { source = "single-product" } = {},
     result = await captureProduct({
       ...product,
       knownPrimaryImages: historicalPrimaryImages(data.snapshots, product.id),
-      knownGalleryImages: Array.from(new Set([...(product.lastSnapshot?.gallery750Images || []), ...historicalProductMedia(data.snapshots, product.id).galleryImages])),
-      knownVideoUrls: Array.from(new Set([...(product.lastSnapshot?.videoUrls || []), ...historicalProductMedia(data.snapshots, product.id).videoUrls])),
+      knownGalleryImages: product.captureMediaAssets === true ? Array.from(new Set([...(product.lastSnapshot?.gallery750Images || []), ...historicalProductMedia(data.snapshots, product.id).galleryImages])) : [],
+      knownVideoUrls: product.captureMediaAssets === true ? Array.from(new Set([...(product.lastSnapshot?.videoUrls || []), ...historicalProductMedia(data.snapshots, product.id).videoUrls])) : [],
     }, productSessions, { captureProtectionMinutes: resolveCaptureProtectionMinutes(data.monitor, accountType) });
   } finally {
     if (queueJob) {
@@ -852,23 +858,18 @@ async function runProductUnlocked(productId, { source = "single-product" } = {},
   await updateDb(async (current) => {
     persistSessionHealth(current, activeSessions);
     const index = current.products.findIndex((item) => item.id === productId);
+    let savedProduct = result.product;
     if (index >= 0) {
-      const persisted = current.products[index];
-      current.products[index] = {
-        ...result.product,
-        enabled: persisted.enabled,
-        monitorIntervalMinutes: persisted.monitorIntervalMinutes,
-        monitorStartAt: persisted.monitorStartAt,
-        nextMonitorAt: persisted.nextMonitorAt,
-      };
+      savedProduct = mergeCapturedProduct(current.products[index], result.product);
+      current.products[index] = savedProduct;
     }
     if (result.snapshot) {
       current.snapshots.push(result.snapshot);
-      const logs = await notifyBelowThreshold(current, result.product, result.snapshot, source);
+      const logs = await notifyBelowThreshold(current, savedProduct, result.snapshot, source);
       current.notificationLogs.push(...logs);
       if (snapshotAllowsPriceAlerts(result.snapshot) && current.feishu.documentEnabled && current.feishu.documentId) {
         try {
-          await appendPriceDocument(current.feishu.documentId, result.product, result.snapshot);
+          await appendPriceDocument(current.feishu.documentId, savedProduct, result.snapshot);
           current.feishu.lastDocumentSyncAt = new Date().toISOString();
           current.notificationLogs.push(createNotificationLog({ productId: result.product.id, type: "document-sync", status: "sent", message: "价格快照已写入飞书文档。", source }));
         } catch (error) {

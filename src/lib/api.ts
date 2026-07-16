@@ -30,12 +30,14 @@ export const api = {
   captureQueue: () => request<CaptureQueueStatus>('/api/capture-queue'),
   clearCaptureQueue: () => request<{ removed: number }>('/api/capture-queue/completed', { method: 'DELETE' }),
   checkUpdate: () => request<UpdateInfo>('/api/runtime/update'),
-  addProduct: (payload: { name?: string; url: string; group?: string; accountType: 'normal' | 'gift' | 'vip88'; captureBuyerShows: boolean }) =>
+  addProduct: (payload: { name?: string; url: string; group?: string; accountType: 'normal' | 'gift' | 'vip88'; captureBuyerShows: boolean; captureMediaAssets: boolean }) =>
     request<Product>('/api/products', { method: 'POST', body: JSON.stringify(payload) }),
-  addProductsBatch: (payload: { urls: string[]; group: string; accountType: 'normal' | 'gift' | 'vip88'; captureBuyerShows: boolean }) =>
+  addProductsBatch: (payload: { urls: string[]; group: string; accountType: 'normal' | 'gift' | 'vip88'; captureBuyerShows: boolean; captureMediaAssets: boolean }) =>
     request<{ total: number; created: number; skipped: number; success: number; failed: number; message: string; run: RunRecord | null; items: NonNullable<RunRecord['items']> }>('/api/products/batch', { method: 'POST', body: JSON.stringify(payload) }),
   updateProduct: (id: string, payload: Partial<Product>) =>
     request<Product>(`/api/products/${id}`, { method: 'PATCH', body: JSON.stringify(payload) }),
+  updateSkuMonitorPrice: (id: string, skuId: string, value: number | null) =>
+    request<Product>(`/api/products/${id}/sku-monitor-price`, { method: 'PATCH', body: JSON.stringify({ skuId, value }) }),
   deleteProduct: (id: string) => request<void>(`/api/products/${id}`, { method: 'DELETE' }),
   deleteProductsBatch: (ids: string[]) =>
     request<{ requested: number; deleted: number }>('/api/products/batch-delete', { method: 'POST', body: JSON.stringify({ ids }) }),
@@ -46,7 +48,7 @@ export const api = {
   captureProductsBatch: (ids: string[]) => request<{ ok: boolean; run: RunRecord }>('/api/products/batch-capture', { method: 'POST', body: JSON.stringify({ ids }) }),
   updateMonitor: (payload: { intervalMinutes?: number; captureProtectionMinutes?: number; captureProtectionByAccount?: Partial<Record<'normal' | 'gift' | 'vip88', number | null>>; running?: boolean }) =>
     request<Overview['monitor']>('/api/monitor/settings', { method: 'PATCH', body: JSON.stringify(payload) }),
-  updateFeishuSettings: (payload: { enabled?: boolean; webhookUrl?: string; signingSecret?: string; clearSigningSecret?: boolean; cooldownEnabled?: boolean; cooldownMinutes?: number; documentEnabled?: boolean }) =>
+  updateFeishuSettings: (payload: { enabled?: boolean; webhookUrl?: string; signingSecret?: string; clearSigningSecret?: boolean; documentEnabled?: boolean }) =>
     request<Overview['feishu']>('/api/feishu/settings', { method: 'PATCH', body: JSON.stringify(payload) }),
   testFeishu: () => request<{ ok: boolean }>('/api/feishu/test', { method: 'POST' }),
   syncProductToFeishu: (id: string) => request<{ ok: boolean; partial?: boolean }>(`/api/products/${id}/feishu-sync`, { method: 'POST' }),

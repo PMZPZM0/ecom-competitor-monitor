@@ -11,8 +11,9 @@ type Props = {
   products: Product[]
   totalProducts?: number
   onToggle: (product: Product) => Promise<void>
-  onToggleGlobal: () => Promise<void>
   onSchedule: (product: Product, mode: NonNullable<Product['monitorScheduleMode']>, intervalMinutes: number, monitorStartAt: string | null) => Promise<void>
+  onMediaPreference: (product: Product, captureMediaAssets: boolean) => Promise<void>
+  onSaveSkuMonitorPrice: (product: Product, skuId: string, value: number | null) => Promise<void>
   onCapture: (product: Product) => Promise<Product | void>
   onRetryBuyerShows: (product: Product) => Promise<Product>
   onDelete: (product: Product) => Promise<void>
@@ -21,7 +22,7 @@ type Props = {
   monitor: Overview['monitor']
 }
 
-export function ProductTable({ products, totalProducts = products.length, onToggle, onToggleGlobal, onSchedule, onCapture, onRetryBuyerShows, onDelete, busyProductId, authSessions, monitor }: Props) {
+export function ProductTable({ products, totalProducts = products.length, onToggle, onSchedule, onMediaPreference, onSaveSkuMonitorPrice, onCapture, onRetryBuyerShows, onDelete, busyProductId, authSessions, monitor }: Props) {
   const [preview, setPreview] = useState<Preview | null>(null)
   const [sortKey, setSortKey] = useState<ProductSortKey>('updated-desc')
   const [page, setPage] = useState(1)
@@ -65,8 +66,9 @@ export function ProductTable({ products, totalProducts = products.length, onTogg
               key={product.id}
               product={product}
               onToggle={onToggle}
-              onToggleGlobal={onToggleGlobal}
               onSchedule={onSchedule}
+              onMediaPreference={onMediaPreference}
+              onSaveSkuMonitorPrice={onSaveSkuMonitorPrice}
               onCapture={onCapture}
               onRetryBuyerShows={onRetryBuyerShows}
               onDelete={onDelete}

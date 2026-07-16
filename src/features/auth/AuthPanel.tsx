@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
-import { CircleHelp, Cookie, Crown, Gift, KeyRound, LoaderCircle, QrCode, RefreshCw, ShieldCheck, TimerReset, UserRoundCheck, X } from 'lucide-react'
+import { CircleHelp, Cookie, Crown, Gift, KeyRound, LoaderCircle, QrCode, RefreshCw, ShieldCheck, TimerReset, Trash2, UserRoundCheck, X } from 'lucide-react'
 import { api } from '../../lib/api'
 import { Button } from '../../components/ui/button'
 import { Card, CardContent, CardHeader, CardTitle } from '../../components/ui/card'
@@ -261,13 +261,13 @@ export function AuthPanel({ sessions, onSaved, onActivate, onDelete, monitor }: 
         </div>
         <div className="border-y border-slate-100 py-3">
           <div className="mb-2 text-sm font-medium text-slate-700">本地采集保护时间</div>
-          <div className="grid grid-cols-[minmax(0,1fr)_120px_auto] gap-2">
+          <div className={`grid gap-2 ${protectionChoice === 'custom' ? 'grid-cols-[minmax(0,1fr)_120px_auto]' : 'grid-cols-[minmax(0,1fr)_auto]'}`}>
             <select value={protectionChoice} onChange={(event) => setProtectionChoice(event.target.value)} className="h-10 rounded-md border border-slate-200 bg-white px-3 text-sm text-slate-700" aria-label="采集保护时间">
               <option value="off">关闭保护</option>
               {protectionPresets.map((minutes) => <option key={minutes} value={minutes}>{minutes} 分钟</option>)}
               <option value="custom">自定义</option>
             </select>
-            <Input type="number" min="1" max="120" step="1" value={customProtectionMinutes} onChange={(event) => setCustomProtectionMinutes(event.target.value)} disabled={protectionChoice !== 'custom'} aria-label="自定义采集保护分钟数" />
+            {protectionChoice === 'custom' && <Input type="number" min="1" max="120" step="1" value={customProtectionMinutes} onChange={(event) => setCustomProtectionMinutes(event.target.value)} aria-label="自定义采集保护分钟数" />}
             <Button type="button" variant="secondary" onClick={saveProtectionMinutes} disabled={Boolean(busy)}>{busy === 'protection' ? '保存中' : '保存'}</Button>
           </div>
           <p className="mt-2 text-[11px] leading-4 text-slate-500">仅控制本软件连续访问频率，可关闭。出现倒计时不代表淘宝账号被风控，倒计时结束后抓取按钮自动恢复。</p>
@@ -321,13 +321,14 @@ export function AuthPanel({ sessions, onSaved, onActivate, onDelete, monitor }: 
           </div>
         </CardHeader>
         <CardContent className="grid gap-3 xl:grid-cols-3">
-          {accountGroups.map((group) => {
+          {accountGroups.flatMap((group) => {
             const groupSessions = sessions.filter((session) => (session.accountType || 'normal') === group.type)
+            const cardSessions = groupSessions.length ? groupSessions : [null]
             const Icon = group.icon
             const panelClass = group.color === 'violet' ? 'border-violet-100 bg-violet-50/40' : group.color === 'amber' ? 'border-amber-100 bg-amber-50/40' : 'border-sky-100 bg-sky-50/40'
             const iconClass = group.color === 'violet' ? 'text-violet-600' : group.color === 'amber' ? 'text-amber-600' : 'text-sky-600'
-            return (
-              <section key={group.type} className={`min-w-0 rounded-md border p-3 ${panelClass}`}>
+            return cardSessions.map((session) => (
+              <section key={session?.id || group.type} className={`min-w-0 rounded-md border p-3 ${panelClass}`}>
                 <div className="mb-3 flex items-start justify-between gap-2">
                   <div className="flex items-start gap-2">
                     <Icon className={`mt-0.5 h-4 w-4 ${iconClass}`} />
@@ -336,9 +337,9 @@ export function AuthPanel({ sessions, onSaved, onActivate, onDelete, monitor }: 
                       <div className="mt-0.5 text-[11px] text-slate-500">{group.description}</div>
                     </div>
                   </div>
-                  <Badge className="shrink-0 bg-white">{groupSessions.length} 个</Badge>
+                  {session && <Button type="button" size="sm" variant="danger" className="h-8 w-8 shrink-0 p-0" onClick={() => onDelete(session)} disabled={Boolean(busy) || Boolean(pendingProfileKey)} title={`删除账号「${session.name}」`} aria-label={`删除账号「${session.name}」`}><Trash2 className="h-3.5 w-3.5" /></Button>}
                 </div>
-                <div className="mb-3 grid grid-cols-[minmax(0,1fr)_74px_auto] gap-1.5" title="仅控制本软件访问频率，不代表淘宝账号风控">
+                <div className={`mb-3 grid gap-1.5 ${poolProtectionChoices[group.type] === 'custom' ? 'grid-cols-[minmax(0,1fr)_74px_auto]' : 'grid-cols-[minmax(0,1fr)_auto]'}`} title="仅控制本软件访问频率，不代表淘宝账号风控">
                   <select
                     value={poolProtectionChoices[group.type]}
                     onChange={(event) => setPoolProtectionChoices((current) => ({ ...current, [group.type]: event.target.value }))}
@@ -350,7 +351,7 @@ export function AuthPanel({ sessions, onSaved, onActivate, onDelete, monitor }: 
                     {protectionPresets.map((minutes) => <option key={minutes} value={minutes}>{minutes} 分钟</option>)}
                     <option value="custom">自定义</option>
                   </select>
-                  <Input
+                  {poolProtectionChoices[group.type] === 'custom' && <Input
                     className="h-8 px-2 text-xs"
                     type="number"
                     min="1"
@@ -358,58 +359,49 @@ export function AuthPanel({ sessions, onSaved, onActivate, onDelete, monitor }: 
                     step="1"
                     value={poolCustomMinutes[group.type]}
                     onChange={(event) => setPoolCustomMinutes((current) => ({ ...current, [group.type]: event.target.value }))}
-                    disabled={poolProtectionChoices[group.type] !== 'custom'}
                     aria-label={`${group.title}自定义采集保护分钟数`}
-                  />
+                  />}
                   <Button type="button" size="sm" variant="secondary" onClick={() => savePoolProtectionMinutes(group.type)} disabled={Boolean(busy)}>
                     {busy === `protection:${group.type}` ? '保存中' : '保存'}
                   </Button>
                 </div>
-                <div className="space-y-2">
-                  {groupSessions.map((session) => (
-                    <div key={session.id} className="rounded-md border border-white bg-white p-2.5 shadow-sm">
-                      <div className="flex items-start justify-between gap-2">
-                        <div className="min-w-0">
-                          <div className="truncate text-sm font-medium text-slate-900">{session.name}</div>
-                          <div className="mt-1 flex flex-wrap gap-1">
-                            <Badge className="border-slate-200 bg-slate-50 text-slate-600">{session.source === 'taobao-browser' ? '独立扫码' : 'Cookie'}</Badge>
-                            <Badge className={session.enabled ?? session.active ? '' : 'border-slate-200 bg-slate-50 text-slate-500'}>{session.enabled ?? session.active ? '参与采价' : '已停用'}</Badge>
-                            <Badge className={session.loginStatus === 'expired' ? 'border-red-100 bg-red-50 text-red-700' : session.loginStatus === 'valid' ? 'border-emerald-100 bg-emerald-50 text-emerald-700' : 'border-slate-200 bg-slate-50 text-slate-500'}>
-                              {session.source !== 'taobao-browser' ? 'Cookie 待实际验证' : session.loginStatus === 'expired' ? '登录失效' : session.loginStatus === 'valid' ? '已检测在线' : '登录态未检测'}
-                            </Badge>
-                            <Badge className={session.healthStatus === 'cooldown' ? 'border-red-100 bg-red-50 text-red-700' : session.healthStatus === 'degraded' ? 'border-amber-100 bg-amber-50 text-amber-700' : 'border-emerald-100 bg-emerald-50 text-emerald-700'}>
-                              {session.healthStatus === 'cooldown' ? '本地采集保护' : session.healthStatus === 'degraded' ? '抓取异常' : '账号池健康'}
-                            </Badge>
-                          </div>
-                          {session.cooldownUntil && new Date(session.cooldownUntil).getTime() > Date.now() && <div className="mt-1 text-[11px] leading-4 text-amber-600">软件采集保护至 {new Date(session.cooldownUntil).toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' })}。这是本地访问频率控制，不代表淘宝账号被风控；期间会自动切换其他账号。</div>}
-                          {session.lastSuccessAt && <div className="mt-1 text-[11px] text-slate-400">上次成功 {new Date(session.lastSuccessAt).toLocaleString('zh-CN', { hour12: false })}</div>}
-                          {session.lastCheckedAt && <div className="mt-1 text-[11px] text-slate-400">最后检测 {new Date(session.lastCheckedAt).toLocaleString('zh-CN', { hour12: false })}</div>}
-                        </div>
-                      </div>
-                      <div className="mt-2 flex flex-wrap gap-1.5 border-t border-slate-100 pt-2">
-                        <Button type="button" size="sm" variant="secondary" onClick={() => checkSession(session)} disabled={Boolean(busy) || Boolean(pendingProfileKey)} title="只检测登录状态，不抓取商品">
-                          <RefreshCw className={`h-3.5 w-3.5 ${busy === `check:${session.id}` ? 'animate-spin' : ''}`} />
-                          {busy === `check:${session.id}` ? '检测中' : '检测登录'}
-                        </Button>
-                        {session.cooldownUntil && new Date(session.cooldownUntil).getTime() > Date.now() && (
-                          <Button type="button" size="sm" variant="ghost" onClick={() => releaseCooldown(session)} disabled={Boolean(busy) || Boolean(pendingProfileKey)} title="登录未失效时手动恢复采价；再次触发验证会进入逐级冷却">
-                            <TimerReset className="h-3.5 w-3.5" />{busy === `release:${session.id}` ? '解除中' : '解除采集保护'}
-                          </Button>
-                        )}
-                        <Button type="button" size="sm" variant="ghost" onClick={() => reauthorizeSession(session)} disabled={session.source !== 'taobao-browser' || Boolean(busy) || Boolean(pendingProfileKey)} title={session.source === 'taobao-browser' ? '扫码后更新当前账号，不新增重复卡片' : '手动 Cookie 账号请在左侧重新粘贴 Cookie'}>
-                          <KeyRound className="h-3.5 w-3.5" />重新授权
-                        </Button>
-                        <Button type="button" size="sm" variant="ghost" className="flex-1" onClick={() => onActivate(session)} disabled={Boolean(busy) || Boolean(pendingProfileKey)}>
-                          {session.enabled ?? session.active ? '停用采价' : '启用采价'}
-                        </Button>
-                        <Button type="button" size="sm" variant="danger" onClick={() => onDelete(session)} disabled={Boolean(busy) || Boolean(pendingProfileKey)}>删除</Button>
-                      </div>
+                {session ? <>
+                  <div className="border-t border-white/80 pt-3">
+                    <div className="truncate text-sm font-medium text-slate-900">{session.name}</div>
+                    <div className="mt-1 flex flex-wrap gap-1">
+                      <Badge className="border-slate-200 bg-white/80 text-slate-600">{session.source === 'taobao-browser' ? '独立扫码' : 'Cookie'}</Badge>
+                      <Badge className={session.enabled ?? session.active ? '' : 'border-slate-200 bg-white/80 text-slate-500'}>{session.enabled ?? session.active ? '参与采价' : '已停用'}</Badge>
+                      <Badge className={session.loginStatus === 'expired' ? 'border-red-100 bg-red-50 text-red-700' : session.loginStatus === 'valid' ? 'border-emerald-100 bg-emerald-50 text-emerald-700' : 'border-slate-200 bg-white/80 text-slate-500'}>
+                        {session.source !== 'taobao-browser' ? 'Cookie 待实际验证' : session.loginStatus === 'expired' ? '登录失效' : session.loginStatus === 'valid' ? '已检测在线' : '登录态未检测'}
+                      </Badge>
+                      <Badge className={session.healthStatus === 'cooldown' ? 'border-red-100 bg-red-50 text-red-700' : session.healthStatus === 'degraded' ? 'border-amber-100 bg-amber-50 text-amber-700' : 'border-emerald-100 bg-emerald-50 text-emerald-700'}>
+                        {session.healthStatus === 'cooldown' ? '本地采集保护' : session.healthStatus === 'degraded' ? '抓取异常' : '账号池健康'}
+                      </Badge>
                     </div>
-                  ))}
-                  {groupSessions.length === 0 && <div className="rounded-md border border-dashed border-slate-200 bg-white/70 px-3 py-8 text-center text-xs text-slate-400">尚未授权</div>}
-                </div>
+                    {session.cooldownUntil && new Date(session.cooldownUntil).getTime() > Date.now() && <div className="mt-1 text-[11px] leading-4 text-amber-600">软件采集保护至 {new Date(session.cooldownUntil).toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' })}。这是本地访问频率控制，不代表淘宝账号被风控；期间会自动切换其他账号。</div>}
+                    {session.lastSuccessAt && <div className="mt-1 text-[11px] text-slate-400">上次成功 {new Date(session.lastSuccessAt).toLocaleString('zh-CN', { hour12: false })}</div>}
+                    {session.lastCheckedAt && <div className="mt-1 text-[11px] text-slate-400">最后检测 {new Date(session.lastCheckedAt).toLocaleString('zh-CN', { hour12: false })}</div>}
+                  </div>
+                  <div className="mt-3 flex flex-wrap gap-1.5 border-t border-white/80 pt-3">
+                    <Button type="button" size="sm" variant="secondary" onClick={() => checkSession(session)} disabled={Boolean(busy) || Boolean(pendingProfileKey)} title="只检测登录状态，不抓取商品">
+                      <RefreshCw className={`h-3.5 w-3.5 ${busy === `check:${session.id}` ? 'animate-spin' : ''}`} />
+                      {busy === `check:${session.id}` ? '检测中' : '检测登录'}
+                    </Button>
+                    {session.cooldownUntil && new Date(session.cooldownUntil).getTime() > Date.now() && (
+                      <Button type="button" size="sm" variant="ghost" onClick={() => releaseCooldown(session)} disabled={Boolean(busy) || Boolean(pendingProfileKey)} title="登录未失效时手动恢复采价；再次触发验证会进入逐级冷却">
+                        <TimerReset className="h-3.5 w-3.5" />{busy === `release:${session.id}` ? '解除中' : '解除采集保护'}
+                      </Button>
+                    )}
+                    <Button type="button" size="sm" variant="ghost" onClick={() => reauthorizeSession(session)} disabled={session.source !== 'taobao-browser' || Boolean(busy) || Boolean(pendingProfileKey)} title={session.source === 'taobao-browser' ? '扫码后更新当前账号，不新增重复卡片' : '手动 Cookie 账号请在左侧重新粘贴 Cookie'}>
+                      <KeyRound className="h-3.5 w-3.5" />重新授权
+                    </Button>
+                    <Button type="button" size="sm" variant="ghost" className="flex-1" onClick={() => onActivate(session)} disabled={Boolean(busy) || Boolean(pendingProfileKey)}>
+                      {session.enabled ?? session.active ? '停用采价' : '启用采价'}
+                    </Button>
+                  </div>
+                </> : <div className="rounded-md border border-dashed border-slate-200 bg-white/70 px-3 py-8 text-center text-xs text-slate-400">尚未授权</div>}
               </section>
-            )
+            ))
           })}
         </CardContent>
       </Card>

@@ -13,11 +13,12 @@ function verifiedSku(sku, channels) {
   };
 }
 
-test("Feishu cooldown switch defaults on and persists an explicit off state", () => {
-  assert.equal(publicFeishuConfig({}).cooldownEnabled, true);
-  const updated = updateFeishuConfig({ cooldownMinutes: 120 }, { cooldownEnabled: false });
-  assert.equal(updated.cooldownEnabled, false);
-  assert.equal(publicFeishuConfig(updated).cooldownEnabled, false);
+test("Feishu config removes legacy reminder cooldown fields", () => {
+  const updated = updateFeishuConfig({ cooldownEnabled: true, cooldownMinutes: 120 }, { enabled: true });
+  assert.equal("cooldownEnabled" in updated, false);
+  assert.equal("cooldownMinutes" in updated, false);
+  assert.equal("cooldownEnabled" in publicFeishuConfig(updated), false);
+  assert.equal("cooldownMinutes" in publicFeishuConfig(updated), false);
 });
 
 test("buildPriceCard renders every SKU and highlights triggered SKUs", () => {

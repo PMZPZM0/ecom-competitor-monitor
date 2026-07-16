@@ -22,19 +22,23 @@ import { HelpCenter } from './features/help/HelpCenter'
 import { UpdateDialog } from './features/updates/UpdateDialog'
 import type { AuthSession, Overview, Product, RunRecord, UpdateInfo } from './types/domain'
 
-const navItems = [
-  { id: 'guide', label: '使用说明（先看）', icon: BookOpen, title: '使用说明', subtitle: '第一次使用请从这里开始，按顺序完成账号授权、商品抓取和自动监控。' },
-  { id: 'auth', label: '账号授权', icon: Settings, title: '淘宝与飞书账号授权', subtitle: '第一步：授权采价账号，再按需连接飞书文档和机器人通知。' },
+const primaryNavItems = [
+  { id: 'guide', label: '使用说明书', icon: BookOpen, title: '使用说明书', subtitle: '第一次使用请从这里开始，按顺序完成账号授权、商品抓取和自动监控。' },
   { id: 'overview', label: '监控总览', icon: BarChart3, title: '竞品价格与 SKU 图监控', subtitle: '第二步：添加并核对商品，设置监控价、抓取计划和启用状态。' },
-  { id: 'queue', label: '监控队列', icon: ListChecks, title: '已监控商品队列', subtitle: '第三步：查看已启用商品的执行顺序、定时计划和运行状态。' },
   { id: 'capture-queue', label: '抓取队列', icon: ListTodo, title: '抓取任务队列', subtitle: '查看当前排队和运行进度，完成项自动移出，页面刷新不会取消任务。' },
   { id: 'categories', label: '监控分类', icon: FolderTree, title: '店铺与型号自动分类', subtitle: '按店铺和型号整理商品，再进行筛选、批量抓取或批量管理。' },
+  { id: 'queue', label: '监控队列', icon: ListChecks, title: '已监控商品队列', subtitle: '第三步：查看已启用商品的执行顺序、定时计划和运行状态。' },
   { id: 'records', label: '数据记录', icon: Database, title: '数据记录与监控设置', subtitle: '查看历史快照、导出 CSV，并调整后台监控间隔。' },
-  { id: 'analysis', label: 'AI 分析（功能开发中）', icon: Sparkles, title: 'AI 数据分析', subtitle: '基于历史抓取数据生成价格、SKU 和图片变化洞察。' },
+  { id: 'analysis', label: 'AI分析（功能开发中）', icon: Sparkles, title: 'AI 数据分析', subtitle: '基于历史抓取数据生成价格、SKU 和图片变化洞察。' },
 ] as const
+
+const authNavItem = { id: 'auth', label: '账号授权', icon: Settings, title: '淘宝与飞书账号授权', subtitle: '第一步：授权采价账号，再按需连接飞书文档和机器人通知。' } as const
+const navItems = [...primaryNavItems, authNavItem] as const
 
 type PageId = (typeof navItems)[number]['id']
 type FontSize = 'small' | 'standard' | 'large'
+type AccountType = 'normal' | 'gift' | 'vip88'
+const accountTypeLabels: Record<AccountType, string> = { normal: '普通', gift: '礼金', vip88: '88VIP' }
 const UPDATE_NOTIFIED_VERSION_KEY = 'ecommerce-monitor-update-notified-version'
 
 function App() {
@@ -49,6 +53,7 @@ function App() {
   const [analysisBusy, setAnalysisBusy] = useState(false)
   const [error, setError] = useState('')
   const [notice, setNotice] = useState('')
+  const [authGuideAccountType, setAuthGuideAccountType] = useState<AccountType | null>(null)
   const [fontSize, setFontSize] = useState<FontSize>(() => (window.localStorage.getItem('ecommerce-monitor-font-size') as FontSize) || 'standard')
   const [updateOpen, setUpdateOpen] = useState(false)
   const [updateInfo, setUpdateInfo] = useState<UpdateInfo | null>(null)
@@ -124,9 +129,23 @@ function App() {
     }
   }
 
-  async function handleAdd(payload: { name?: string; url: string; group?: string; accountType: 'normal' | 'gift' | 'vip88'; captureBuyerShows: boolean }) {
+  function hasCaptureAccount(accountType: AccountType) {
+    return overview?.authSessions.some((session) => (session.enabled ?? session.active) && session.loginStatus !== 'expired' && (session.accountType || 'normal') === accountType) === true
+  }
+
+  function showAuthGuide(accountType: AccountType) {
+    setNotice('')
     setError('')
-    setNotice(`正在添加商品，并立即抓取主图、SKU 图和价格${payload.captureBuyerShows ? '、买家秀' : ''}...`)
+    setAuthGuideAccountType(accountType)
+  }
+
+  async function handleAdd(payload: { name?: string; url: string; group?: string; accountType: 'normal' | 'gift' | 'vip88'; captureBuyerShows: boolean; captureMediaAssets: boolean }) {
+    if (!hasCaptureAccount(payload.accountType)) {
+      showAuthGuide(payload.accountType)
+      throw new Error(`尚未授权${accountTypeLabels[payload.accountType]}账号。`)
+    }
+    setError('')
+    setNotice(`正在添加商品，并立即抓取价格、800 主图和 SKU 图${payload.captureMediaAssets ? '、完整素材' : ''}${payload.captureBuyerShows ? '、买家秀' : ''}...`)
     try {
       const product = await api.addProduct(payload)
       setBusyProductId(product.id)
@@ -142,10 +161,14 @@ function App() {
     }
   }
 
-  async function addProductsBatch(payload: { urls: string[]; group: string; accountType: 'normal' | 'gift' | 'vip88'; captureBuyerShows: boolean }) {
+  async function addProductsBatch(payload: { urls: string[]; group: string; accountType: 'normal' | 'gift' | 'vip88'; captureBuyerShows: boolean; captureMediaAssets: boolean }) {
+    if (!hasCaptureAccount(payload.accountType)) {
+      showAuthGuide(payload.accountType)
+      throw new Error(`尚未授权${accountTypeLabels[payload.accountType]}账号。`)
+    }
     setBusy(true)
     setError('')
-    setNotice(`正在创建并抓取 ${payload.urls.length} 个新商品${payload.captureBuyerShows ? '（包含买家秀）' : ''}；同一账号按顺序执行，不同账号并行...`)
+    setNotice(`正在创建并抓取 ${payload.urls.length} 个新商品${payload.captureMediaAssets ? '（包含完整素材）' : ''}${payload.captureBuyerShows ? '（包含买家秀）' : ''}；同一账号按顺序执行，不同账号并行...`)
     try {
       const result = await api.addProductsBatch(payload)
       setNotice(result.message)
@@ -207,7 +230,22 @@ function App() {
     await refresh()
   }
 
+  async function saveProductMediaPreference(product: Product, captureMediaAssets: boolean) {
+    await api.updateProduct(product.id, { captureMediaAssets })
+    await refresh()
+  }
+
+  async function saveSkuMonitorPrice(product: Product, skuId: string, value: number | null) {
+    await api.updateSkuMonitorPrice(product.id, skuId, value)
+    await refresh()
+  }
+
   async function captureProduct(product: Product) {
+    const accountType = product.accountType || 'normal'
+    if (!hasCaptureAccount(accountType)) {
+      showAuthGuide(accountType)
+      throw new Error(`请先授权并启用${accountTypeLabels[accountType]}账号。`)
+    }
     setBusyProductId(product.id)
     try {
       const result = await api.captureProduct(product.id)
@@ -219,6 +257,11 @@ function App() {
   }
 
   async function retryBuyerShows(product: Product) {
+    const accountType = product.accountType || 'normal'
+    if (!hasCaptureAccount(accountType)) {
+      showAuthGuide(accountType)
+      throw new Error(`请先授权并启用${accountTypeLabels[accountType]}账号。`)
+    }
     setBusyProductId(product.id)
     try {
       const result = await api.retryBuyerShows(product.id)
@@ -254,6 +297,11 @@ function App() {
 
   async function captureProductsBatch(products: Product[], showFeedback = true) {
     if (!products.length) return
+    const missingAccountType = products.map((product) => product.accountType || 'normal').find((accountType) => !hasCaptureAccount(accountType))
+    if (missingAccountType) {
+      showAuthGuide(missingAccountType)
+      throw new Error(`请先授权并启用${accountTypeLabels[missingAccountType]}账号。`)
+    }
     setBusy(true)
     if (showFeedback) {
       setError('')
@@ -336,7 +384,7 @@ function App() {
     await refresh()
   }
 
-  async function saveFeishuSettings(payload: { enabled?: boolean; webhookUrl?: string; signingSecret?: string; clearSigningSecret?: boolean; cooldownEnabled?: boolean; cooldownMinutes?: number; documentEnabled?: boolean }) {
+  async function saveFeishuSettings(payload: { enabled?: boolean; webhookUrl?: string; signingSecret?: string; clearSigningSecret?: boolean; documentEnabled?: boolean }) {
     setError('')
     await api.updateFeishuSettings(payload)
     setNotice('飞书提醒配置已保存。')
@@ -368,8 +416,9 @@ function App() {
       products={data.products}
       totalProducts={data.products.length}
       onToggle={toggleProduct}
-      onToggleGlobal={() => toggleMonitorRunning(false)}
       onSchedule={saveProductSchedule}
+      onMediaPreference={saveProductMediaPreference}
+      onSaveSkuMonitorPrice={saveSkuMonitorPrice}
       onCapture={captureProduct}
       onRetryBuyerShows={retryBuyerShows}
       onDelete={deleteProduct}
@@ -379,10 +428,10 @@ function App() {
     />
   )
 
-  const productForm = <ProductForm sessions={data.authSessions} onAdd={handleAdd} />
+  const productForm = <ProductForm sessions={data.authSessions} onAdd={handleAdd} onRequireAuth={showAuthGuide} />
 
   const classificationPanel = (
-    <div className="space-y-5"><MonitorSettings monitor={data.monitor} feishu={data.feishu} onSave={saveMonitorSettings} /><MonitorClassification products={data.products} authSessions={data.authSessions} monitor={data.monitor} onToggle={toggleProduct} onToggleGlobal={() => toggleMonitorRunning(false)} onSchedule={saveProductSchedule} onCapture={captureProduct} onRetryBuyerShows={retryBuyerShows} onCaptureBatch={captureProductsBatch} onDelete={deleteProduct} onDeleteBatch={deleteProductsBatch} batchBusy={busy} busyProductId={busyProductId} /></div>
+    <div className="space-y-5"><MonitorSettings monitor={data.monitor} feishu={data.feishu} onSave={saveMonitorSettings} /><MonitorClassification products={data.products} authSessions={data.authSessions} monitor={data.monitor} onToggle={toggleProduct} onSchedule={saveProductSchedule} onMediaPreference={saveProductMediaPreference} onSaveSkuMonitorPrice={saveSkuMonitorPrice} onCapture={captureProduct} onRetryBuyerShows={retryBuyerShows} onCaptureBatch={captureProductsBatch} onDelete={deleteProduct} onDeleteBatch={deleteProductsBatch} batchBusy={busy} busyProductId={busyProductId} /></div>
   )
 
   const authPanel = (
@@ -446,7 +495,7 @@ function App() {
         <div className="space-y-5">
           <div className="grid grid-cols-2 items-stretch gap-4 max-[1180px]:grid-cols-1">
             {productForm}
-            <BatchCaptureCard sessions={data.authSessions} busy={busy} onRun={addProductsBatch} />
+            <BatchCaptureCard sessions={data.authSessions} busy={busy} onRun={addProductsBatch} onRequireAuth={showAuthGuide} />
           </div>
           <MonitorSettings monitor={data.monitor} feishu={data.feishu} onSave={saveMonitorSettings} />
           {productTable}
@@ -468,7 +517,7 @@ function App() {
           </div>
         </div>
         <nav className="flex-1 space-y-1 p-3">
-          {navItems.map((item) => (
+          {primaryNavItems.map((item) => (
             <button
               key={item.label}
               onClick={() => setActivePage(item.id)}
@@ -483,7 +532,18 @@ function App() {
             </button>
           ))}
         </nav>
-        <div className="border-t border-slate-200 p-3">
+        <div className="space-y-2 border-t border-slate-200 p-3">
+          <button
+            type="button"
+            onClick={() => setActivePage(authNavItem.id)}
+            aria-label={authNavItem.label}
+            className={`flex h-10 w-full items-center gap-3 rounded-md border px-3 text-sm font-medium shadow-sm ${
+              activePage === authNavItem.id ? 'border-blue-600 bg-blue-600 text-white' : 'border-blue-200 bg-blue-50 text-blue-700 hover:bg-blue-100'
+            }`}
+          >
+            <authNavItem.icon className="h-4 w-4" />
+            <span className="nav-label">{authNavItem.label}</span>
+          </button>
           <button type="button" aria-label={updateInfo?.updateAvailable ? `发现新版本 v${updateInfo.latestVersion}` : `检查更新，当前版本 v${data.runtime.version}`} onClick={() => { setUpdateOpen(true); if (!updateInfo && !updateChecking) checkUpdates(false).catch(() => undefined) }} className={`flex min-h-11 w-full items-center gap-3 rounded-md border px-3 py-2 text-left text-sm ${updateInfo?.updateAvailable ? 'border-emerald-200 bg-emerald-50 text-emerald-800' : 'border-slate-200 bg-slate-50 text-slate-600 hover:bg-blue-50 hover:text-blue-700'}`}>
             <span className="relative shrink-0"><CloudDownload className="h-4 w-4" />{updateInfo?.updateAvailable && <span className="absolute -right-1 -top-1 h-2 w-2 rounded-full bg-emerald-500" />}</span>
             <span className="nav-label min-w-0"><span className="block truncate font-medium">{updateInfo?.updateAvailable ? `发现新版本 v${updateInfo.latestVersion}` : '检查软件更新'}</span><span className="mt-0.5 block text-xs opacity-70">当前 v{data.runtime.version}</span></span>
@@ -522,6 +582,23 @@ function App() {
           {renderPage()}
         </div>
       </main>
+      {authGuideAccountType && (
+        <div className="fixed inset-0 z-[90] flex items-center justify-center bg-slate-950/35 p-4" role="dialog" aria-modal="true" aria-labelledby="auth-guide-title">
+          <div className="w-full max-w-md rounded-lg bg-white p-5 shadow-2xl">
+            <div className="flex items-start justify-between gap-4">
+              <div className="flex items-start gap-3">
+                <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-md bg-blue-50 text-blue-700"><Settings className="h-5 w-5" /></div>
+                <div><h2 id="auth-guide-title" className="text-lg font-semibold text-slate-950">先完成账号授权</h2><p className="mt-1 text-sm leading-6 text-slate-600">当前没有可用的{accountTypeLabels[authGuideAccountType]}账号。授权并检测在线后，再开始抓取商品。</p></div>
+              </div>
+              <button type="button" className="inline-flex h-8 w-8 shrink-0 items-center justify-center rounded text-slate-400 hover:bg-slate-100 hover:text-slate-700" onClick={() => setAuthGuideAccountType(null)} aria-label="关闭账号授权引导" title="关闭"><X className="h-4 w-4" /></button>
+            </div>
+            <div className="mt-5 flex justify-end gap-2">
+              <Button type="button" variant="secondary" onClick={() => setAuthGuideAccountType(null)}>稍后设置</Button>
+              <Button type="button" onClick={() => { setAuthGuideAccountType(null); setActivePage('auth') }}><Settings className="h-4 w-4" />去账号授权</Button>
+            </div>
+          </div>
+        </div>
+      )}
       {updateOpen && <UpdateDialog currentVersion={data.runtime.version} info={updateInfo} checking={updateChecking} error={updateError} onCheck={() => checkUpdates(false)} onClose={() => setUpdateOpen(false)} />}
     </div>
   )

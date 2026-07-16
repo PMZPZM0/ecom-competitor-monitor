@@ -129,15 +129,14 @@ export function HelpCenter({ onNavigate }: { onNavigate: (page: 'auth' | 'overvi
         <Section id="guide-feishu" title="飞书文档与机器人提醒" summary="文档每次写入，机器人只在低于监控价时提醒" icon={BellRing}>
           <div className="flex items-start gap-3"><BellRing className="mt-1 h-5 w-5 shrink-0 text-blue-600" /><p>在“账号授权”完成飞书扫码授权后，可创建价格文档；群机器人需要在飞书群中创建自定义机器人，再将 Webhook 和可选签名密钥填入软件。</p></div>
           <Checklist items={[
-            '飞书文档：每次成功抓取后写入店铺、型号、SKU 和各类价格，不受机器人提醒冷却影响。',
-            '机器人提醒：仅在某个 SKU 的有效价格低于该 SKU 监控价时发送。',
-            '提醒冷却只抑制同一商品、同一 SKU 的重复消息，不会暂停抓取、趋势记录或文档同步。',
+            '飞书文档：每次成功抓取后写入店铺、型号、SKU 和各类价格。',
+            '机器人提醒：某个 SKU 的有效价格每次严格低于该 SKU 监控价时都会发送。',
             '保存配置后先点击“发送测试”，确认机器人可达，再等待真实低价触发。',
           ]} />
         </Section>
 
         <Section id="guide-media" title="素材包与买家秀" summary="预览、单独下载和 ZIP 打包的使用方法" icon={Download}>
-          <div className="flex items-start gap-3"><Download className="mt-1 h-5 w-5 shrink-0 text-blue-600" /><p>素材包按 800 主图、750 主图、SKU 图、详情图和真实视频分类打包。买家秀可预览图片、视频和文案，也可单条或批量下载。</p></div>
+          <div className="flex items-start gap-3"><Download className="mt-1 h-5 w-5 shrink-0 text-blue-600" /><p>默认只抓价格、800 主图和 SKU 图。需要 750 主图、详情图、视频及素材包下载时，先勾选“抓取完整素材”；买家秀是另一项独立开关，可单独抓取、预览和下载。</p></div>
           <Checklist items={['新增商品时按需勾选“同时抓取买家秀”；不需要时关闭可缩短抓取时间。', '买家秀未开启或抓取失败时，仍可使用“仅重试买家秀”，不会重新计算价格或覆盖 SKU 数据。', '本次失败但历史曾成功时，预览继续显示上次有效缓存，并明确标注缓存状态。', '生成 ZIP 时等待状态变为“下载已开始”后再关闭软件。', '没有真实视频或媒体评价时不会生成占位内容。']} />
         </Section>
 
@@ -157,7 +156,7 @@ export function HelpCenter({ onNavigate }: { onNavigate: (page: 'auth' | 'overvi
               ['抓不到价格或价格不一致', '确认商品链接和 SKU → 检查普通账号在线 → 检查账号类型 → 打开核对价格 → 重新抓取。'],
               ['买家秀只有文字或数量很少', '打开买家秀预览查看状态 → 点击仅重试买家秀 → 检查账号登录 → 保留历史成功缓存。'],
               ['计划不执行', '检查页面顶部全局自动监控 → 检查本商品已启用 → 检查开始时间和周期 → 到监控队列查看下次时间。'],
-              ['飞书没有消息', '发送测试 → 检查 SKU 监控价 → 确认本次价格低于阈值 → 检查提醒开关和冷却。'],
+              ['飞书没有消息', '发送测试 → 检查 SKU 监控价 → 确认本次有效价格严格低于阈值 → 检查自动提醒开关。'],
               ['账号检测正常但商品要求登录', '该商品可能出现临时登录跳转或平台验证；先重新授权对应账号，再单品重试，不要降低价格验证规则。'],
               ['macOS 提示已损坏或运行很慢', '“已损坏”表示旧包缺少 Apple 签名与公证，请下载最新的 mac-arm64 安装包；可信旧包的临时处理命令见完整使用说明。首次浏览器授权会较慢，避免同时启动多个抓取任务。'],
             ].map(([title, text]) => <details key={title} className="group border-b border-slate-200 pb-3"><summary className="cursor-pointer list-none font-semibold text-slate-900">{title}</summary><p className="mt-2 text-slate-600">{text}</p></details>)}

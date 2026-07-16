@@ -1,4 +1,4 @@
-import { BellRing, CalendarClock, Check, CircleAlert, CircleCheck, Coins, Copy, Download, ExternalLink, Images, LoaderCircle, PauseCircle, PlayCircle, ReceiptText, RotateCw, Save, ShieldCheck, TimerReset, Trash2 } from 'lucide-react'
+import { Archive, BellRing, CircleAlert, CircleCheck, Download, ExternalLink, Images, LoaderCircle, PauseCircle, PlayCircle, ReceiptText, RotateCw, Save, ShieldCheck, TimerReset, Trash2 } from 'lucide-react'
 import { lazy, Suspense, useEffect, useRef, useState } from 'react'
 import { Badge } from '../../components/ui/badge'
 import { Button } from '../../components/ui/button'
@@ -7,7 +7,7 @@ import { downloadFile } from '../../lib/download'
 import { currency, timeAgo } from '../../lib/utils'
 import { normalizeProductUrlIfPossible } from '../../lib/productUrl'
 import type { Overview, Product, Snapshot } from '../../types/domain'
-import { BuyerShowDialog, ImageThumb, ShopLogo, VideoLink, type Preview } from './productDisplay'
+import { BuyerShowDialog, ImageThumb, VideoLink, type Preview } from './productDisplay'
 import { DiscountDetailDialog } from './DiscountDetailDialog'
 import { PriceVerificationDialog } from './PriceVerificationDialog'
 import { formatProtectionCountdown } from './captureProtection'
@@ -25,7 +25,6 @@ import {
   normalPriceForSku,
   publicPriceLabelForSku,
   priceLayersForSku,
-  productDetailImages,
   productImages,
   productItemId,
   productModel,
@@ -42,8 +41,9 @@ type Props = {
   product: Product
   monitor: Overview['monitor']
   onToggle: (product: Product) => Promise<void>
-  onToggleGlobal: () => Promise<void>
   onSchedule: (product: Product, mode: NonNullable<Product['monitorScheduleMode']>, intervalMinutes: number, monitorStartAt: string | null) => Promise<void>
+  onMediaPreference: (product: Product, captureMediaAssets: boolean) => Promise<void>
+  onSaveSkuMonitorPrice: (product: Product, skuId: string, value: number | null) => Promise<void>
   onCapture: (product: Product) => Promise<Product | void>
   onRetryBuyerShows: (product: Product) => Promise<Product>
   onDelete: (product: Product) => Promise<void>
@@ -71,7 +71,7 @@ function CaptureStatus({ product }: { product: Product }) {
   const anonymous = snapshot?.accessMode === 'anonymous'
 
   return (
-    <div className="rounded-md bg-slate-50 p-3">
+    <div className="mt-3 border-t border-slate-100 pt-3">
       <div className="flex items-center justify-between gap-3">
         <div className="text-xs font-medium text-slate-700">最近抓取</div>
         <Badge className={product.lastStatus === 'error' ? 'border-red-100 bg-red-50 text-red-700' : anonymous ? 'border-amber-100 bg-amber-50 text-amber-700' : ''}>
@@ -91,12 +91,12 @@ function CaptureStatus({ product }: { product: Product }) {
   )
 }
 
-function SkuPricePanel({ product, snapshots, showTrend, onPreview, onSaveSkuMonitorPrice }: { product: Product; snapshots: Snapshot[]; showTrend: boolean; onPreview: (preview: Preview) => void; onSaveSkuMonitorPrice: (skuId: string, value: number | null) => Promise<void> }) {
+function SkuPricePanel({ product, snapshots, showTrend, onPreview, onSaveSkuMonitorPrice, allowMediaDownload }: { product: Product; snapshots: Snapshot[]; showTrend: boolean; onPreview: (preview: Preview) => void; onSaveSkuMonitorPrice: (skuId: string, value: number | null) => Promise<void>; allowMediaDownload: boolean }) {
   const [copiedSkuId, setCopiedSkuId] = useState('')
   const [copiedSkuNameId, setCopiedSkuNameId] = useState('')
   const [detailSku, setDetailSku] = useState<SkuPrice | null>(null)
   const [monitorPriceDrafts, setMonitorPriceDrafts] = useState<Record<string, string>>({})
-  const [savingMonitorSkuId, setSavingMonitorSkuId] = useState('')
+  const [monitorPriceStatuses, setMonitorPriceStatuses] = useState<Record<string, 'saving' | 'saved' | 'error'>>({})
   const snapshot = product.lastSnapshot
   const anonymous = snapshot?.accessMode === 'anonymous'
   const skuPrices = snapshot?.skuPrices || []
@@ -121,22 +121,48 @@ function SkuPricePanel({ product, snapshots, showTrend, onPreview, onSaveSkuMoni
       window.alert('监控价必须大于 0，或清空关闭该 SKU 预警。')
       return
     }
-    setSavingMonitorSkuId(skuId)
+    const currentValue = product.skuMonitorPrices?.[skuId] ?? null
+    if (value === currentValue) {
+      setMonitorPriceDrafts((current) => {
+        const next = { ...current }
+        delete next[skuId]
+        return next
+      })
+      return
+    }
+    setMonitorPriceStatuses((current) => ({ ...current, [skuId]: 'saving' }))
     try {
       await onSaveSkuMonitorPrice(skuId, value)
-    } finally {
-      setSavingMonitorSkuId('')
+      setMonitorPriceDrafts((current) => {
+        const next = { ...current }
+        delete next[skuId]
+        return next
+      })
+      setMonitorPriceStatuses((current) => ({ ...current, [skuId]: 'saved' }))
+    } catch (error) {
+      setMonitorPriceStatuses((current) => ({ ...current, [skuId]: 'error' }))
+      window.alert(error instanceof Error ? error.message : '监控价保存失败，请重试。')
     }
   }
 
+  function updateMonitorPriceDraft(skuId: string, value: string) {
+    setMonitorPriceDrafts((current) => ({ ...current, [skuId]: value }))
+    setMonitorPriceStatuses((current) => {
+      if (!current[skuId]) return current
+      const next = { ...current }
+      delete next[skuId]
+      return next
+    })
+  }
+
   return (
-    <div className="min-w-0 self-start bg-slate-50/70 p-3">
+    <div className="min-w-0 self-start">
       {showTrend && (
         <Suspense fallback={<div className="mb-3 h-80 animate-pulse rounded-md bg-slate-100" />}>
           <SkuPriceTrend snapshots={snapshots} product={product} />
         </Suspense>
       )}
-      <div className="grid grid-cols-[repeat(auto-fit,minmax(350px,1fr))] gap-2.5">
+      <div className="grid gap-3" style={{ gridTemplateColumns: 'repeat(auto-fit, minmax(min(100%, 440px), 1fr))' }}>
         {skuPrices.map((sku) => {
           const allLayers = priceLayersForSku(sku)
           const originalLayer = allLayers.find((layer) => layer.kind === 'original' || layer.label === '标价')
@@ -176,14 +202,15 @@ function SkuPricePanel({ product, snapshots, showTrend, onPreview, onSaveSkuMoni
             seenPrices.add(key)
             return true
           }) : []
+          const monitorPriceStatus = monitorPriceStatuses[sku.skuId]
           return (
-          <div key={sku.skuId} className="rounded-md bg-white p-2.5 shadow-sm transition hover:shadow-md">
+          <div key={sku.skuId} className="rounded-xl border border-slate-200/70 bg-white p-3 shadow-[0_4px_14px_rgba(15,23,42,0.05)] transition-[border-color,box-shadow,transform] duration-200 hover:-translate-y-px hover:border-sky-200 hover:shadow-[0_8px_20px_rgba(15,23,42,0.08)]">
             <div className="grid grid-cols-[58px_minmax(0,1fr)] gap-2.5">
               <div className="group relative h-14 w-14 overflow-hidden rounded-md border border-slate-100 bg-slate-50">
                 <button type="button" className="h-full w-full" onClick={() => sku.image && onPreview({ src: sku.image, title: sku.name })}>
                   {sku.image ? <img src={sku.image} alt="" loading="lazy" decoding="async" className="h-full w-full object-contain" /> : <span className="flex h-full items-center justify-center text-xs text-slate-400">无图</span>}
                 </button>
-                {sku.image && (
+                {sku.image && allowMediaDownload && (
                   <a href={downloadHref(sku.image, `${sku.skuId}_${sku.name}_SKU图`)} className="absolute bottom-0 right-0 inline-flex h-5 w-5 items-center justify-center rounded-tl bg-slate-950/75 text-white hover:bg-emerald-600" title="下载 SKU 图（JPG）">
                     <Download className="h-3 w-3" />
                   </a>
@@ -191,10 +218,7 @@ function SkuPricePanel({ product, snapshots, showTrend, onPreview, onSaveSkuMoni
               </div>
               <div className="min-w-0">
                 <div className="flex h-[18px] min-w-0 items-center gap-1 text-xs leading-[18px] text-slate-700">
-                  <span className="min-w-0 flex-1 truncate" title={sku.name}>{sku.name}</span>
-                  <button type="button" className="inline-flex h-4 w-4 shrink-0 items-center justify-center rounded text-slate-400 hover:bg-slate-100 hover:text-slate-700" title="复制完整 SKU 名称" onClick={() => copySkuName(sku)}>
-                    {copiedSkuNameId === sku.skuId ? <Check className="h-3 w-3 text-emerald-600" /> : <Copy className="h-3 w-3" />}
-                  </button>
+                  <button type="button" className={`flex min-w-0 flex-1 items-center gap-1.5 text-left transition hover:text-sky-700 ${copiedSkuNameId === sku.skuId ? 'text-emerald-700' : ''}`} title="点击复制完整 SKU 名称" onClick={() => copySkuName(sku)}><span className="min-w-0 flex-1 truncate">{sku.name}</span>{copiedSkuNameId === sku.skuId && <span className="shrink-0 text-[11px]">已复制</span>}</button>
                 </div>
                 <div className="mt-0.5 flex h-5 min-w-0 items-center gap-1">
                   {originalLayer && <span className="min-w-0 truncate whitespace-nowrap text-xs text-slate-400">标价 {currency(originalLayer.value)}</span>}
@@ -209,10 +233,7 @@ function SkuPricePanel({ product, snapshots, showTrend, onPreview, onSaveSkuMoni
                   </button>
                 </div>
                 <div className="mt-1 flex min-w-0 items-center gap-1 text-xs text-slate-400">
-                  <span className="min-w-0 truncate">SKU ID {sku.skuId}</span>
-                  <button type="button" className="inline-flex h-4 w-4 shrink-0 items-center justify-center rounded hover:bg-slate-100 hover:text-slate-700" title="复制 SKU ID" onClick={() => copySkuId(sku.skuId)}>
-                    {copiedSkuId === sku.skuId ? <Check className="h-3 w-3 text-emerald-600" /> : <Copy className="h-3 w-3" />}
-                  </button>
+                  <button type="button" className={`min-w-0 truncate text-left transition hover:text-sky-700 ${copiedSkuId === sku.skuId ? 'text-emerald-700' : ''}`} title="点击复制 SKU ID" onClick={() => copySkuId(sku.skuId)}>SKU ID {sku.skuId}{copiedSkuId === sku.skuId ? ' · 已复制' : ''}</button>
                   {(typeof sku.quantity === 'number' || sku.quantityText) && (
                     <span className="ml-auto shrink-0 rounded bg-slate-100 px-1.5 py-0.5 text-xs text-slate-500" title="来源于淘宝买家商品页，受账号、收货地区、活动、限购及平台展示上限影响，不等于商家后台仓库库存。">
                       {typeof sku.quantity === 'number' ? `前台可售 ${sku.quantity}（参考）` : `前台状态 ${sku.quantityText}`}
@@ -260,8 +281,8 @@ function SkuPricePanel({ product, snapshots, showTrend, onPreview, onSaveSkuMoni
             <div className="mt-2 flex h-9 items-center gap-1.5 rounded bg-amber-50 px-2">
               <BellRing className="h-3.5 w-3.5 shrink-0 text-amber-600" />
               <span className="shrink-0 text-xs font-medium text-amber-700">监控价</span>
-              <input type="number" min="0" step="0.01" value={monitorPriceDrafts[sku.skuId] ?? (product.skuMonitorPrices?.[sku.skuId]?.toString() || '')} onChange={(event) => setMonitorPriceDrafts((current) => ({ ...current, [sku.skuId]: event.target.value }))} placeholder="未设置" className="h-6 min-w-0 flex-1 bg-transparent text-xs text-amber-900 outline-none placeholder:text-amber-500" title="低于此价格时提醒飞书，清空关闭该 SKU 预警" />
-              <button type="button" className="inline-flex h-6 w-6 shrink-0 items-center justify-center rounded text-amber-700 hover:bg-amber-100 disabled:opacity-60" title="保存 SKU 监控价" onClick={() => saveSkuMonitorPrice(sku.skuId)} disabled={savingMonitorSkuId === sku.skuId}><Save className="h-3.5 w-3.5" /></button>
+              <input type="number" min="0.01" step="0.01" value={monitorPriceDrafts[sku.skuId] ?? (product.skuMonitorPrices?.[sku.skuId]?.toString() || '')} onChange={(event) => updateMonitorPriceDraft(sku.skuId, event.target.value)} onBlur={() => void saveSkuMonitorPrice(sku.skuId)} onKeyDown={(event) => { if (event.key === 'Enter') { event.preventDefault(); event.currentTarget.blur() } }} disabled={monitorPriceStatus === 'saving'} placeholder="未设置" className="h-6 min-w-0 flex-1 bg-transparent text-xs text-amber-900 outline-none placeholder:text-amber-500 disabled:opacity-60" title="低于此价格时提醒飞书；离开输入框自动保存，清空后关闭该 SKU 预警" />
+              <span className={`flex w-14 shrink-0 items-center justify-end gap-1 text-[11px] ${monitorPriceStatus === 'error' ? 'text-red-600' : 'text-amber-700'}`} aria-live="polite">{monitorPriceStatus === 'saving' ? <><LoaderCircle className="h-3.5 w-3.5 animate-spin" />保存中</> : monitorPriceStatus === 'saved' ? <><CircleCheck className="h-3.5 w-3.5" />已保存</> : monitorPriceStatus === 'error' ? <><CircleAlert className="h-3.5 w-3.5" />失败</> : null}</span>
             </div>
           </div>
           )
@@ -290,24 +311,23 @@ function CaptureButton({ busy, captureProtectionUntil, onCapture }: { busy?: boo
   }, [captureProtectionUntil])
 
   return (
-    <Button type="button" onClick={onCapture} disabled={busy || protectionRemaining > 0} className="shadow-sm" title={protectionRemaining > 0 ? '本软件设置的采集频率保护倒计时，不代表淘宝账号触发风控。' : '抓取当前商品'}>
+    <Button type="button" onClick={onCapture} disabled={busy || protectionRemaining > 0} className="h-9 rounded-lg px-3 shadow-sm shadow-blue-200/60 active:translate-y-px" title={protectionRemaining > 0 ? '本软件设置的采集频率保护倒计时，不代表淘宝账号触发风控。' : '抓取当前商品'}>
       {protectionRemaining > 0 ? <TimerReset className="h-4 w-4" /> : <RotateCw className="h-4 w-4" />}
       {busy ? '抓取中' : protectionRemaining > 0 ? `采集保护 ${formatProtectionCountdown(protectionRemaining)}` : '抓取'}
     </Button>
   )
 }
 
-export function ProductMonitorCard({ product, monitor, onToggle, onToggleGlobal, onSchedule, onCapture, onRetryBuyerShows, onDelete, busy, onPreview, compactContext = false, captureProtectionUntil }: Props) {
+export function ProductMonitorCard({ product, monitor, onToggle, onSchedule, onMediaPreference, onSaveSkuMonitorPrice: persistSkuMonitorPrice, onCapture, onRetryBuyerShows, onDelete, busy, onPreview, compactContext = false, captureProtectionUntil }: Props) {
   const cardRef = useRef<HTMLElement | null>(null)
   const [trendVisible, setTrendVisible] = useState(false)
-  const [copiedTitle, setCopiedTitle] = useState(false)
   const [copiedItemId, setCopiedItemId] = useState(false)
   const [copiedProductUrl, setCopiedProductUrl] = useState(false)
   const [openingProduct, setOpeningProduct] = useState(false)
   const [syncingFeishu, setSyncingFeishu] = useState(false)
   const [togglingMonitor, setTogglingMonitor] = useState(false)
-  const [togglingGlobalMonitor, setTogglingGlobalMonitor] = useState(false)
   const [savingSchedule, setSavingSchedule] = useState(false)
+  const [savingMediaPreference, setSavingMediaPreference] = useState(false)
   const [buyerShowOpen, setBuyerShowOpen] = useState(false)
   const [priceVerificationOpen, setPriceVerificationOpen] = useState(false)
   const [retryingBuyerShows, setRetryingBuyerShows] = useState(false)
@@ -319,9 +339,10 @@ export function ProductMonitorCard({ product, monitor, onToggle, onToggleGlobal,
   const [scheduleDateDraft, setScheduleDateDraft] = useState(() => scheduleInputParts(product.monitorStartAt, product.nextMonitorAt, initialIntervalMinutes).date)
   const [scheduleTimeDraft, setScheduleTimeDraft] = useState(() => scheduleInputParts(product.monitorStartAt, product.nextMonitorAt, initialIntervalMinutes).time)
   const [snapshots, setSnapshots] = useState<Snapshot[]>([])
-  const { primary, gallery } = productImages(product)
-  const detailImages = productDetailImages(product)
-  const videos = productVideos(product)
+  const captureMediaAssets = product.captureMediaAssets === true
+  const { primary, gallery: capturedGallery } = productImages(product)
+  const gallery = captureMediaAssets ? capturedGallery : []
+  const videos = captureMediaAssets ? productVideos(product) : []
   const buyerShowCapture = product.lastSnapshot?.buyerShowCapture
   const currentBuyerShows = (product.lastSnapshot?.buyerShows || []).filter((item) => item.text || item.images?.length || item.videoUrls?.length)
   const cachedBuyerShows = product.lastSnapshot?.buyerShowCachedItems || []
@@ -334,21 +355,16 @@ export function ProductMonitorCard({ product, monitor, onToggle, onToggleGlobal,
         : buyerShowCapture?.status === 'confirmed-empty' ? '本次确认无买家秀'
           : buyerShowCapture?.status === 'failed' ? `本次买家秀未获取 · ${buyerShowCapture.failureCode || '未知原因'}`
             : buyerShowCapture?.status === 'skipped' ? '已关闭自动抓取买家秀' : ''
-  const skuDisplayImages = Array.from(new Map((product.lastSnapshot?.skuPrices || [])
-    .filter((sku) => sku.image)
-    .map((sku) => [sku.image as string, { src: sku.image as string, title: sku.name }])).values())
   const title = productTitle(product)
   const shopName = productShopName(product)
-  const shopLogo = product.shopLogo || product.lastSnapshot?.shopLogo || ''
   const model = productModel(product)
   const itemId = productItemId(product)
-  const coinSkuCount = (product.lastSnapshot?.skuPrices || []).filter((sku) => verifiedPriceChannel(sku, 'coin') && coinBenefitForSku(sku).available).length
   const accountTypeLabel = product.accountType === 'gift' ? '礼金账号' : product.accountType === 'vip88' ? '88VIP账号' : '普通账号'
   const accountTypeClass = product.accountType === 'gift'
-    ? 'border-amber-200 bg-amber-50 text-amber-700'
+    ? 'bg-orange-500 text-white'
     : product.accountType === 'vip88'
-      ? 'border-violet-200 bg-violet-50 text-violet-700'
-      : 'border-sky-200 bg-sky-50 text-sky-700'
+      ? 'bg-violet-600 text-white'
+      : 'bg-sky-600 text-white'
 
   useEffect(() => {
     if (trendVisible) return undefined
@@ -412,18 +428,19 @@ export function ProductMonitorCard({ product, monitor, onToggle, onToggleGlobal,
   }
 
   async function captureNow() {
-    showOperation({ key: 'capture', tone: 'progress', message: product.captureBuyerShows === false ? '正在抓取价格、SKU 和素材，请保持软件运行。' : '正在抓取价格、SKU、素材和买家秀，请保持软件运行。' })
+    const captureScope = `价格、800 主图和 SKU 图${captureMediaAssets ? '、750 主图、详情图和视频' : ''}`
+    showOperation({ key: 'capture', tone: 'progress', message: `正在抓取${captureScope}${product.captureBuyerShows === false ? '' : '、买家秀'}，请保持软件运行。` })
     try {
       const captured = await onCapture(product)
       const buyerCapture = captured?.lastSnapshot?.buyerShowCapture
       const cachedCount = captured?.lastSnapshot?.buyerShowCachedItems?.length || 0
       const message = buyerCapture?.status === 'skipped'
-        ? '价格与素材已更新；已按商品设置跳过买家秀。'
+        ? `${captureScope}已更新；已按商品设置跳过买家秀。`
         : buyerCapture?.status === 'failed'
         ? cachedCount > 0
-          ? `价格与素材已更新；买家秀本次失败，继续展示 ${cachedCount} 条历史成功数据。`
-          : `价格与素材已更新；买家秀本次未获取（${buyerCapture.failureCode || '未知原因'}）。`
-        : `抓取完成，价格、素材和 ${captured?.lastSnapshot?.buyerShows?.length || 0} 条买家秀已更新。`
+          ? `${captureScope}已更新；买家秀本次失败，继续展示 ${cachedCount} 条历史成功数据。`
+          : `${captureScope}已更新；买家秀本次未获取（${buyerCapture.failureCode || '未知原因'}）。`
+        : `抓取完成，${captureScope}和 ${captured?.lastSnapshot?.buyerShows?.length || 0} 条买家秀已更新。`
       showOperation({ key: 'capture', tone: buyerCapture?.status === 'failed' ? 'error' : 'success', message }, buyerCapture?.status === 'failed' ? 9000 : 5000)
     } catch (error) {
       showOperation({ key: 'capture', tone: 'error', message: error instanceof Error ? error.message : '抓取失败，请检查账号状态。' }, 9000)
@@ -451,6 +468,23 @@ export function ProductMonitorCard({ product, monitor, onToggle, onToggleGlobal,
     }
   }
 
+  async function changeMediaPreference(enabled: boolean) {
+    setSavingMediaPreference(true)
+    showOperation({ key: 'media-preference', tone: 'progress', message: enabled ? '正在开启完整素材抓取...' : '正在关闭完整素材抓取和下载...' })
+    try {
+      await onMediaPreference(product, enabled)
+      showOperation({
+        key: 'media-preference',
+        tone: 'success',
+        message: enabled ? '完整素材已开启；下次抓取会获取 750 主图、详情图和视频。' : '完整素材已关闭；后续只抓价格、800 主图和 SKU 图。',
+      }, 6000)
+    } catch (error) {
+      showOperation({ key: 'media-preference', tone: 'error', message: error instanceof Error ? error.message : '完整素材设置保存失败。' }, 9000)
+    } finally {
+      setSavingMediaPreference(false)
+    }
+  }
+
   async function toggleMonitoring() {
     setTogglingMonitor(true)
     showOperation({ key: 'monitor', tone: 'progress', message: product.enabled ? '正在暂停本商品自动监控...' : '正在启用本商品自动监控...' })
@@ -470,32 +504,6 @@ export function ProductMonitorCard({ product, monitor, onToggle, onToggleGlobal,
     } finally {
       setTogglingMonitor(false)
     }
-  }
-
-  async function enableGlobalMonitoring() {
-    if (monitor.running) return
-    setTogglingGlobalMonitor(true)
-    showOperation({ key: 'global-monitor', tone: 'progress', message: '正在开启全局自动监控...' })
-    try {
-      await onToggleGlobal()
-      showOperation({
-        key: 'global-monitor',
-        tone: 'success',
-        message: product.enabled
-          ? '全局自动监控已开启，本商品计划已开始执行。'
-          : '全局自动监控已开启；本商品仍处于暂停，启用本商品后才会执行。',
-      }, 7000)
-    } catch (error) {
-      showOperation({ key: 'global-monitor', tone: 'error', message: error instanceof Error ? error.message : '开启全局自动监控失败。' }, 9000)
-    } finally {
-      setTogglingGlobalMonitor(false)
-    }
-  }
-
-  async function copyTitle() {
-    await navigator.clipboard.writeText(title)
-    setCopiedTitle(true)
-    window.setTimeout(() => setCopiedTitle(false), 1200)
   }
 
   async function copyItemId() {
@@ -523,10 +531,7 @@ export function ProductMonitorCard({ product, monitor, onToggle, onToggleGlobal,
   }
 
   async function saveSkuMonitorPrice(skuId: string, value: number | null) {
-    const next = { ...(product.skuMonitorPrices || {}) }
-    if (value === null) delete next[skuId]
-    else next[skuId] = value
-    await api.updateProduct(product.id, { skuMonitorPrices: next, monitorPrice: null })
+    await persistSkuMonitorPrice(product, skuId, value)
   }
 
   async function syncFeishu() {
@@ -579,190 +584,98 @@ export function ProductMonitorCard({ product, monitor, onToggle, onToggleGlobal,
   return (
     <article
       ref={cardRef}
-      className={`product-monitor-card relative overflow-hidden rounded-md border bg-white p-4 pt-5 shadow-[0_5px_18px_rgba(15,23,42,0.08)] transition-shadow hover:shadow-[0_7px_22px_rgba(15,23,42,0.11)] ${product.enabled ? 'border-emerald-200' : 'border-slate-300'}`}
+      className={`product-monitor-card relative overflow-hidden rounded-xl border bg-white shadow-[0_8px_28px_rgba(15,23,42,0.07)] transition-[border-color,box-shadow] duration-200 hover:shadow-[0_12px_34px_rgba(15,23,42,0.1)] ${product.enabled ? 'border-emerald-200/90' : 'border-slate-200'}`}
       style={{ contentVisibility: 'auto', containIntrinsicSize: '1000px' }}
     >
-      <span aria-hidden="true" className={`absolute inset-x-0 top-0 h-1 ${product.enabled ? 'bg-emerald-500' : 'bg-slate-400'}`} />
-      <div className="flex min-w-0 items-start gap-3">
-        {!compactContext && <ShopLogo src={shopLogo} />}
-        <div className="min-w-0 flex-1">
-          <div className="flex flex-wrap items-center gap-x-4 gap-y-1.5">
-            {!compactContext && <div className="min-w-0 text-sm"><span className="mr-2 text-slate-400">店铺</span><span className="font-semibold text-emerald-700">{shopName}</span></div>}
-            {itemId && (
-              <div className="inline-flex items-center gap-1.5 text-sm text-slate-600">
-                <span className="text-slate-400">商品 ID</span>
-                <span className="font-medium tabular-nums text-slate-700">{itemId}</span>
-                <button type="button" className="inline-flex h-6 w-6 items-center justify-center rounded text-slate-400 hover:bg-slate-100 hover:text-slate-700" title="复制商品 ID" onClick={copyItemId}>
-                  {copiedItemId ? <Check className="h-3.5 w-3.5 text-emerald-600" /> : <Copy className="h-3.5 w-3.5" />}
-                </button>
-              </div>
-            )}
-          </div>
-          <div className="mt-1.5 flex items-start gap-2">
-            <div className="line-clamp-2 text-base font-medium leading-7 text-slate-950">{title}</div>
-            <button type="button" className="mt-1 inline-flex h-6 w-6 shrink-0 items-center justify-center rounded-md text-slate-400 hover:bg-slate-100 hover:text-slate-700" title="复制标题" onClick={copyTitle}>
-              {copiedTitle ? <Check className="h-3.5 w-3.5 text-emerald-600" /> : <Copy className="h-3.5 w-3.5" />}
-            </button>
-          </div>
-          <div className="mt-3 flex flex-wrap gap-2">
-            {!compactContext && <Badge className="border-sky-100 bg-sky-50 py-1.5 text-sm text-sky-700">型号 {model}</Badge>}
-            <Badge className="border-slate-200 bg-slate-50 py-1.5 text-sm text-slate-600">{product.group}</Badge>
-            <Badge className="border-emerald-100 bg-emerald-50 py-1.5 text-sm text-emerald-700">主图 1+{gallery.length}</Badge>
-            <Badge className="border-violet-100 bg-violet-50 py-1.5 text-sm text-violet-700">SKU 图 {skuDisplayImages.length}</Badge>
-            <Badge className="border-amber-100 bg-amber-50 py-1.5 text-sm text-amber-700">{videos.length} 个视频</Badge>
-            <button
-              type="button"
-              className="inline-flex h-8 items-center gap-1.5 rounded border border-sky-100 bg-sky-50 px-2.5 text-sm text-sky-700 hover:bg-sky-100 disabled:opacity-60"
-              title="使用独立的 Google Chrome 新窗口打开"
-              onClick={openProduct}
-              disabled={openingProduct}
-            >
-              <ExternalLink className="h-4 w-4" />
-              {openingProduct ? '打开中' : '打开商品'}
-            </button>
-            <button
-              type="button"
-              className="inline-flex h-8 w-8 items-center justify-center rounded border border-sky-100 bg-sky-50 text-sky-700 hover:bg-sky-100"
-              title="复制商品链接"
-              aria-label="复制商品链接"
-              onClick={copyProductUrl}
-            >
-              {copiedProductUrl ? <Check className="h-3.5 w-3.5 text-emerald-600" /> : <Copy className="h-3.5 w-3.5" />}
-            </button>
-          </div>
-        </div>
-        <div className="flex shrink-0 flex-col items-end gap-2">
-          <Badge className={`px-3 py-1.5 text-sm ${accountTypeClass}`}>{accountTypeLabel}</Badge>
-          {(product.accountType || 'normal') === 'normal' && (
-            <div className={`inline-flex items-center gap-1.5 text-sm ${coinSkuCount ? 'text-amber-700' : 'text-slate-400'}`} title="根据最近一次抓取的 SKU 淘金币价格和抵扣明细自动判断">
-              <Coins className="h-3.5 w-3.5 text-amber-600" />
-              {coinSkuCount ? `淘金币 ${coinSkuCount} 个 SKU` : '无淘金币'}
+      <span aria-hidden="true" className={`absolute inset-y-0 left-0 w-1 ${product.enabled ? 'bg-emerald-500' : 'bg-slate-300'}`} />
+      <header className="px-5 pb-4 pt-2">
+        <div className="product-monitor-header-grid min-w-0">
+          <div className="min-w-0">
+            <div className="flex min-w-0 flex-wrap items-center gap-x-3 gap-y-1">
+              <span className={`-ml-5 -mt-2 inline-flex h-8 items-center rounded-br-lg px-3 text-xs font-semibold shadow-sm ${accountTypeClass}`}>{accountTypeLabel}</span>
+              {!compactContext && <span className="min-w-0 truncate text-base font-semibold text-slate-800">{shopName}</span>}
             </div>
-          )}
-        </div>
-      </div>
+            <div className="mt-2 flex min-w-0 flex-wrap items-center gap-x-3 gap-y-1">
+              <h3 className="min-w-0 max-w-[620px] line-clamp-2 text-[1.05rem] font-semibold leading-7 text-slate-950">{title}</h3>
+              <div className="flex shrink-0 items-center gap-3 pt-0.5 text-sm">
+                <button type="button" className="inline-flex items-center gap-1.5 font-medium text-sky-700 transition hover:text-sky-900 disabled:opacity-60" title="使用当前商品账号的独立浏览器打开" onClick={openProduct} disabled={openingProduct}><ExternalLink className="h-4 w-4" />{openingProduct ? '打开中' : '打开商品'}</button>
+                <button type="button" className={`font-medium transition hover:text-sky-900 ${copiedProductUrl ? 'text-emerald-700' : 'text-sky-700'}`} title="复制精简后的商品链接" onClick={copyProductUrl}>{copiedProductUrl ? '链接已复制' : '复制链接'}</button>
+              </div>
+            </div>
+            <div className="mt-2.5 flex flex-wrap items-center gap-x-3 gap-y-2 text-xs text-slate-500">
+              {itemId && <button type="button" className={`font-medium tabular-nums transition hover:text-sky-700 ${copiedItemId ? 'text-emerald-700' : 'text-slate-600'}`} title="点击复制商品 ID" onClick={copyItemId}>商品 ID {itemId}{copiedItemId ? ' · 已复制' : ''}</button>}
+              {!compactContext && <span><span className="text-slate-400">型号</span><span className="ml-1.5 font-medium text-slate-700">{model}</span></span>}
+              <span className="h-3.5 w-px bg-slate-200" aria-hidden="true" />
+              <Button type="button" variant="secondary" size="sm" className="rounded-lg" onClick={() => setBuyerShowOpen(true)} disabled={!buyerShows.length} title={buyerShows.length ? `预览 ${buyerShows.length} 条有效买家秀` : '当前快照暂无有效买家秀，请重新抓取商品'}><Images className="h-4 w-4" />买家秀{buyerShows.length ? ` ${buyerShows.length}` : ''}</Button>
+              {buyerShowCapture?.status === 'failed' && <Button type="button" variant="secondary" size="sm" className="w-8 rounded-lg px-0" onClick={retryBuyerShows} disabled={retryingBuyerShows || operation?.tone === 'progress'} title="仅重试买家秀" aria-label="仅重试买家秀"><RotateCw className={`h-4 w-4 ${retryingBuyerShows ? 'animate-spin' : ''}`} /></Button>}
+              {buyerShows.length > 0 && <Button type="button" variant="secondary" size="sm" className="w-8 rounded-lg px-0" onClick={() => runDownload('buyer-shows', '正在整理买家秀图片、视频和文案并生成 ZIP...', downloadBuyerShowsHref(product.id), `${title}_买家秀.zip`)} disabled={operation?.tone === 'progress'} title="下载买家秀 ZIP" aria-label="下载买家秀 ZIP">{operation?.key === 'buyer-shows' && operation.tone === 'progress' ? <LoaderCircle className="h-4 w-4 animate-spin" /> : <Download className="h-4 w-4" />}</Button>}
+              <label className={`inline-flex h-8 cursor-pointer items-center gap-1.5 rounded-lg border px-2.5 text-xs font-medium transition ${captureMediaAssets ? 'border-blue-200 bg-blue-50 text-blue-700' : 'border-slate-200 bg-white text-slate-600 hover:bg-slate-50'}`} title="关闭时只抓价格、800 主图和 SKU 图，且不提供商品素材下载">
+                <input type="checkbox" checked={captureMediaAssets} onChange={(event) => changeMediaPreference(event.target.checked)} disabled={savingMediaPreference || operation?.tone === 'progress'} className="h-3.5 w-3.5 accent-blue-600" />
+                <Archive className="h-3.5 w-3.5" />完整素材
+              </label>
+              {captureMediaAssets && <Button type="button" variant="secondary" size="sm" className="w-8 rounded-lg px-0" onClick={() => runDownload('media', '正在整理主图、SKU 图、详情图和视频并生成素材包...', downloadMediaBundleHref(product.id), `${title}_素材包.zip`)} disabled={operation?.tone === 'progress'} title="下载完整素材包" aria-label="下载完整素材包">{operation?.key === 'media' && operation.tone === 'progress' ? <LoaderCircle className="h-4 w-4 animate-spin" /> : <Download className="h-4 w-4" />}</Button>}
+            </div>
+          </div>
 
-      <div className="mt-3 flex flex-wrap items-center justify-between gap-3 border-y border-slate-100 py-3">
-        <div className="flex flex-wrap items-center gap-2">
-          <Button type="button" variant="secondary" size="sm" onClick={() => setBuyerShowOpen(true)} disabled={!buyerShows.length} title={buyerShows.length ? `预览 ${buyerShows.length} 条有效买家秀` : '当前快照暂无有效买家秀，请重新抓取商品'}>
-            <Images className="h-4 w-4" />买家秀{buyerShows.length ? `（${buyerShows.length}）` : ''}
-          </Button>
-          {buyerShowCapture?.status === 'failed' && <Button type="button" variant="secondary" size="sm" onClick={retryBuyerShows} disabled={retryingBuyerShows || operation?.tone === 'progress'} title="只重新抓取买家秀，不改动价格、SKU 和素材"><RotateCw className={`h-4 w-4 ${retryingBuyerShows ? 'animate-spin' : ''}`} />{retryingBuyerShows ? '重试中' : '仅重试买家秀'}</Button>}
-          {buyerShows.length > 0 && <Button type="button" variant="secondary" size="sm" onClick={() => runDownload('buyer-shows', '正在整理买家秀图片、视频和文案并生成 ZIP...', downloadBuyerShowsHref(product.id), `${title}_买家秀.zip`)} disabled={operation?.tone === 'progress'}><Download className="h-4 w-4" />{operation?.key === 'buyer-shows' && operation.tone === 'progress' ? '生成中' : '下载买家秀'}</Button>}
-          <Button type="button" variant="secondary" size="sm" onClick={() => runDownload('media', '正在整理主图、SKU 图、详情图和视频并生成素材包...', downloadMediaBundleHref(product.id), `${title}_素材包.zip`)} disabled={operation?.tone === 'progress'}>
-            <Download className="h-4 w-4" />{operation?.key === 'media' && operation.tone === 'progress' ? '生成中' : '下载素材包'}
-          </Button>
+          <div className="product-monitor-command-deck min-w-0">
+            <div className="ml-auto flex flex-wrap items-center justify-end gap-1.5">
+              <Button type="button" variant="secondary" size="sm" className="h-9 rounded-lg shadow-sm active:translate-y-px" onClick={() => setPriceVerificationOpen(true)} disabled={!product.lastSnapshot?.skuPrices?.length} title="逐 SKU 核对价格证据、展示金额和计算公式"><ShieldCheck className="h-4 w-4" />核对价格</Button>
+              <Button type="button" variant="secondary" size="sm" className={`h-9 rounded-lg shadow-sm active:translate-y-px ${product.enabled ? 'border-amber-200 bg-amber-50 text-amber-800 hover:bg-amber-100' : 'border-emerald-600 bg-emerald-600 text-white hover:bg-emerald-700'}`} onClick={toggleMonitoring} disabled={togglingMonitor} title={!monitor.running ? '启用本商品计划；全局自动监控开启后执行' : product.enabled ? '暂停本商品定时监控' : '启用本商品定时监控'}>{product.enabled ? <PauseCircle className="h-4 w-4" /> : <PlayCircle className="h-4 w-4" />}{togglingMonitor ? '更新中' : product.enabled ? '暂停定时' : '启用定时'}</Button>
+              <Button type="button" variant="secondary" size="sm" className="h-9 rounded-lg shadow-sm active:translate-y-px" onClick={syncFeishu} disabled={syncingFeishu || !product.lastSnapshot}><BellRing className="h-4 w-4" />{syncingFeishu ? '同步中' : '同步飞书'}</Button>
+              <CaptureButton busy={busy} captureProtectionUntil={captureProtectionUntil} onCapture={captureNow} />
+              <Button type="button" variant="danger" size="sm" className="h-9 w-9 rounded-lg px-0 active:translate-y-px" onClick={() => onDelete(product)} title="删除商品" aria-label="删除商品"><Trash2 className="h-4 w-4" /></Button>
+            </div>
+            <div className="product-monitor-schedule-row mt-2 ml-auto flex flex-wrap items-center justify-end gap-2 text-sm text-slate-600">
+              <div className="inline-flex h-9 overflow-hidden rounded-lg bg-slate-100 p-0.5" role="radiogroup" aria-label="抓取计划模式">
+                <button type="button" role="radio" aria-checked={scheduleModeDraft === 'once'} onClick={() => setScheduleModeDraft('once')} className={`rounded-md px-2.5 text-xs font-medium transition ${scheduleModeDraft === 'once' ? 'bg-white text-slate-900 shadow-sm' : 'text-slate-500 hover:text-slate-800'}`}>单次</button>
+                <button type="button" role="radio" aria-checked={scheduleModeDraft === 'interval'} onClick={() => setScheduleModeDraft('interval')} className={`rounded-md px-2.5 text-xs font-medium transition ${scheduleModeDraft === 'interval' ? 'bg-white text-slate-900 shadow-sm' : 'text-slate-500 hover:text-slate-800'}`}>循环</button>
+              </div>
+              {scheduleModeDraft === 'once' ? <>
+                <label htmlFor={`monitor-date-${product.id}`} className="sr-only">监控日期</label>
+                <input id={`monitor-date-${product.id}`} type="date" value={scheduleDateDraft} onChange={(event) => setScheduleDateDraft(event.target.value)} className="h-9 w-[140px] rounded-lg border border-slate-200 bg-white px-2 text-xs text-slate-800 shadow-sm outline-none transition focus:border-sky-400 focus:ring-2 focus:ring-sky-100" />
+                <label htmlFor={`monitor-time-${product.id}`} className="sr-only">详细抓取时间</label>
+                <input id={`monitor-time-${product.id}`} type="time" step={60} value={scheduleTimeDraft} onChange={(event) => setScheduleTimeDraft(event.target.value)} className="h-9 w-[100px] rounded-lg border border-slate-200 bg-white px-2 text-xs text-slate-800 shadow-sm outline-none transition focus:border-sky-400 focus:ring-2 focus:ring-sky-100" />
+              </> : <label className="inline-flex h-9 items-center gap-1.5 text-xs text-slate-500">每<input type="number" min={30} max={1440} step={1} value={scheduleDraft} onChange={(event) => setScheduleDraft(event.target.value)} className="h-9 w-[76px] rounded-lg border border-slate-200 bg-white px-2 text-center text-xs text-slate-800 shadow-sm outline-none transition focus:border-sky-400 focus:ring-2 focus:ring-sky-100" aria-label="单品循环监控间隔" />分钟</label>}
+              <Button type="button" variant="secondary" size="sm" onClick={saveSchedule} disabled={savingSchedule} className="h-9 rounded-lg shadow-sm active:translate-y-px" title="保存本商品抓取计划">{savingSchedule ? <LoaderCircle className="h-4 w-4 animate-spin" /> : <Save className="h-4 w-4" />}{savingSchedule ? '保存中' : '保存计划'}</Button>
+            </div>
+          </div>
         </div>
-        <div className="ml-auto flex flex-wrap items-center justify-end gap-2">
-          <CaptureButton busy={busy} captureProtectionUntil={captureProtectionUntil} onCapture={captureNow} />
-          <Button type="button" variant="secondary" onClick={() => setPriceVerificationOpen(true)} disabled={!product.lastSnapshot?.skuPrices?.length} title="逐 SKU 核对价格证据、展示金额和计算公式"><ShieldCheck className="h-4 w-4" />核对价格</Button>
-          <Button type="button" variant="secondary" className={product.enabled ? 'border-amber-200 bg-amber-50 text-amber-800 hover:bg-amber-100' : 'border-emerald-600 bg-emerald-600 text-white hover:bg-emerald-700'} onClick={toggleMonitoring} disabled={togglingMonitor}>
-            {product.enabled ? <PauseCircle className="h-4 w-4" /> : <PlayCircle className="h-4 w-4" />}
-            {togglingMonitor ? '更新中' : product.enabled ? '暂停本商品' : '启用本商品'}
-          </Button>
-          <Button type="button" variant="secondary" onClick={syncFeishu} disabled={syncingFeishu || !product.lastSnapshot}>
-            <BellRing className="h-4 w-4" />{syncingFeishu ? '同步中' : '同步飞书'}
-          </Button>
-          <Button type="button" variant="danger" onClick={() => onDelete(product)} title="删除商品" aria-label="删除商品"><Trash2 className="h-4 w-4" /></Button>
-        </div>
-      </div>
+      </header>
       {(operation || busy) && (
-        <div className={`mt-2 flex items-center gap-2 rounded-md px-3 py-2 text-xs ${(operation?.tone === 'progress' || busy) ? 'bg-blue-50 text-blue-700' : operation?.tone === 'success' ? 'bg-emerald-50 text-emerald-700' : 'bg-red-50 text-red-700'}`} role="status" aria-live="polite">
+        <div className={`mx-5 mb-3 flex items-center gap-2 rounded-lg px-3 py-2.5 text-xs ${(operation?.tone === 'progress' || busy) ? 'bg-blue-50 text-blue-700' : operation?.tone === 'success' ? 'bg-emerald-50 text-emerald-700' : 'bg-red-50 text-red-700'}`} role="status" aria-live="polite">
           {(operation?.tone === 'progress' || busy) ? <LoaderCircle className="h-4 w-4 shrink-0 animate-spin" /> : operation?.tone === 'success' ? <CircleCheck className="h-4 w-4 shrink-0" /> : <CircleAlert className="h-4 w-4 shrink-0" />}
-          <span>{operation?.message || '正在抓取价格、素材和买家秀，请保持软件运行。'}</span>
+          <span>{operation?.message || '正在抓取商品数据，请保持软件运行。'}</span>
         </div>
       )}
 
-      <div className="mt-4 grid grid-cols-[310px_minmax(0,1fr)] gap-4 max-[1280px]:grid-cols-1">
-        <div className="min-w-0 space-y-3">
-          <div className="rounded-md bg-slate-50 p-2">
-            <div className="mb-2 flex items-center justify-between">
-              <div className="text-xs font-medium text-slate-700">主图素材</div>
-              <div className="text-xs text-slate-400">只显示 800 首图和前 5 张 750 主图</div>
-            </div>
-            <ImageThumb src={primary} title={`${title}-800主图第一张`} label="800 主图" className="h-[188px] bg-white" imageClassName="!aspect-auto h-full" onPreview={onPreview} />
-            <div className="mt-2 grid grid-cols-5 gap-1.5">
-              {gallery.map((image, index) => (
-                <ImageThumb
-                  key={image}
-                  src={image}
-                  title={`${title}-750主图-${index + 1}`}
-                  label={`${index + 1}`}
-                  className="h-[58px] bg-white"
-                  imageClassName="!aspect-auto h-full"
-                  onPreview={onPreview}
-                />
-              ))}
-            </div>
-          </div>
+      <div className="product-monitor-content gap-5 border-t border-slate-100 bg-slate-50/70 px-5 py-5">
+        <section className="min-w-0" aria-label="商品素材与抓取状态">
+          <ImageThumb src={primary} title={`${title}-800主图第一张`} label="800 主图" className="h-[210px] bg-white" imageClassName="!aspect-auto h-full" onPreview={onPreview} allowDownload={captureMediaAssets} />
+          {captureMediaAssets && gallery.length > 0 && <div className="mt-2 grid grid-cols-5 gap-1.5">
+            {gallery.map((image, index) => (
+              <ImageThumb
+                key={image}
+                src={image}
+                title={`${title}-750主图-${index + 1}`}
+                label={`${index + 1}`}
+                className="h-[54px] bg-white"
+                imageClassName="!aspect-auto h-full"
+                onPreview={onPreview}
+                allowDownload
+              />
+            ))}
+          </div>}
 
           {videos.length > 0 && (
-            <div className="rounded-md bg-amber-50/60 p-2">
-              <div className="mb-2 text-xs font-medium text-amber-700">视频素材</div>
+            <div className="mt-3">
+              <div className="mb-2 text-xs font-medium text-slate-600">视频</div>
               <div className="flex flex-wrap gap-2">{videos.map((video, index) => <VideoLink key={video} src={video} index={index} />)}</div>
             </div>
           )}
-
-          <div className="rounded-md bg-slate-50 p-2 text-xs text-slate-500">
-            下载包自动分类：800 主图、750 主图、SKU 图、详情图 {detailImages.length} 张、视频素材。
-          </div>
           <CaptureStatus product={product} />
-        </div>
+        </section>
 
-        <SkuPricePanel product={product} snapshots={snapshots} showTrend={trendVisible} onPreview={onPreview} onSaveSkuMonitorPrice={saveSkuMonitorPrice} />
-      </div>
-
-      <div className={`-mx-4 -mb-4 mt-4 border-t px-4 pb-4 pt-3 ${!monitor.running ? 'border-amber-200 bg-amber-50/70' : !product.enabled ? 'border-slate-200 bg-slate-50' : 'border-emerald-100 bg-emerald-50/40'}`}>
-        <div className="flex flex-wrap items-center justify-between gap-2">
-          <div className="flex min-w-0 items-center gap-2">
-            <TimerReset className={`h-4 w-4 shrink-0 ${!monitor.running ? 'text-amber-600' : product.enabled ? 'text-emerald-600' : 'text-slate-400'}`} />
-            <span className="text-sm font-semibold text-slate-800">本商品抓取计划</span>
-            <Badge className={!monitor.running || !product.enabled ? 'border-amber-200 bg-amber-50 text-amber-700' : 'border-emerald-100 bg-white text-emerald-700'}>
-              {!monitor.running && !product.enabled ? '还差 2 项' : !monitor.running ? '等待全局开启' : !product.enabled ? '等待本商品启用' : '已生效'}
-            </Badge>
-          </div>
-          <div className="flex flex-wrap items-center justify-end gap-2 text-sm">
-            <span className="text-xs font-medium text-slate-500">执行条件</span>
-            {monitor.running ? (
-              <span className="inline-flex items-center gap-1 text-emerald-700"><CircleCheck className="h-4 w-4" />全局已开启</span>
-            ) : (
-              <Button type="button" size="sm" variant="secondary" className="border-amber-200 bg-white text-amber-800 hover:bg-amber-100" onClick={enableGlobalMonitoring} disabled={togglingGlobalMonitor}>
-                {togglingGlobalMonitor ? <LoaderCircle className="h-4 w-4 animate-spin" /> : <PlayCircle className="h-4 w-4" />}{togglingGlobalMonitor ? '开启中' : '开启全局'}
-              </Button>
-            )}
-            {product.enabled ? (
-              <span className="inline-flex items-center gap-1 text-emerald-700"><CircleCheck className="h-4 w-4" />本商品已启用</span>
-            ) : (
-              <Button type="button" size="sm" variant="secondary" className="border-emerald-600 bg-white text-emerald-700 hover:bg-emerald-50" onClick={toggleMonitoring} disabled={togglingMonitor}>
-                {togglingMonitor ? <LoaderCircle className="h-4 w-4 animate-spin" /> : <PlayCircle className="h-4 w-4" />}{togglingMonitor ? '启用中' : '启用本商品'}
-              </Button>
-            )}
-            {monitor.running && product.enabled && <span className="text-emerald-700">{product.nextMonitorAt ? `下次抓取：${new Date(product.nextMonitorAt).toLocaleString('zh-CN', { hour12: false })}` : '等待生成下次抓取时间'}</span>}
-          </div>
-        </div>
-        <div className="mt-3 flex flex-wrap items-center gap-2 text-sm text-slate-600">
-          <CalendarClock className="h-4 w-4 shrink-0 text-slate-400" />
-          <div className="inline-flex h-9 overflow-hidden rounded-md border border-slate-200 bg-white" role="radiogroup" aria-label="抓取计划模式">
-            <button type="button" role="radio" aria-checked={scheduleModeDraft === 'once'} onClick={() => setScheduleModeDraft('once')} className={`px-3 text-sm font-medium ${scheduleModeDraft === 'once' ? 'bg-emerald-600 text-white' : 'text-slate-600 hover:bg-slate-50'}`}>单次定时</button>
-            <button type="button" role="radio" aria-checked={scheduleModeDraft === 'interval'} onClick={() => setScheduleModeDraft('interval')} className={`border-l border-slate-200 px-3 text-sm font-medium ${scheduleModeDraft === 'interval' ? 'bg-emerald-600 text-white' : 'text-slate-600 hover:bg-slate-50'}`}>循环监控</button>
-          </div>
-          {scheduleModeDraft === 'once' ? <>
-            <span>执行于</span>
-            <label htmlFor={`monitor-date-${product.id}`} className="sr-only">监控日期</label>
-            <input id={`monitor-date-${product.id}`} type="date" value={scheduleDateDraft} onChange={(event) => setScheduleDateDraft(event.target.value)} className="h-9 w-[145px] rounded-md border border-slate-200 bg-white px-2 text-sm text-slate-800 outline-none focus:border-emerald-400" />
-            <label htmlFor={`monitor-time-${product.id}`} className="sr-only">详细抓取时间</label>
-            <input id={`monitor-time-${product.id}`} type="time" step={60} value={scheduleTimeDraft} onChange={(event) => setScheduleTimeDraft(event.target.value)} className="h-9 w-[105px] rounded-md border border-slate-200 bg-white px-2 text-sm text-slate-800 outline-none focus:border-emerald-400" />
-          </> : <>
-            <span>每</span>
-            <input type="number" min={30} max={1440} step={1} value={scheduleDraft} onChange={(event) => setScheduleDraft(event.target.value)} className="h-9 w-[88px] rounded-md border border-slate-200 bg-white px-2 text-center text-sm text-slate-800 outline-none focus:border-emerald-400" aria-label="单品循环监控间隔" />
-            <span>分钟抓取一次</span>
-          </>}
-          <button type="button" onClick={saveSchedule} disabled={savingSchedule} className="inline-flex h-9 items-center justify-center gap-1.5 rounded-md bg-emerald-600 px-3 font-medium text-white hover:bg-emerald-700 disabled:opacity-60" title="保存本商品抓取计划">
-            <Save className="h-3.5 w-3.5" />
-            {savingSchedule ? '保存中' : '保存计划'}
-          </button>
-          <span className="text-xs text-slate-500">{scheduleModeDraft === 'once' ? '执行完成后自动暂停本商品。' : '只按当前分钟周期循环，不读取日期时间。'}</span>
-        </div>
+        <SkuPricePanel product={product} snapshots={snapshots} showTrend={trendVisible} onPreview={onPreview} onSaveSkuMonitorPrice={saveSkuMonitorPrice} allowMediaDownload={captureMediaAssets} />
       </div>
 
       {buyerShowOpen && <BuyerShowDialog title={title} items={buyerShows} statusText={buyerShowStatusText} onClose={() => setBuyerShowOpen(false)} retryBusy={retryingBuyerShows} onRetry={retryBuyerShows} downloadBusy={operation?.tone === 'progress' && operation.key.startsWith('buyer-show') && operation.key !== 'buyer-show-retry'} downloadMessage={operation?.key.startsWith('buyer-show') ? operation.message : ''} onDownload={() => runDownload('buyer-shows', '正在整理全部买家秀并生成 ZIP...', downloadBuyerShowsHref(product.id), `${title}_买家秀.zip`)} onDownloadItem={(item) => runDownload(`buyer-show-item:${item.id}`, '正在整理这条买家秀并生成 ZIP...', downloadBuyerShowItemHref(product.id, item.id), `${title}_买家秀.zip`)} />}

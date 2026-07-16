@@ -10,6 +10,7 @@ export type Product = {
   group: string
   accountType?: 'normal' | 'gift' | 'vip88'
   captureBuyerShows?: boolean
+  captureMediaAssets?: boolean
   /** Exactly one automatic schedule mode is active for a product. Legacy data defaults to interval. */
   monitorScheduleMode?: 'once' | 'interval'
   /** Per-product scheduled capture interval. Omit to use the global default. */
@@ -349,8 +350,6 @@ export type Overview = {
     webhookConfigured: boolean
     webhookUrlMasked: string
     signingSecretConfigured: boolean
-    cooldownEnabled: boolean
-    cooldownMinutes: number
     lastTestedAt: string | null
     documentEnabled: boolean
     documentConfigured: boolean
@@ -362,7 +361,7 @@ export type Overview = {
     productId: string
     skuId?: string
     type: 'below-threshold' | 'manual-sync' | 'test' | 'document-sync'
-    status: 'sent' | 'failed' | 'suppressed'
+    status: 'sent' | 'failed'
     message: string
     price: number | null
     threshold: number | null

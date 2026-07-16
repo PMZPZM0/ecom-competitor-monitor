@@ -17,8 +17,9 @@ type Props = {
   products: Product[]
   monitor: Overview['monitor']
   onToggle: (product: Product) => Promise<void>
-  onToggleGlobal: () => Promise<void>
   onSchedule: (product: Product, mode: NonNullable<Product['monitorScheduleMode']>, intervalMinutes: number, monitorStartAt: string | null) => Promise<void>
+  onMediaPreference: (product: Product, captureMediaAssets: boolean) => Promise<void>
+  onSaveSkuMonitorPrice: (product: Product, skuId: string, value: number | null) => Promise<void>
   onCapture: (product: Product) => Promise<Product | void>
   onRetryBuyerShows: (product: Product) => Promise<Product>
   onDelete: (product: Product) => Promise<void>
@@ -100,7 +101,7 @@ function searchableText(product: Product) {
   ].filter(Boolean).join(' ').toLocaleLowerCase('zh-CN')
 }
 
-export function MonitorClassification({ products, monitor, onToggle, onToggleGlobal, onSchedule, onCapture, onRetryBuyerShows, onDelete, onDeleteBatch, onCaptureBatch, batchBusy, busyProductId, authSessions }: Props) {
+export function MonitorClassification({ products, monitor, onToggle, onSchedule, onMediaPreference, onSaveSkuMonitorPrice, onCapture, onRetryBuyerShows, onDelete, onDeleteBatch, onCaptureBatch, batchBusy, busyProductId, authSessions }: Props) {
   const [preview, setPreview] = useState<Preview | null>(null)
   const [query, setQuery] = useState('')
   const [shopFilter, setShopFilter] = useState('')
@@ -321,47 +322,44 @@ export function MonitorClassification({ products, monitor, onToggle, onToggleGlo
         <div className="min-w-0 space-y-8">
           {groups.map((shop) => (
             <section key={shop.shopName}>
-              <div className="mb-4 flex flex-row items-center justify-between gap-4 border-b border-slate-200 pb-3">
+              <div className="mb-3 flex flex-wrap items-start justify-between gap-x-4 gap-y-2 border-b border-slate-200 pb-3">
                 <div className="flex min-w-0 items-start gap-3">
                   <ShopLogo src={shop.shopLogo} />
                   <div className="min-w-0">
                     <h2 className="line-clamp-1 text-base font-semibold text-slate-950">{shop.shopName}</h2>
-                    <div className="mt-1 text-xs text-slate-500">{shop.products.length} 个商品 · {shop.models.length} 个型号 · {skuCount(shop.products)} 个 SKU</div>
+                    <div className="mt-1 flex flex-wrap items-center gap-x-2 gap-y-1 text-xs">
+                      <span className="text-slate-400">型号</span>
+                      {shop.models.map(({ model }) => <span key={model} className="font-medium text-slate-700">{model}</span>)}
+                      <span className="text-slate-300">·</span>
+                      <span className="text-slate-500">{shop.products.length} 个商品 · {skuCount(shop.products)} 个 SKU</span>
+                    </div>
                   </div>
                 </div>
+                <div className="shrink-0 text-right">
+                  <div className="text-[11px] text-slate-400">价格区间</div>
+                  <div className="whitespace-nowrap text-sm font-semibold tabular-nums text-emerald-700">{rangeLabel(shop.products)}</div>
+                </div>
               </div>
-              <div className="space-y-6">
-                {shop.models.map((modelGroup) => (
-                  <div key={`${shop.shopName}-${modelGroup.model}`}>
-                    <div className="mb-3 flex items-center justify-between gap-4 px-1">
-                      <div>
-                        <div className="font-semibold text-slate-950">{modelGroup.model}</div>
-                        <div className="mt-1 text-xs text-slate-400">{modelGroup.products.length} 商品 · {skuCount(modelGroup.products)} SKU</div>
-                      </div>
-                      <div className="text-xs font-semibold text-emerald-700">{rangeLabel(modelGroup.products)}</div>
-                    </div>
-                    <div className="space-y-4 bg-slate-100/70 p-3">
-                      {modelGroup.products.map((product) => (
-                        <div key={product.id} className="grid grid-cols-[24px_minmax(0,1fr)] items-start gap-2">
-                          <label className="mt-4 flex h-6 w-6 cursor-pointer items-center justify-center" title="选择商品">
-                            <input type="checkbox" checked={selectedIds.has(product.id)} onChange={() => toggleProductSelection(product.id)} className="h-4 w-4 accent-emerald-600" aria-label={`选择 ${product.name}`} />
-                          </label>
-                          <ProductMonitorCard
-                            product={product}
-                            onToggle={onToggle}
-                            onToggleGlobal={onToggleGlobal}
-                            onSchedule={onSchedule}
-                            onCapture={onCapture}
-                            onRetryBuyerShows={onRetryBuyerShows}
-                            onDelete={onDelete}
-                            busy={busyProductId === product.id}
-                            onPreview={setPreview}
-                            captureProtectionUntil={productCaptureProtectionUntil(product, authSessions)}
-                            monitor={monitor}
-                          />
-                        </div>
-                      ))}
-                    </div>
+              <div className="space-y-4 bg-slate-100/70 p-3">
+                {shop.products.map((product) => (
+                  <div key={product.id} className="grid grid-cols-[24px_minmax(0,1fr)] items-start gap-2">
+                    <label className="mt-4 flex h-6 w-6 cursor-pointer items-center justify-center" title="选择商品">
+                      <input type="checkbox" checked={selectedIds.has(product.id)} onChange={() => toggleProductSelection(product.id)} className="h-4 w-4 accent-emerald-600" aria-label={`选择 ${product.name}`} />
+                    </label>
+                    <ProductMonitorCard
+                      product={product}
+                      onToggle={onToggle}
+                      onSchedule={onSchedule}
+                      onMediaPreference={onMediaPreference}
+                      onSaveSkuMonitorPrice={onSaveSkuMonitorPrice}
+                      onCapture={onCapture}
+                      onRetryBuyerShows={onRetryBuyerShows}
+                      onDelete={onDelete}
+                      busy={busyProductId === product.id}
+                      onPreview={setPreview}
+                      captureProtectionUntil={productCaptureProtectionUntil(product, authSessions)}
+                      monitor={monitor}
+                    />
                   </div>
                 ))}
               </div>

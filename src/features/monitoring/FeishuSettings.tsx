@@ -12,7 +12,7 @@ type Props = {
   feishu: Overview['feishu']
   logs: Overview['notificationLogs']
   products: Product[]
-  onSave: (payload: { enabled?: boolean; webhookUrl?: string; signingSecret?: string; clearSigningSecret?: boolean; cooldownEnabled?: boolean; cooldownMinutes?: number; documentEnabled?: boolean }) => Promise<void>
+  onSave: (payload: { enabled?: boolean; webhookUrl?: string; signingSecret?: string; clearSigningSecret?: boolean; documentEnabled?: boolean }) => Promise<void>
   onTest: () => Promise<void>
 }
 
@@ -75,12 +75,9 @@ export function FeishuAuthorization({ feishu, products, onSave }: FeishuAuthoriz
 export function FeishuSettings({ feishu, logs, products, onSave, onTest }: Props) {
   const [webhookUrl, setWebhookUrl] = useState('')
   const [signingSecret, setSigningSecret] = useState('')
-  const [cooldown, setCooldown] = useState(String(feishu.cooldownMinutes))
   const [busy, setBusy] = useState(false)
   const previewProduct = products.find((product) => product.lastSnapshot?.skuPrices?.length) || products[0]
   const previewSkus = previewProduct?.lastSnapshot?.skuPrices?.slice(0, 6) || []
-
-  useEffect(() => setCooldown(String(feishu.cooldownMinutes)), [feishu.cooldownMinutes])
 
   async function save() {
     setBusy(true)
@@ -89,8 +86,6 @@ export function FeishuSettings({ feishu, logs, products, onSave, onTest }: Props
         enabled: feishu.enabled,
         webhookUrl: webhookUrl || undefined,
         signingSecret: signingSecret || undefined,
-        cooldownEnabled: feishu.cooldownEnabled,
-        cooldownMinutes: Number(cooldown) || 120,
       })
       setWebhookUrl('')
       setSigningSecret('')
@@ -114,22 +109,17 @@ export function FeishuSettings({ feishu, logs, products, onSave, onTest }: Props
         </div>
       </CardHeader>
       <CardContent className="space-y-4">
-        <div className="grid grid-cols-[minmax(0,1fr)_minmax(0,1fr)_160px] gap-3">
+        <div className="grid gap-3 md:grid-cols-2">
           <label className="grid gap-1 text-sm font-medium text-slate-700">机器人 Webhook
             <Input type="url" value={webhookUrl} onChange={(event) => setWebhookUrl(event.target.value)} placeholder={feishu.webhookConfigured ? feishu.webhookUrlMasked : 'https://open.feishu.cn/open-apis/bot/v2/hook/...'} />
           </label>
           <label className="grid gap-1 text-sm font-medium text-slate-700">签名密钥（可选）
             <Input type="password" value={signingSecret} onChange={(event) => setSigningSecret(event.target.value)} placeholder={feishu.signingSecretConfigured ? '已保存，输入新值可替换' : '机器人安全设置中的签名密钥'} />
           </label>
-          <div className="grid gap-1">
-            <div className="flex items-center justify-between gap-2 text-sm font-medium text-slate-700"><span>提醒冷却（分钟）</span><button type="button" role="switch" aria-label="飞书提醒冷却" aria-checked={feishu.cooldownEnabled} onClick={() => onSave({ cooldownEnabled: !feishu.cooldownEnabled })} className="inline-flex items-center gap-1.5 text-xs font-normal text-slate-500"><span>{feishu.cooldownEnabled ? '开启' : '关闭'}</span><span className={`relative h-5 w-9 rounded-full transition ${feishu.cooldownEnabled ? 'bg-amber-500' : 'bg-slate-200'}`}><span className={`absolute top-0.5 h-4 w-4 rounded-full bg-white shadow transition ${feishu.cooldownEnabled ? 'left-[18px]' : 'left-0.5'}`} /></span></button></div>
-            <Input aria-label="飞书提醒冷却分钟" min={1} max={1440} type="number" value={cooldown} onChange={(event) => setCooldown(event.target.value)} disabled={!feishu.cooldownEnabled} />
-            <div className="text-[11px] text-slate-400">{feishu.cooldownEnabled ? `同一 SKU ${feishu.cooldownMinutes} 分钟内只提醒一次` : '关闭后每次命中监控价都会提醒'}</div>
-          </div>
         </div>
         <div className="grid grid-cols-2 gap-3 rounded-md border border-slate-100 bg-slate-50 p-3 text-xs">
-          <div><div className="font-medium text-violet-800">CLI 文档同步</div><div className="mt-1 leading-5 text-slate-500">每次价格抓取成功都会写入文档。提醒冷却期间也照常写入，不漏数据。</div></div>
-          <div><div className="font-medium text-amber-800">机器人提醒冷却</div><div className="mt-1 leading-5 text-slate-500">{feishu.cooldownEnabled ? '已开启，只抑制同一商品、同一 SKU 的重复低价消息。' : '已关闭，每次低价命中都会发送机器人消息。'}不影响抓取、本地记录或文档同步。</div></div>
+          <div><div className="font-medium text-violet-800">CLI 文档同步</div><div className="mt-1 leading-5 text-slate-500">每次价格抓取成功都会写入文档，不漏价格记录。</div></div>
+          <div><div className="font-medium text-amber-800">机器人低价提醒</div><div className="mt-1 leading-5 text-slate-500">每次有效价格严格低于该 SKU 监控价时都会发送，不影响抓取、本地记录或文档同步。</div></div>
         </div>
         <div className="flex items-center gap-2 border-t border-slate-100 pt-3">
           <Button type="button" onClick={save} disabled={busy}><Save className="h-4 w-4" />{busy ? '保存中' : '保存连接'}</Button>
@@ -150,7 +140,7 @@ export function FeishuSettings({ feishu, logs, products, onSave, onTest }: Props
           </div>
         )}
         <div className="max-h-48 space-y-2 overflow-auto border-t border-slate-100 pt-3">
-          {logs.map((log) => <div key={log.id} className="flex items-center justify-between gap-3 rounded-md border border-slate-100 px-3 py-2 text-xs"><div className="min-w-0"><div className="flex items-center gap-1 font-medium text-slate-700">{log.status === 'sent' && <CheckCircle2 className="h-3.5 w-3.5 text-emerald-600" />}{log.message}</div><div className="mt-0.5 text-slate-400">{log.price != null ? `当前 ¥${log.price.toFixed(2)}` : ''}{log.threshold != null ? ` · 监控 ¥${log.threshold.toFixed(2)}` : ''}</div></div><span className={log.status === 'failed' ? 'shrink-0 text-red-600' : log.status === 'suppressed' ? 'shrink-0 text-amber-600' : 'shrink-0 text-emerald-600'}>{log.status === 'failed' ? '失败' : log.status === 'suppressed' ? '冷却' : '已发送'} · {timeAgo(log.createdAt)}</span></div>)}
+          {logs.map((log) => <div key={log.id} className="flex items-center justify-between gap-3 rounded-md border border-slate-100 px-3 py-2 text-xs"><div className="min-w-0"><div className="flex items-center gap-1 font-medium text-slate-700">{log.status === 'sent' && <CheckCircle2 className="h-3.5 w-3.5 text-emerald-600" />}{log.message}</div><div className="mt-0.5 text-slate-400">{log.price != null ? `当前 ¥${log.price.toFixed(2)}` : ''}{log.threshold != null ? ` · 监控 ¥${log.threshold.toFixed(2)}` : ''}</div></div><span className={log.status === 'failed' ? 'shrink-0 text-red-600' : 'shrink-0 text-emerald-600'}>{log.status === 'failed' ? '失败' : '已发送'} · {timeAgo(log.createdAt)}</span></div>)}
           {logs.length === 0 && <div className="py-3 text-sm text-slate-400">暂无飞书发送记录。</div>}
         </div>
       </CardContent>

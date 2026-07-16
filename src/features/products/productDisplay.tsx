@@ -117,6 +117,7 @@ export function ImageThumb({
   className = '',
   imageClassName = '',
   onPreview,
+  allowDownload = true,
 }: {
   src?: string
   title: string
@@ -124,6 +125,7 @@ export function ImageThumb({
   className?: string
   imageClassName?: string
   onPreview: (preview: Preview) => void
+  allowDownload?: boolean
 }) {
   if (!src) {
     return (
@@ -140,9 +142,7 @@ export function ImageThumb({
       </button>
       <div className="absolute inset-x-0 bottom-0 flex items-center justify-between bg-slate-950/65 px-2 py-1 text-[11px] text-white">
         <span>{label}</span>
-        <a href={downloadHref(src, title)} title="下载图片" onClick={(event) => event.stopPropagation()}>
-          <Download className="h-3.5 w-3.5" />
-        </a>
+        {allowDownload && <a href={downloadHref(src, title)} title="下载图片" onClick={(event) => event.stopPropagation()}><Download className="h-3.5 w-3.5" /></a>}
       </div>
     </div>
   )

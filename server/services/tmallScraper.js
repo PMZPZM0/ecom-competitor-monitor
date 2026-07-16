@@ -1715,12 +1715,33 @@ export function isUnselectablePromotionSku(sku, selection) {
     && /^missing-value:/.test(String(selection?.reason || ""));
 }
 
+export function applyMediaCapturePreference(snapshot, captureMediaAssets) {
+  if (captureMediaAssets === true) return snapshot;
+  const mainImage800 = snapshot.mainImage800 || snapshot.mainImage || snapshot.mainImages?.[0] || "";
+  return {
+    ...snapshot,
+    mainImage: mainImage800,
+    mainImage800,
+    gallery750Images: [],
+    mainImages: mainImage800 ? [mainImage800] : [],
+    detailImages: [],
+    videoUrls: [],
+    rawSignals: snapshot.rawSignals ? {
+      ...snapshot.rawSignals,
+      imageCount: mainImage800 ? 1 : 0,
+      detailImageCount: 0,
+      videoCount: 0,
+      highResImageCount: mainImage800 ? 1 : 0,
+    } : snapshot.rawSignals,
+  };
+}
+
 async function fetchHtml(product, authSession) {
   if (authSession?.source === "taobao-browser") {
     let lastError;
     for (let attempt = 1; attempt <= 2; attempt++) {
       try {
-        const page = await getRenderedHtml(product.url, authSession, { captureVideo: true, captureBuyerShow: product.captureBuyerShows !== false });
+        const page = await getRenderedHtml(product.url, authSession, { captureVideo: product.captureMediaAssets === true, captureBuyerShow: product.captureBuyerShows !== false });
         const looksBlocked = isTaobaoLoginDocument(page.finalUrl, page.html);
         if (!looksBlocked) return page;
         throw new Error("当前抓到登录或验证页面");
@@ -1930,7 +1951,7 @@ export async function scrapeTmallProduct(product, authSession) {
 
   const title = cleanTitle(jsonData.title || domData.title || product.name || "未识别商品标题");
 
-  return {
+  return applyMediaCapturePreference({
     parserVersion: PRICE_PARSER_VERSION,
     resolutionStatus: skuPrices.length && skuPrices.every((sku) => sku.resolutionStatus === "verified")
       ? "verified"
@@ -1983,5 +2004,5 @@ export async function scrapeTmallProduct(product, authSession) {
       },
       promotionCaptureSkipped: unresolvedPromotionSkus.length === 0,
     },
-  };
+  }, product.captureMediaAssets);
 }

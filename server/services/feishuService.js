@@ -43,8 +43,6 @@ export function publicFeishuConfig(config = {}) {
     webhookConfigured: Boolean(webhookUrl),
     webhookUrlMasked: mask(webhookUrl, 36),
     signingSecretConfigured: Boolean(signingSecret),
-    cooldownEnabled: config.cooldownEnabled !== false,
-    cooldownMinutes: Math.max(1, Number(config.cooldownMinutes) || 120),
     lastTestedAt: config.lastTestedAt || null,
     documentEnabled: Boolean(config.documentEnabled),
     documentConfigured: Boolean(config.documentId),
@@ -55,9 +53,9 @@ export function publicFeishuConfig(config = {}) {
 
 export function updateFeishuConfig(current = {}, patch = {}) {
   const next = { ...current };
+  delete next.cooldownEnabled;
+  delete next.cooldownMinutes;
   if (patch.enabled !== undefined) next.enabled = patch.enabled;
-  if (patch.cooldownEnabled !== undefined) next.cooldownEnabled = patch.cooldownEnabled;
-  if (patch.cooldownMinutes !== undefined) next.cooldownMinutes = patch.cooldownMinutes;
   if (patch.documentEnabled !== undefined) next.documentEnabled = patch.documentEnabled;
   if (patch.webhookUrl !== undefined && patch.webhookUrl !== "") next.webhookUrlEncrypted = encrypt(patch.webhookUrl);
   if (patch.signingSecret !== undefined && patch.signingSecret !== "") next.signingSecretEncrypted = encrypt(patch.signingSecret);

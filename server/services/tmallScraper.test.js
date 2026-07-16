@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { applyAppliedCoinDiscount, applyNetworkPromoData, applyVisibleDiscountItems, applyVisibleSurprisePrice, buyerShowCaptureFromNetwork, buyerShowsFromRateDetail, calculateAccountPriceScenario, calculatePriceScenarios, collectDiscountItems, collectDiscountItemsFromText, collectProductProgramItems, collectVisibleSurprisePrices, extractBuyerShowItems, extractSelectedSkuId, extractShopName, filterProductVideoUrls, isUnselectablePromotionSku, resolveCoinBenefit, resolveSkuPrices, selectGalleryImages, selectSquareMainImage, sellerIdFromProductMedia } from "./tmallScraper.js";
+import { applyAppliedCoinDiscount, applyMediaCapturePreference, applyNetworkPromoData, applyVisibleDiscountItems, applyVisibleSurprisePrice, buyerShowCaptureFromNetwork, buyerShowsFromRateDetail, calculateAccountPriceScenario, calculatePriceScenarios, collectDiscountItems, collectDiscountItemsFromText, collectProductProgramItems, collectVisibleSurprisePrices, extractBuyerShowItems, extractSelectedSkuId, extractShopName, filterProductVideoUrls, isUnselectablePromotionSku, resolveCoinBenefit, resolveSkuPrices, selectGalleryImages, selectSquareMainImage, sellerIdFromProductMedia } from "./tmallScraper.js";
 
 test("Tmall Supermarket final URLs override generic shop-page noise", () => {
   assert.equal(extractShopName('{"shopName":"免费开店"}', { shopName: "免费开店" }, { shopName: "" }, "https://chaoshi.detail.tmall.com/item.htm?id=838302541852"), "天猫超市");
@@ -501,6 +501,35 @@ test("filterProductVideoUrls rejects placeholder and unrelated seller videos", (
   assert.deepEqual(videos, [
     "https://cloud.video.taobao.com/play/u/2807173571/p/2/e/6/t/1/777054281484935.mp4?appKey=38829",
   ]);
+});
+
+test("media capture defaults to price, 800 main image and SKU images only", () => {
+  const snapshot = {
+    mainImage: "main-800",
+    mainImage800: "main-800",
+    mainImages: ["main-800", "gallery-1"],
+    gallery750Images: ["gallery-1"],
+    detailImages: ["detail-1"],
+    videoUrls: ["video-1"],
+    skuImages: ["sku-1"],
+    skuPrices: [{ skuId: "1", image: "sku-1", price: 99 }],
+    rawSignals: { imageCount: 2, detailImageCount: 1, videoCount: 1, highResImageCount: 3 },
+  };
+
+  const core = applyMediaCapturePreference(snapshot);
+  assert.deepEqual(core.mainImages, ["main-800"]);
+  assert.deepEqual(core.gallery750Images, []);
+  assert.deepEqual(core.detailImages, []);
+  assert.deepEqual(core.videoUrls, []);
+  assert.deepEqual(core.skuImages, ["sku-1"]);
+  assert.equal(core.skuPrices[0].price, 99);
+  assert.equal(core.rawSignals.detailImageCount, 0);
+  assert.equal(core.rawSignals.videoCount, 0);
+});
+
+test("media capture keeps complete materials only when explicitly enabled", () => {
+  const snapshot = { mainImage800: "main-800", gallery750Images: ["gallery-1"], detailImages: ["detail-1"], videoUrls: ["video-1"] };
+  assert.equal(applyMediaCapturePreference(snapshot, true), snapshot);
 });
 
 test("filterProductVideoUrls deduplicates Taobao play and Tmall Supermarket CDN variants", () => {
