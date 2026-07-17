@@ -1,17 +1,15 @@
 import { useEffect, useMemo, useState } from 'react'
-import { CalendarClock, ChevronLeft, ChevronRight, CircleAlert, CircleCheck, Clock3, LoaderCircle, PauseCircle, RotateCw, Search } from 'lucide-react'
+import { CalendarClock, ChevronLeft, ChevronRight, CircleAlert, CircleCheck, Clock3, FileJson, LoaderCircle, PauseCircle, RotateCw, Search } from 'lucide-react'
 import { Badge } from '../../components/ui/badge'
 import { Button } from '../../components/ui/button'
 import { Input } from '../../components/ui/input'
-import type { AuthSession, Overview, Product, RunRecord } from '../../types/domain'
-import { formatProtectionCountdown, productCaptureProtectionUntil } from '../products/captureProtection'
+import type { Overview, Product, RunRecord } from '../../types/domain'
 import { productImages, productItemId, productModel, productShopName, productTitle } from '../products/productDisplayUtils'
 import { MonitorScheduleDialog } from './MonitorScheduleDialog'
 
 type Props = {
   products: Product[]
   monitor: Overview['monitor']
-  authSessions: AuthSession[]
   busyProductId?: string
   batchBusy?: boolean
   onCapture: (product: Product) => Promise<Product | void>
@@ -19,6 +17,7 @@ type Props = {
   onPauseBatch: (products: Product[]) => Promise<void>
   onSchedule: (product: Product, mode: NonNullable<Product['monitorScheduleMode']>, intervalMinutes: number, monitorStartAt: string | null) => Promise<void>
   onToggle: (product: Product) => Promise<void>
+  onLocalImport: (product?: Product) => void
 }
 
 function accountLabel(product: Product) {
@@ -33,6 +32,7 @@ function queueTime(product: Product) {
 }
 
 function scheduleStatus(product: Product, monitor: Overview['monitor'], now: number) {
+  if (product.captureMode === 'local-only') return { label: '等待本地文件', className: 'border-sky-200 bg-sky-50 text-sky-700' }
   if (!monitor.running) return { label: '等待全局开启', className: 'border-amber-200 bg-amber-50 text-amber-700' }
   const nextAt = Date.parse(product.nextMonitorAt || '')
   if (!Number.isFinite(nextAt)) return { label: '等待调度', className: 'border-slate-200 bg-slate-50 text-slate-600' }
@@ -40,7 +40,7 @@ function scheduleStatus(product: Product, monitor: Overview['monitor'], now: num
   return { label: '计划中', className: 'border-emerald-200 bg-emerald-50 text-emerald-700' }
 }
 
-export function MonitorQueue({ products, monitor, authSessions, busyProductId, batchBusy, onCapture, onCaptureBatch, onPauseBatch, onSchedule, onToggle }: Props) {
+export function MonitorQueue({ products, monitor, busyProductId, batchBusy, onCapture, onCaptureBatch, onPauseBatch, onSchedule, onToggle, onLocalImport }: Props) {
   const [query, setQuery] = useState('')
   const [page, setPage] = useState(1)
   const [now, setNow] = useState(Date.now())
@@ -54,17 +54,20 @@ export function MonitorQueue({ products, monitor, authSessions, busyProductId, b
     return () => window.clearInterval(timer)
   }, [])
 
-  const enabledProducts = useMemo(() => products.filter((product) => product.enabled), [products])
+  const queueProducts = useMemo(() => products.filter((product) => product.enabled || product.captureMode === 'local-only'), [products])
+  const enabledProducts = useMemo(() => queueProducts.filter((product) => product.enabled), [queueProducts])
+  const localOnlyCount = queueProducts.length - enabledProducts.length
   const filteredProducts = useMemo(() => {
     const keyword = query.trim().toLowerCase()
-    return enabledProducts
+    return queueProducts
       .filter((product) => !keyword || [productTitle(product), productShopName(product), productModel(product), productItemId(product)].some((value) => value.toLowerCase().includes(keyword)))
       .sort((left, right) => queueTime(left) - queueTime(right) || Date.parse(right.lastSnapshot?.capturedAt || right.createdAt) - Date.parse(left.lastSnapshot?.capturedAt || left.createdAt))
-  }, [enabledProducts, query])
+  }, [queueProducts, query])
   const totalPages = Math.max(1, Math.ceil(filteredProducts.length / 10))
   const visibleProducts = filteredProducts.slice((page - 1) * 10, page * 10)
-  const selectedProducts = filteredProducts.filter((product) => selectedIds.has(product.id))
-  const pageFullySelected = visibleProducts.length > 0 && visibleProducts.every((product) => selectedIds.has(product.id))
+  const selectedProducts = filteredProducts.filter((product) => selectedIds.has(product.id) && product.captureMode !== 'local-only')
+  const selectableVisibleProducts = visibleProducts.filter((product) => product.captureMode !== 'local-only')
+  const pageFullySelected = selectableVisibleProducts.length > 0 && selectableVisibleProducts.every((product) => selectedIds.has(product.id))
   const batchWorking = Boolean(batchBusy || actionProductId === 'batch')
 
   useEffect(() => setPage(1), [query])
@@ -72,14 +75,14 @@ export function MonitorQueue({ products, monitor, authSessions, busyProductId, b
     if (page > totalPages) setPage(totalPages)
   }, [page, totalPages])
   useEffect(() => {
-    const enabledIds = new Set(enabledProducts.map((product) => product.id))
+    const enabledIds = new Set(queueProducts.filter((product) => product.captureMode !== 'local-only').map((product) => product.id))
     setSelectedIds((current) => new Set([...current].filter((id) => enabledIds.has(id))))
-  }, [enabledProducts])
+  }, [queueProducts])
 
   function togglePageSelection(checked: boolean) {
     setSelectedIds((current) => {
       const next = new Set(current)
-      visibleProducts.forEach((product) => checked ? next.add(product.id) : next.delete(product.id))
+      selectableVisibleProducts.forEach((product) => checked ? next.add(product.id) : next.delete(product.id))
       return next
     })
   }
@@ -159,8 +162,8 @@ export function MonitorQueue({ products, monitor, authSessions, busyProductId, b
     <section className="space-y-4">
       <div className="flex flex-wrap items-end justify-between gap-4 border-b border-slate-200 pb-4">
         <div>
-          <div className="flex items-center gap-2"><h2 className="text-base font-semibold text-slate-950">已监控商品队列</h2><Badge className="border-sky-100 bg-sky-50 text-sky-700">{enabledProducts.length} 个商品</Badge></div>
-          <p className="mt-1 text-sm text-slate-500">只显示已启用商品；可修改定时计划、单品抓取、批量抓取或移出队列。</p>
+          <div className="flex flex-wrap items-center gap-2"><h2 className="text-base font-semibold text-slate-950">监控与本地更新队列</h2><Badge className="border-emerald-100 bg-emerald-50 text-emerald-700">在线 {enabledProducts.length}</Badge>{localOnlyCount > 0 && <Badge className="border-sky-100 bg-sky-50 text-sky-700">本地数据 {localOnlyCount}</Badge>}</div>
+          <p className="mt-1 text-sm text-slate-500">在线商品按计划执行；本地数据商品保持暂停，只能通过导入新文件更新。</p>
         </div>
         <label className="relative block w-full max-w-sm"><Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400" /><Input value={query} onChange={(event) => setQuery(event.target.value)} className="pl-9" placeholder="搜索商品、店铺、型号或商品 ID" aria-label="搜索监控队列" /></label>
       </div>
@@ -178,20 +181,18 @@ export function MonitorQueue({ products, monitor, authSessions, busyProductId, b
         {visibleProducts.map((product, index) => {
           const { primary } = productImages(product)
           const status = scheduleStatus(product, monitor, now)
-          const protectionUntil = productCaptureProtectionUntil(product, authSessions)
-          const protectionRemaining = Math.max(0, Date.parse(protectionUntil || '') - now || 0)
           const working = busyProductId === product.id || actionProductId === product.id || batchWorking
           return (
             <div key={product.id} className="grid min-w-[780px] grid-cols-[72px_minmax(300px,1.5fr)_140px_210px_250px] items-center gap-3 border-t border-slate-100 px-4 py-3 first:border-t-0 hover:bg-slate-50/70 max-[1280px]:grid-cols-[64px_minmax(260px,1fr)_180px_230px] max-[1280px]:[&>*:nth-child(3)]:hidden">
-              <div className="flex items-center gap-2"><input type="checkbox" checked={selectedIds.has(product.id)} onChange={(event) => toggleProductSelection(product.id, event.target.checked)} aria-label={`选择 ${productTitle(product)}`} /><span className="text-sm font-semibold tabular-nums text-slate-400">{(page - 1) * 10 + index + 1}</span></div>
+              <div className="flex items-center gap-2"><input type="checkbox" checked={selectedIds.has(product.id)} onChange={(event) => toggleProductSelection(product.id, event.target.checked)} disabled={product.captureMode === 'local-only'} title={product.captureMode === 'local-only' ? '本地数据商品不参加在线批量操作' : undefined} aria-label={`选择 ${productTitle(product)}`} /><span className="text-sm font-semibold tabular-nums text-slate-400">{(page - 1) * 10 + index + 1}</span></div>
               <div className="flex min-w-0 items-center gap-3"><div className="h-14 w-14 shrink-0 overflow-hidden rounded-md border border-slate-200 bg-slate-50">{primary ? <img src={primary} alt="" loading="lazy" decoding="async" className="h-full w-full object-contain" /> : null}</div><div className="min-w-0"><div className="truncate text-sm font-semibold text-slate-900" title={productTitle(product)}>{productTitle(product)}</div><div className="mt-1 flex min-w-0 flex-wrap items-center gap-x-3 gap-y-1 text-xs text-slate-500"><span className="truncate">{productShopName(product)}</span><span>型号 {productModel(product)}</span><span className="tabular-nums">ID {productItemId(product) || '未识别'}</span></div><div className="mt-1 text-xs text-slate-400">上次抓取：{product.lastSnapshot?.capturedAt ? new Date(product.lastSnapshot.capturedAt).toLocaleString('zh-CN', { hour12: false }) : '尚未成功抓取'} · {product.lastSnapshot?.skuPrices?.length || 0} 个 SKU</div></div></div>
-              <div><Badge className={product.accountType === 'gift' ? 'border-amber-100 bg-amber-50 text-amber-700' : product.accountType === 'vip88' ? 'border-violet-100 bg-violet-50 text-violet-700' : 'border-sky-100 bg-sky-50 text-sky-700'}>{accountLabel(product)}</Badge></div>
-              <div className="min-w-0"><Badge className={status.className}>{status.label}</Badge><div className="mt-1.5 flex items-center gap-1 text-xs text-slate-600"><Clock3 className="h-3.5 w-3.5 shrink-0 text-slate-400" />{monitor.running && product.nextMonitorAt ? new Date(product.nextMonitorAt).toLocaleString('zh-CN', { hour12: false }) : '暂不执行'}</div><div className="mt-1 text-xs text-slate-400">{product.monitorScheduleMode === 'once' ? '单次定时 · 完成后暂停' : `循环监控 · 每 ${product.monitorIntervalMinutes ?? monitor.intervalMinutes} 分钟`}</div></div>
-              <div className="flex justify-end gap-2"><Button type="button" variant="secondary" size="sm" onClick={() => setScheduleProduct(product)} disabled={working} title="设置日期、时间和抓取周期"><CalendarClock className="h-4 w-4" />定时</Button><Button type="button" size="sm" onClick={() => capture(product)} disabled={working || protectionRemaining > 0} title={protectionRemaining > 0 ? '本软件设置的采集频率保护，不代表淘宝账号风控' : '立即抓取当前商品'}>{working ? <LoaderCircle className="h-4 w-4 animate-spin" /> : <RotateCw className="h-4 w-4" />}{working ? '执行中' : protectionRemaining > 0 ? formatProtectionCountdown(protectionRemaining) : '抓取'}</Button><Button type="button" variant="secondary" size="sm" onClick={() => remove(product)} disabled={working} title="移出监控队列，保留定时设置"><PauseCircle className="h-4 w-4" />移出</Button></div>
+              <div className="flex flex-col items-start gap-1"><Badge className={product.accountType === 'gift' ? 'border-amber-100 bg-amber-50 text-amber-700' : product.accountType === 'vip88' ? 'border-violet-100 bg-violet-50 text-violet-700' : 'border-sky-100 bg-sky-50 text-sky-700'}>{accountLabel(product)}</Badge>{product.captureMode === 'local-only' && <Badge className="border-sky-200 bg-sky-50 text-sky-700"><FileJson className="mr-1 h-3 w-3" />本地数据</Badge>}</div>
+              <div className="min-w-0"><Badge className={status.className}>{status.label}</Badge><div className="mt-1.5 flex items-center gap-1 text-xs text-slate-600"><Clock3 className="h-3.5 w-3.5 shrink-0 text-slate-400" />{product.captureMode === 'local-only' ? '不执行在线任务' : monitor.running && product.nextMonitorAt ? new Date(product.nextMonitorAt).toLocaleString('zh-CN', { hour12: false }) : '暂不执行'}</div><div className="mt-1 text-xs text-slate-400">{product.captureMode === 'local-only' ? '导入新文件后更新价格' : product.monitorScheduleMode === 'once' ? '单次定时 · 完成后暂停' : `循环监控 · 每 ${product.monitorIntervalMinutes ?? monitor.intervalMinutes} 分钟`}</div></div>
+              <div className="flex justify-end gap-2">{product.captureMode === 'local-only' ? <Button type="button" size="sm" onClick={() => onLocalImport(product)} title="选择新的本地数据文件更新价格"><FileJson className="h-4 w-4" />导入新文件</Button> : <><Button type="button" variant="secondary" size="sm" onClick={() => setScheduleProduct(product)} disabled={working} title="设置日期、时间和抓取周期"><CalendarClock className="h-4 w-4" />定时</Button><Button type="button" size="sm" onClick={() => capture(product)} disabled={working} title="立即抓取当前商品">{working ? <LoaderCircle className="h-4 w-4 animate-spin" /> : <RotateCw className="h-4 w-4" />}{working ? '执行中' : '抓取'}</Button><Button type="button" variant="secondary" size="sm" onClick={() => remove(product)} disabled={working} title="移出监控队列，保留定时设置"><PauseCircle className="h-4 w-4" />移出</Button></>}</div>
             </div>
           )
         })}
-        {!visibleProducts.length && <div className="px-6 py-16 text-center text-sm text-slate-500">{query ? '没有匹配的已监控商品。' : '当前没有已监控商品，请在监控总览或监控分类中点击“启用本商品”。'}</div>}
+        {!visibleProducts.length && <div className="px-6 py-16 text-center text-sm text-slate-500">{query ? '没有匹配的队列商品。' : '当前没有已监控或本地数据商品。'}</div>}
       </div>
 
       {filteredProducts.length > 10 && <div className="flex items-center justify-end gap-2"><button type="button" onClick={() => setPage((current) => Math.max(1, current - 1))} disabled={page === 1} className="inline-flex h-8 w-8 items-center justify-center rounded-md border border-slate-200 bg-white text-slate-600 disabled:opacity-40" title="上一页"><ChevronLeft className="h-4 w-4" /></button><span className="text-xs text-slate-500">第 {page} / {totalPages} 页</span><button type="button" onClick={() => setPage((current) => Math.min(totalPages, current + 1))} disabled={page === totalPages} className="inline-flex h-8 w-8 items-center justify-center rounded-md border border-slate-200 bg-white text-slate-600 disabled:opacity-40" title="下一页"><ChevronRight className="h-4 w-4" /></button></div>}

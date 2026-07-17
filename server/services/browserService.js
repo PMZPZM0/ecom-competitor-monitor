@@ -1,6 +1,7 @@
 import fs from "node:fs";
+import net from "node:net";
 import path from "node:path";
-import { spawn } from "node:child_process";
+import { execFile, spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -8,16 +9,15 @@ const profileRoot = path.resolve(process.env.ECOM_MONITOR_PROFILE_DIR || path.re
 const profileDir = path.join(profileRoot, "legacy");
 const accountProfilesDir = profileRoot;
 const remotePort = Number(process.env.TAOBAO_BROWSER_PORT || 9223);
-const captureBrowserIdleMs = Math.max(30_000, Number(process.env.CAPTURE_BROWSER_IDLE_MS || 300_000));
-const stableChromeUserAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/150.0.0.0 Safari/537.36";
+const taobaoAuthUrls = ["https://i.taobao.com/my_taobao.htm", "https://www.taobao.com/", "https://detail.tmall.com/"];
 
 const browserProcesses = new Map();
 const browserStartPromises = new Map();
-const browserUsage = new Map();
 const browserModes = new Map();
+const verifiedBrowserOwners = new Map();
 
 export function browserRuntimeInfo() {
-  return { profileDir: accountProfilesDir, captureBrowserIdleMs };
+  return { profileDir: accountProfilesDir, captureBrowserIdleMs: 0 };
 }
 
 export function skuIdFromNetworkUrl(value) {
@@ -61,6 +61,10 @@ export function canReuseBrowser(runtimeHeadless, requestedHeadless) {
   return requestedHeadless || !runtimeHeadless;
 }
 
+export function shouldPreserveCaptureCache(options = {}) {
+  return options.localCapture === true || options.preserveCache === true;
+}
+
 function browserContext(options = {}) {
   const profileKey = String(options.profileKey || "legacy").replace(/[^a-zA-Z0-9_-]/g, "_");
   return {
@@ -77,43 +81,116 @@ function browserKey(options = {}) {
   return `${context.profileKey}:${context.port}`;
 }
 
-function cancelIdleClose(options = {}) {
-  const state = browserUsage.get(browserKey(options));
-  if (!state?.timer) return;
-  clearTimeout(state.timer);
-  state.timer = null;
+function cookieMatchesUrl(cookie, value, now = Date.now()) {
+  let url;
+  try {
+    url = new URL(value);
+  } catch {
+    return false;
+  }
+  const domain = String(cookie?.domain || "").toLowerCase();
+  const cookieHost = domain.replace(/^\./, "");
+  const requestHost = url.hostname.toLowerCase();
+  const domainMatches = domain.startsWith(".")
+    ? requestHost === cookieHost || requestHost.endsWith(`.${cookieHost}`)
+    : requestHost === cookieHost;
+  if (!domainMatches || (cookie.secure && url.protocol !== "https:")) return false;
+  const cookiePath = String(cookie.path || "/");
+  const requestPath = url.pathname || "/";
+  if (!requestPath.startsWith(cookiePath)) return false;
+  if (cookie.expires > 0 && cookie.expires * 1000 <= now) return false;
+  return Boolean(cookie.name);
 }
 
-function beginCaptureBrowserUse(options = {}) {
-  const key = browserKey(options);
-  const state = browserUsage.get(key) || { active: 0, timer: null };
-  if (state.timer) clearTimeout(state.timer);
-  state.timer = null;
-  state.active += 1;
-  browserUsage.set(key, state);
+function cookiesForUrls(cookies = [], urls = [], now = Date.now()) {
+  const targets = (Array.isArray(urls) ? urls : [urls]).filter(Boolean);
+  const candidates = cookies
+    .map((cookie) => ({
+      cookie,
+      targetIndex: targets.findIndex((url) => cookieMatchesUrl(cookie, url, now)),
+    }))
+    .filter((entry) => entry.targetIndex >= 0)
+    .sort((left, right) => left.targetIndex - right.targetIndex
+      || String(right.cookie.domain || "").length - String(left.cookie.domain || "").length
+      || String(right.cookie.path || "/").length - String(left.cookie.path || "/").length);
+  const byName = new Map();
+  for (const { cookie } of candidates) {
+    if (!byName.has(cookie.name)) byName.set(cookie.name, cookie);
+  }
+  return [...byName.values()];
 }
 
-function endCaptureBrowserUse(options = {}) {
-  const context = browserContext(options);
-  const key = browserKey(context);
-  const state = browserUsage.get(key) || { active: 0, timer: null };
-  state.active = Math.max(0, state.active - 1);
-  if (state.active > 0) {
-    browserUsage.set(key, state);
-    return;
+export function cookieHeaderForUrls(cookies = [], urls = [], now = Date.now()) {
+  return cookiesForUrls(cookies, urls, now).map((cookie) => `${cookie.name}=${cookie.value}`).join("; ");
+}
+
+export function taobaoCookieStateForUrls(cookies = [], urls = taobaoAuthUrls, now = Date.now()) {
+  const identityScoped = cookiesForUrls(cookies, taobaoAuthUrls, now);
+  const identityNames = new Set(identityScoped.map((cookie) => cookie.name));
+  const identityCookies = ["unb", "cookie17", "tracknick", "lgc", "_nk_", "sn", "munb"];
+  const nicknameCookie = identityScoped.find((cookie) => ["tracknick", "lgc", "_nk_", "sn"].includes(cookie.name));
+  let nickname = "";
+  try {
+    nickname = decodeURIComponent(nicknameCookie?.value || "");
+  } catch {
+    nickname = nicknameCookie?.value || "";
   }
-  if (browserModes.get(key) !== "capture") {
-    browserUsage.delete(key);
-    return;
+  return {
+    loggedIn: identityCookies.some((name) => identityNames.has(name)),
+    nickname,
+    cookie: cookieHeaderForUrls(cookies, urls, now),
+  };
+}
+
+export function classifyTaobaoSessionCheck({ authLoggedIn = false, hasCookie = false, loginPage = false, explicitLogin = false } = {}) {
+  if (explicitLogin) return "expired";
+  if (authLoggedIn && hasCookie && !loginPage) return "valid";
+  return "degraded";
+}
+
+export function browserCommandMatchesContext(commandLine, { profilePath: expectedProfilePath, port } = {}) {
+  if (!expectedProfilePath || !Number.isFinite(Number(port))) return false;
+  const normalize = (value) => {
+    const normalized = String(value || "").replaceAll('"', "");
+    return process.platform === "win32"
+      ? normalized.replaceAll("\\", "/").toLowerCase()
+      : normalized.replaceAll("\\ ", " ");
+  };
+  const command = normalize(commandLine);
+  const expectedPath = normalize(path.resolve(expectedProfilePath));
+  const portPattern = new RegExp(`(?:^|\\s)--remote-debugging-port=${Number(port)}(?:\\s|$)`);
+  const profileFlag = `--user-data-dir=${expectedPath}`;
+  const profileIndex = command.indexOf(profileFlag);
+  const profileBoundary = profileIndex >= 0 ? command.slice(profileIndex + profileFlag.length, profileIndex + profileFlag.length + 1) : "";
+  return portPattern.test(command)
+    && profileIndex >= 0
+    && (!profileBoundary || /\s/.test(profileBoundary));
+}
+
+function localPortAvailable(port) {
+  return new Promise((resolve) => {
+    const server = net.createServer();
+    server.unref();
+    server.once("error", () => resolve(false));
+    server.listen({ host: "127.0.0.1", port, exclusive: true }, () => {
+      server.close(() => resolve(true));
+    });
+  });
+}
+
+export async function findAvailableBrowserPort(reservedPorts = [], options = {}) {
+  const start = Number(options.start || 9300);
+  const end = Number(options.end || 9799);
+  const isAvailable = options.isAvailable || localPortAvailable;
+  const random = options.random || Math.random;
+  const count = end - start + 1;
+  const offset = Math.floor(random() * count) % count;
+  const reserved = new Set(reservedPorts.map(Number));
+  for (let index = 0; index < count; index += 1) {
+    const port = start + ((offset + index) % count);
+    if (!reserved.has(port) && await isAvailable(port)) return port;
   }
-  state.timer = setTimeout(() => {
-    const current = browserUsage.get(key);
-    if (!current || current.active > 0) return;
-    current.timer = null;
-    closeAccountBrowser(context).catch(() => undefined);
-  }, captureBrowserIdleMs);
-  state.timer.unref?.();
-  browserUsage.set(key, state);
+  throw new Error("没有可用的账号浏览器端口，请关闭旧版本软件后重试。");
 }
 
 function chromeCandidates() {
@@ -149,9 +226,9 @@ function validateProductUrl(url) {
 export function isTaobaoLoginUrl(url = "") {
   try {
     const parsed = new URL(url);
-    return /(^|\.)login\.taobao\.com$/i.test(parsed.hostname) || /\/login(?:[/.]|$)/i.test(parsed.pathname);
+    return /^(?:login|passport)\.(?:m\.)?(?:taobao|tmall)\.com$/i.test(parsed.hostname);
   } catch {
-    return /login\.taobao\.com|\/login(?:[/.]|$)/i.test(String(url));
+    return /(?:login|passport)\.(?:m\.)?(?:taobao|tmall)\.com/i.test(String(url));
   }
 }
 
@@ -160,8 +237,7 @@ export function isTaobaoLoginDocument(url = "", html = "") {
   const hasProductData = /skuCore|skuBase|skuOptionsArea/i.test(source);
   const loginBridge = /pc-detail-ssr-2025[\s\S]{0,8000}\/(?:login_jump|close_iframe_page)|aluWVJSBridge[\s\S]{0,2000}sdkLogin|["']action["']\s*:\s*["']login["']/i.test(source);
   return isTaobaoLoginUrl(url)
-    || /手机扫码登录|密码登录|短信登录|请登录后继续|安全验证|请完成验证/i.test(source)
-    || (loginBridge && !hasProductData);
+    || (!hasProductData && (/手机扫码登录|密码登录|短信登录|请登录后继续|安全验证|请完成验证/i.test(source) || loginBridge));
 }
 
 export async function openProductInAccountChrome(url, authSession) {
@@ -216,10 +292,49 @@ export async function isBrowserReady(options = {}) {
   }
 }
 
+function processCommandLine(processId) {
+  const command = process.platform === "win32" ? "powershell.exe" : "ps";
+  const args = process.platform === "win32"
+    ? [
+        "-NoProfile",
+        "-NonInteractive",
+        "-Command",
+        `[Console]::OutputEncoding=[Text.UTF8Encoding]::new(); (Get-CimInstance Win32_Process -Filter "ProcessId=${Number(processId)}").CommandLine`,
+      ]
+    : ["-p", String(processId), "-o", "command="];
+  return new Promise((resolve, reject) => {
+    execFile(command, args, { encoding: "utf8", windowsHide: true, timeout: 5000 }, (error, stdout) => {
+      if (error) reject(error);
+      else resolve(String(stdout || "").trim());
+    });
+  });
+}
+
+async function assertBrowserOwnership(context, version) {
+  const key = browserKey(context);
+  const cdp = await createCdp(version.webSocketDebuggerUrl);
+  let processId;
+  try {
+    const processInfo = await cdp.send("SystemInfo.getProcessInfo", {}, 5000);
+    processId = Number(processInfo.processInfo?.find((item) => item.type === "browser")?.id);
+  } finally {
+    cdp.close();
+  }
+  if (!Number.isFinite(processId)) throw new Error("无法确认账号浏览器进程归属，请重启软件后重试。");
+  if (verifiedBrowserOwners.get(key) === processId) return true;
+  const commandLine = await processCommandLine(processId);
+  if (!browserCommandMatchesContext(commandLine, context)) {
+    throw new Error("账号浏览器端口与资料目录不匹配；为避免串账号，本次操作已停止。请关闭旧版本软件后重试。");
+  }
+  verifiedBrowserOwners.set(key, processId);
+  return true;
+}
+
 async function startOrReuseBrowser(startUrl = "https://login.taobao.com/", options = {}) {
   const context = browserContext(options);
   const key = browserKey(context);
   const runtime = await browserRuntimeState(context);
+  if (runtime.ready) await assertBrowserOwnership(context, runtime.version);
   if (runtime.ready && !browserModes.has(key)) browserModes.set(key, runtime.headless ? "capture" : "visible");
   if (runtime.ready && canReuseBrowser(runtime.headless, context.headless)) return { started: false, ...context };
   if (runtime.ready) {
@@ -229,6 +344,7 @@ async function startOrReuseBrowser(startUrl = "https://login.taobao.com/", optio
     } finally {
       cdp.close();
     }
+    verifiedBrowserOwners.delete(key);
     for (let index = 0; index < 30; index++) {
       if (!(await isBrowserReady(context))) break;
       await new Promise((resolve) => setTimeout(resolve, 200));
@@ -271,7 +387,11 @@ async function startOrReuseBrowser(startUrl = "https://login.taobao.com/", optio
 
   for (let i = 0; i < 25; i++) {
     await new Promise((resolve) => setTimeout(resolve, 400));
-    if (await isBrowserReady(context)) return { started: true, ...context };
+    const startedRuntime = await browserRuntimeState(context);
+    if (startedRuntime.ready) {
+      await assertBrowserOwnership(context, startedRuntime.version);
+      return { started: true, ...context };
+    }
   }
 
   throw new Error("Chrome 已启动但调试接口未就绪。");
@@ -280,7 +400,6 @@ async function startOrReuseBrowser(startUrl = "https://login.taobao.com/", optio
 export async function ensureBrowser(startUrl = "https://login.taobao.com/", options = {}) {
   const context = browserContext(options);
   const key = browserKey(context);
-  cancelIdleClose(context);
   const existingStart = browserStartPromises.get(key);
   if (existingStart) return existingStart;
 
@@ -388,8 +507,12 @@ export async function keepAccountBrowserWarm(authSession) {
   return context;
 }
 
-export function minimizeAccountBrowser(options = {}) {
-  return setBrowserWindowState(options, "minimize");
+export async function minimizeAccountBrowser(options = {}) {
+  const context = browserContext(options);
+  const runtime = await browserRuntimeState(context);
+  if (!runtime.ready) return false;
+  await assertBrowserOwnership(context, runtime.version);
+  return setBrowserWindowState(context, "minimize");
 }
 
 function restoreAccountBrowser(options = {}) {
@@ -409,8 +532,9 @@ function createCdp(wsUrl) {
       return;
     }
     if (!pending.has(message.id)) return;
-    const { resolve, reject } = pending.get(message.id);
+    const { resolve, reject, timer } = pending.get(message.id);
     pending.delete(message.id);
+    clearTimeout(timer);
     if (message.error) reject(new Error(message.error.message));
     else resolve(message.result);
   });
@@ -422,12 +546,12 @@ function createCdp(wsUrl) {
           const callId = ++id;
           socket.send(JSON.stringify({ id: callId, method, params }));
           return new Promise((callResolve, callReject) => {
-            pending.set(callId, { resolve: callResolve, reject: callReject });
-            setTimeout(() => {
+            const timer = setTimeout(() => {
               if (!pending.has(callId)) return;
               pending.delete(callId);
               callReject(new Error(`CDP 调用超时：${method}`));
             }, timeoutMs);
+            pending.set(callId, { resolve: callResolve, reject: callReject, timer });
           });
         },
         on(method, handler) {
@@ -480,7 +604,7 @@ export async function openTaobaoLogin(options = {}) {
     profileKey: context.profileKey,
     port: context.port,
     targetId: tab.id,
-    message: "已打开独立淘宝登录窗口，请用淘宝 App 扫码；检测到真实账号身份后会自动同步并关闭窗口。",
+    message: "已打开独立淘宝登录窗口，请用淘宝 App 扫码；检测到真实账号身份后会自动同步并最小化窗口。",
   };
 }
 
@@ -498,24 +622,14 @@ export async function getTaobaoAuthState(options = {}) {
     getJson(`http://127.0.0.1:${context.port}/json/version`),
     getJson(`http://127.0.0.1:${context.port}/json/list`).catch(() => []),
   ]);
+  await assertBrowserOwnership(context, version);
   const cdp = await createCdp(version.webSocketDebuggerUrl);
   try {
     const { cookies } = await cdp.send("Storage.getCookies");
-    const scoped = cookies.filter((cookie) => /\.(taobao|tmall)\.com$/i.test(cookie.domain) || /(taobao|tmall)\.com$/i.test(cookie.domain));
-    const names = new Set(scoped.map((cookie) => cookie.name));
-    const identityCookies = ["unb", "cookie17", "tracknick", "lgc", "_nk_", "sn", "munb"];
-    const loggedIn = identityCookies.some((name) => names.has(name));
-    const nicknameCookie = scoped.find((cookie) => ["tracknick", "lgc", "_nk_", "sn"].includes(cookie.name));
-    let nickname = "";
-    try {
-      nickname = decodeURIComponent(nicknameCookie?.value || "");
-    } catch {
-      nickname = nicknameCookie?.value || "";
-    }
+    const requestedUrls = options.url ? [options.url] : options.urls?.length ? options.urls : taobaoAuthUrls;
+    const cookieState = taobaoCookieStateForUrls(cookies, requestedUrls);
     return {
-      loggedIn,
-      nickname,
-      cookie: scoped.map((cookie) => `${cookie.name}=${cookie.value}`).join("; "),
+      ...cookieState,
       loginPageOpen: targets.some((target) => target.type === "page" && isTaobaoLoginUrl(target.url)),
       targets: targets.filter((target) => target.type === "page").map((target) => ({ id: target.id, url: target.url })),
     };
@@ -526,33 +640,55 @@ export async function getTaobaoAuthState(options = {}) {
 
 export async function checkTaobaoSession(options = {}) {
   const context = browserContext({ ...options, headless: false, background: true });
-  const page = await getRenderedHtml("https://i.taobao.com/my_taobao.htm", {
-    browserProfileKey: context.profileKey,
-    browserPort: context.port,
-  });
-  const loginPage = isTaobaoLoginDocument(page.finalUrl, page.html);
-  return {
-    loggedIn: Boolean(page.authState?.loggedIn && page.cookieHeader && !loginPage),
-    cookie: page.cookieHeader || "",
-    nickname: page.authState?.nickname || "",
-    browserClosed: false,
-    finalUrl: page.finalUrl,
-    loginPage,
-  };
+  const checkUrl = taobaoAuthUrls[0];
+  try {
+    const page = await getRenderedHtml(checkUrl, {
+      browserProfileKey: context.profileKey,
+      browserPort: context.port,
+    });
+    const loginPage = isTaobaoLoginDocument(page.finalUrl, page.html);
+    const status = classifyTaobaoSessionCheck({
+      authLoggedIn: page.authState?.loggedIn,
+      hasCookie: Boolean(page.cookieHeader),
+      loginPage,
+      explicitLogin: isTaobaoLoginUrl(page.finalUrl),
+    });
+    return {
+      status,
+      loggedIn: status === "valid",
+      cookie: page.cookieHeader || "",
+      nickname: page.authState?.nickname || "",
+      browserClosed: false,
+      finalUrl: page.finalUrl,
+      loginPage,
+    };
+  } catch (error) {
+    const authState = await getTaobaoAuthState({ ...context, url: checkUrl }).catch(() => ({ loggedIn: false, cookie: "" }));
+    return {
+      status: "degraded",
+      loggedIn: Boolean(authState.loggedIn),
+      cookie: authState.cookie || "",
+      nickname: authState.nickname || "",
+      browserClosed: Boolean(authState.browserClosed),
+      finalUrl: "",
+      loginPage: false,
+      error: error.message,
+    };
+  }
 }
 
 export async function closeAccountBrowser(options = {}) {
   const context = browserContext(options);
   const key = browserKey(context);
-  cancelIdleClose(context);
   if (!(await isBrowserReady(context))) {
     browserProcesses.delete(key);
-    browserUsage.delete(key);
     browserModes.delete(key);
+    verifiedBrowserOwners.delete(key);
     return false;
   }
   try {
     const version = await getJson(`http://127.0.0.1:${context.port}/json/version`);
+    await assertBrowserOwnership(context, version);
     const cdp = await createCdp(version.webSocketDebuggerUrl);
     try {
       await cdp.send("Browser.close", {}, 10000);
@@ -560,8 +696,8 @@ export async function closeAccountBrowser(options = {}) {
       cdp.close();
     }
     browserProcesses.delete(key);
-    browserUsage.delete(key);
     browserModes.delete(key);
+    verifiedBrowserOwners.delete(key);
     for (let index = 0; index < 30; index++) {
       if (!(await isBrowserReady(context))) break;
       await new Promise((resolve) => setTimeout(resolve, 200));
@@ -571,15 +707,14 @@ export async function closeAccountBrowser(options = {}) {
     const process = browserProcesses.get(key);
     if (process && !process.killed) process.kill();
     browserProcesses.delete(key);
-    browserUsage.delete(key);
     browserModes.delete(key);
+    verifiedBrowserOwners.delete(key);
     return false;
   }
 }
 
 export async function getRenderedHtml(url, authSession = {}, renderOptions = {}) {
   const context = browserContext({ profileKey: authSession.browserProfileKey, port: authSession.browserPort, headless: false, background: true });
-  beginCaptureBrowserUse(context);
   let tab = null;
   let cdp = null;
   try {
@@ -591,14 +726,17 @@ export async function getRenderedHtml(url, authSession = {}, renderOptions = {})
     await minimizeBrowserForCapture(context);
     cdp = await createCdp(tab.webSocketDebuggerUrl);
     await cdp.send("Network.enable");
-    await cdp.send("Network.setCacheDisabled", { cacheDisabled: true });
-    await cdp.send("Network.setBypassServiceWorker", { bypass: true });
+    const preserveCache = shouldPreserveCaptureCache(renderOptions);
+    if (!preserveCache) {
+      await cdp.send("Network.setCacheDisabled", { cacheDisabled: true });
+      await cdp.send("Network.setBypassServiceWorker", { bypass: true });
+    }
     const priceResponses = new Map();
     const buyerShowResponses = new Map();
     const buyerShowInteractions = [];
     const skuWaiters = new Map();
     const requestedSelections = Array.isArray(renderOptions.selectSkus) ? renderOptions.selectSkus : [];
-    if (requestedSelections.length) await cdp.send("Network.clearBrowserCache");
+    if (requestedSelections.length && !preserveCache) await cdp.send("Network.clearBrowserCache");
     const priceResponseLimit = requestedSelections.length || Array.isArray(renderOptions.selectSkuNames) ? 240 : 60;
     cdp.on("Network.responseReceived", ({ requestId, response, type }) => {
       const responseUrl = String(response?.url || "");
@@ -618,7 +756,6 @@ export async function getRenderedHtml(url, authSession = {}, renderOptions = {})
         }
       }
     });
-    await cdp.send("Network.setUserAgentOverride", { userAgent: stableChromeUserAgent });
     await cdp.send("Runtime.enable");
     await cdp.send("Page.enable");
     await cdp.send("Page.navigate", { url });
@@ -796,7 +933,7 @@ export async function getRenderedHtml(url, authSession = {}, renderOptions = {})
       expression: "window.location.href",
       returnByValue: true,
     }, 10000);
-    const authState = await getTaobaoAuthState(context);
+    const authState = await getTaobaoAuthState({ ...context, url: locationResult.result?.value || url });
     // Buyer-show responses are read first so large price telemetry cannot use
     // the payload budget before the delayed review requests finish.
     const responseEntries = [...buyerShowResponses, ...priceResponses];
@@ -857,6 +994,5 @@ export async function getRenderedHtml(url, authSession = {}, renderOptions = {})
     cdp?.close();
     if (tab?.id) await closeTab(tab.id, context);
     await minimizeBrowserForCapture(context);
-    endCaptureBrowserUse(context);
   }
 }

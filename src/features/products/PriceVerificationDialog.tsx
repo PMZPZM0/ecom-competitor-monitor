@@ -3,7 +3,7 @@ import { useEffect } from 'react'
 import { createPortal } from 'react-dom'
 import { currency } from '../../lib/utils'
 import type { Product, Snapshot } from '../../types/domain'
-import { publicPriceLabelForSku } from './productDisplayUtils'
+import { publicPriceLabelForSku, skuForAccountView } from './productDisplayUtils'
 
 type Sku = Snapshot['skuPrices'][number]
 type Channel = 'normal' | 'government' | 'surprise' | 'gift' | 'vip88' | 'coin'
@@ -34,8 +34,8 @@ function inspectChannel(sku: Sku, channel: (typeof channels)[number]) {
   }
 }
 
-export function PriceVerificationDialog({ product, onClose }: { product: Product; onClose: () => void }) {
-  const skus = product.lastSnapshot?.skuPrices || []
+export function PriceVerificationDialog({ product, accountSessionId, accountType, accountName, onClose }: { product: Product; accountSessionId: string; accountType: NonNullable<Product['accountType']>; accountName: string; onClose: () => void }) {
+  const skus = (product.lastSnapshot?.skuPrices || []).map((sku) => skuForAccountView(sku, accountSessionId, accountType))
   const inspections = skus.flatMap((sku) => channels.map((channel) => inspectChannel(sku, channel)))
   const verifiedCount = inspections.filter((item) => item.matches).length
   const mismatchCount = inspections.filter((item) => item.verified && !item.matches).length
@@ -59,7 +59,7 @@ export function PriceVerificationDialog({ product, onClose }: { product: Product
         <div className="flex items-center justify-between gap-4 border-b border-slate-200 px-5 py-4">
           <div className="min-w-0">
             <div id="price-verification-title" className="flex items-center gap-2 text-base font-semibold text-slate-950"><ShieldCheck className="h-5 w-5 text-blue-600" />价格公式核对</div>
-            <div className="mt-1 truncate text-sm text-slate-500">{product.name}</div>
+            <div className="mt-1 truncate text-sm text-slate-500">{product.name} · {accountName}视角</div>
           </div>
           <button type="button" onClick={onClose} className="inline-flex h-9 w-9 shrink-0 items-center justify-center rounded-md text-slate-500 hover:bg-slate-100" title="关闭价格核对"><X className="h-5 w-5" /></button>
         </div>

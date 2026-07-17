@@ -1,6 +1,6 @@
 import crypto from "node:crypto";
 
-export const PRICE_PARSER_VERSION = "evidence-v1.4";
+export const PRICE_PARSER_VERSION = "evidence-v1.5";
 
 const endpoint = "mtop.taobao.pcdetail.data.adjust";
 const embeddedEndpoint = "tmall-ssr-sku";
@@ -18,6 +18,13 @@ const publicPromotionLabels = new Map([
 const governmentPromotionLabels = new Map([
   ["zflj", "政府补贴"],
 ]);
+
+function exposedChannelKinds(accountType = "normal") {
+  const common = ["normal", "government", "surprise", "coin"];
+  if (accountType === "gift") return [...common, "gift"];
+  if (accountType === "vip88") return [...common, "gift", "vip88"];
+  return common;
+}
 
 function decodeJson(value, depth = 0) {
   if (depth > 5 || typeof value !== "string") return value;
@@ -277,9 +284,13 @@ export function resolveSkuPriceEvidence(payloads, options = {}) {
     capturedResponseSkuId: item.capturedResponseSkuId || "",
   })).sort((left, right) => JSON.stringify(left).localeCompare(JSON.stringify(right)));
   if (!verified.length) return { ...candidates[0], attempts };
-  const signatures = new Set(verified.map((item) => JSON.stringify(Object.fromEntries(Object.entries(item.channels).map(([key, value]) => [key, value.valueCents])))));
+  const channelKinds = exposedChannelKinds(options.accountType);
+  const signatures = new Set(verified.map((item) => JSON.stringify(
+    Object.fromEntries(channelKinds.map((kind) => [kind, item.channels[kind]?.valueCents ?? null])),
+  )));
   if (signatures.size > 1) return ambiguous("conflicting-verified-responses");
-  return { ...verified[0], attempts };
+  const selected = verified.toSorted((left, right) => String(left.evidenceHash || "").localeCompare(String(right.evidenceHash || "")))[0];
+  return { ...selected, attempts };
 }
 
 export function resolveEmbeddedSkuPriceEvidence(sku, options = {}) {
@@ -355,12 +366,33 @@ export function resolveEmbeddedSkuPriceEvidence(sku, options = {}) {
   };
 }
 
+export function selectAuthoritativePriceResolution(networkResolution, embeddedResolution, { governmentProgramObserved = false } = {}) {
+  if (networkResolution?.matched) return networkResolution;
+  if (embeddedResolution?.status !== "verified") return networkResolution;
+  if (!governmentProgramObserved) return embeddedResolution;
+  return {
+    ...networkResolution,
+    matched: true,
+    status: "ambiguous",
+    reason: "government-adjust-response-not-observed",
+  };
+}
+
 export function applyPriceResolution(sku, resolution) {
   if (!resolution?.matched || resolution.status !== "verified") {
     return resolution?.matched ? { ...sku, resolutionStatus: resolution.status, priceResolution: resolution } : sku;
   }
+  const accountType = resolution.accountType || "normal";
+  const allowedChannels = new Set(exposedChannelKinds(accountType));
+  const scopedResolution = {
+    ...resolution,
+    channels: Object.fromEntries(Object.entries(resolution.channels).map(([kind, channel]) => [
+      kind,
+      allowedChannels.has(kind) ? channel : unavailableChannel("different-account-channel"),
+    ])),
+  };
   const value = (kind) => {
-    const cents = resolution.channels[kind]?.valueCents;
+    const cents = scopedResolution.channels[kind]?.valueCents;
     return Number.isSafeInteger(cents) ? cents / 100 : null;
   };
   const normalPrice = value("normal");
@@ -390,17 +422,17 @@ export function applyPriceResolution(sku, resolution) {
     priceTitle: normalLabel,
     priceLayers,
     priceEvidence: resolution.evidence,
-    priceResolution: resolution,
+    priceResolution: scopedResolution,
     resolutionStatus: "verified",
     parserVersion: resolution.parserVersion,
     priceCalculation: {
       ...(sku.priceCalculation || {}),
-      normal: resolution.channels.normal.formula,
-      government: resolution.channels.government.formula || "本次未获取明确政府补贴证据",
-      surprise: resolution.channels.surprise.formula || "本次未获取明确惊喜立减证据",
-      gift: resolution.channels.gift.formula || "本次未获取明确礼金证据",
-      vip88: resolution.channels.vip88.formula || "本次未获取明确88VIP证据",
-      coin: resolution.channels.coin.formula || "本次未获取明确淘金币证据",
+      normal: scopedResolution.channels.normal.formula,
+      government: scopedResolution.channels.government.formula || "本次未获取明确政府补贴证据",
+      surprise: scopedResolution.channels.surprise.formula || "本次未获取明确惊喜立减证据",
+      gift: scopedResolution.channels.gift.formula || (accountType === "gift" || accountType === "vip88" ? "本次未获取明确礼金证据" : "当前账号不参与礼金计算"),
+      vip88: scopedResolution.channels.vip88.formula || (accountType === "vip88" ? "本次未获取明确88VIP证据" : "当前账号不参与88VIP计算"),
+      coin: scopedResolution.channels.coin.formula || "本次未获取明确淘金币证据",
     },
   };
   for (const [kind, [priceField, statusField, discountField]] of Object.entries(channelFields)) {
@@ -414,7 +446,7 @@ export function applyPriceResolution(sku, resolution) {
         : kind === "vip88"
           ? resolution.channels.gift.valueCents ?? resolution.channels.surprise.valueCents ?? resolution.channels.government.valueCents ?? resolution.channels.normal.valueCents
           : resolution.channels.surprise.valueCents ?? resolution.channels.government.valueCents ?? resolution.channels.normal.valueCents;
-    result[discountField] = channelPrice != null ? (baseCents - resolution.channels[kind].valueCents) / 100 : null;
+    result[discountField] = channelPrice != null ? (baseCents - scopedResolution.channels[kind].valueCents) / 100 : null;
   }
   const coinPrice = value("coin");
   if (coinPrice != null) {
@@ -425,7 +457,7 @@ export function applyPriceResolution(sku, resolution) {
       ?? resolution.channels.surprise.valueCents
       ?? resolution.channels.government.valueCents
       ?? resolution.channels.normal.valueCents;
-    result.coinDiscountAmount = (coinBaseCents - resolution.channels.coin.valueCents) / 100;
+    result.coinDiscountAmount = (coinBaseCents - scopedResolution.channels.coin.valueCents) / 100;
   } else {
     result.coinPrice = null;
     result.coinStatus = "none";

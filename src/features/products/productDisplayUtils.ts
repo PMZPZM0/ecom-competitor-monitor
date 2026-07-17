@@ -3,6 +3,49 @@ import type { Product } from '../../types/domain'
 
 export type SkuPrice = NonNullable<Product['lastSnapshot']>['skuPrices'][number]
 
+export function accountPriceViewForSku(sku: SkuPrice, sessionId = '', accountType?: Product['accountType']) {
+  return sku.accountPrices?.find((view) => view.sessionId === sessionId)
+    || sku.accountPrices?.find((view) => view.accountType === accountType)
+    || null
+}
+
+export function skuForAccountView(sku: SkuPrice, sessionId = '', accountType?: Product['accountType']): SkuPrice {
+  const view = accountPriceViewForSku(sku, sessionId, accountType)
+  if (!view) return sku
+  return {
+    ...sku,
+    ...view,
+    normalPrice: view.normalPrice ?? view.price,
+    governmentPrice: view.governmentPrice ?? null,
+    governmentStatus: view.governmentStatus ?? 'none',
+    governmentDiscountAmount: view.governmentDiscountAmount ?? null,
+    surprisePrice: view.surprisePrice ?? null,
+    surpriseStatus: view.surpriseStatus ?? 'none',
+    surpriseDiscountAmount: view.surpriseDiscountAmount ?? null,
+    giftPrice: view.giftPrice ?? null,
+    giftStatus: view.giftStatus ?? 'none',
+    giftDiscountAmount: view.giftDiscountAmount ?? null,
+    vipPrice: view.vipPrice ?? null,
+    vipStatus: view.vipStatus ?? 'none',
+    vipDiscountAmount: view.vipDiscountAmount ?? null,
+    coinPrice: view.coinPrice ?? null,
+    coinStatus: view.coinStatus ?? 'none',
+    coinDiscountAmount: view.coinDiscountAmount ?? null,
+    priceResolution: view.priceResolution,
+    resolutionStatus: view.resolutionStatus || 'legacy',
+    priceCalculation: view.priceCalculation,
+    priceLayers: view.priceLayers || [],
+    discountItems: view.discountItems || [],
+    skuId: sku.skuId,
+    name: sku.name,
+    image: sku.image,
+    quantity: sku.quantity,
+    quantityText: sku.quantityText,
+    quantitySource: sku.quantitySource,
+    accountPrices: sku.accountPrices,
+  }
+}
+
 export function verifiedPriceChannel(sku: SkuPrice, channel: 'normal' | 'government' | 'surprise' | 'gift' | 'vip88' | 'coin') {
   return sku.resolutionStatus === 'verified' && sku.priceResolution?.channels?.[channel]?.status === 'verified'
 }

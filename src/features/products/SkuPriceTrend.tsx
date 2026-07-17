@@ -13,6 +13,7 @@ import {
 import { TrendingUp } from 'lucide-react'
 import { currency } from '../../lib/utils'
 import type { Product, Snapshot } from '../../types/domain'
+import { accountPriceViewForSku, skuForAccountView } from './productDisplayUtils'
 
 const lineColors = ['#0284c7', '#ea580c', '#7c3aed', '#059669', '#d97706', '#db2777', '#0891b2', '#4f46e5']
 
@@ -34,7 +35,7 @@ function priceForMode(sku: Snapshot['skuPrices'][number], mode: PriceMode) {
   return typeof value === 'number' ? value : null
 }
 
-export function SkuPriceTrend({ snapshots, product }: { snapshots: Snapshot[]; product: Product }) {
+export function SkuPriceTrend({ snapshots, product, accountSessionId, accountType, accountName }: { snapshots: Snapshot[]; product: Product; accountSessionId: string; accountType: NonNullable<Product['accountType']>; accountName: string }) {
   const [selectedSku, setSelectedSku] = useState('all')
   const [priceMode, setPriceMode] = useState<PriceMode>('normalPrice')
   const orderedSnapshots = useMemo(
@@ -63,7 +64,12 @@ export function SkuPriceTrend({ snapshots, product }: { snapshots: Snapshot[]; p
       time: capturedAt.toLocaleString('zh-CN', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' }),
     }
     for (const sku of snapshot.skuPrices || []) {
-      const value = priceForMode(sku, priceMode)
+      const accountView = accountPriceViewForSku(sku, accountSessionId, accountType)
+      const snapshotAccountType = snapshot.primaryAccountType
+        || snapshot.accountCaptures?.find((capture) => capture.sessionId === snapshot.primaryAccountSessionId)?.accountType
+        || product.accountType
+      if (accountSessionId && !accountView && snapshotAccountType && snapshotAccountType !== accountType) continue
+      const value = priceForMode(accountView ? skuForAccountView(sku, accountSessionId, accountType) : sku, priceMode)
       if (typeof value === 'number') point[sku.skuId] = value
     }
     return point
@@ -79,17 +85,17 @@ export function SkuPriceTrend({ snapshots, product }: { snapshots: Snapshot[]; p
           </span>
           <div>
             <div className="text-sm font-semibold text-slate-800">SKU 价格趋势</div>
-            <div className="text-xs text-slate-400">最近 {orderedSnapshots.length} 次监控记录</div>
+            <div className="text-xs text-slate-400">{accountName}视角 · 最近 {orderedSnapshots.length} 次监控记录</div>
           </div>
         </div>
-        <div className="flex min-w-0 items-center gap-2">
-          <select value={priceMode} onChange={(event) => setPriceMode(event.target.value as PriceMode)} className="h-9 w-[145px] rounded-md border border-slate-200 bg-white px-2 text-sm text-slate-700 outline-none focus:border-sky-400" aria-label="选择价格口径">
+        <div className="flex w-full min-w-0 flex-col items-stretch gap-2 sm:w-auto sm:flex-row sm:items-center">
+          <select value={priceMode} onChange={(event) => setPriceMode(event.target.value as PriceMode)} className="h-9 w-full rounded-md border border-slate-200 bg-white px-2 text-sm text-slate-700 outline-none focus:border-sky-400 sm:w-[145px]" aria-label="选择价格口径">
             {priceModes.map((mode) => <option key={mode.value} value={mode.value}>{mode.label}</option>)}
           </select>
           <select
             value={selectedSku}
             onChange={(event) => setSelectedSku(event.target.value)}
-            className="h-9 max-w-[300px] rounded-md border border-slate-200 bg-white px-2 text-sm text-slate-700 outline-none focus:border-sky-400"
+            className="h-9 w-full rounded-md border border-slate-200 bg-white px-2 text-sm text-slate-700 outline-none focus:border-sky-400 sm:max-w-[300px]"
             aria-label="选择趋势图 SKU"
           >
             <option value="all">全部 SKU</option>

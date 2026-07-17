@@ -1,10 +1,10 @@
 import * as cheerio from "cheerio";
 import crypto from "node:crypto";
 import { assertMatchingProductId } from "../utils/productUrl.js";
-import { getRenderedHtml, isTaobaoLoginDocument } from "./browserService.js";
-import { applyPriceResolution, PRICE_PARSER_VERSION, resolveEmbeddedSkuPriceEvidence, resolveSkuPriceEvidence } from "./priceResolver.js";
+import { getRenderedHtml, isTaobaoLoginDocument, isTaobaoLoginUrl } from "./browserService.js";
+import { applyPriceResolution, PRICE_PARSER_VERSION, resolveEmbeddedSkuPriceEvidence, resolveSkuPriceEvidence, selectAuthoritativePriceResolution } from "./priceResolver.js";
 
-export const SCRAPER_VERSION = "2.0.5";
+export const SCRAPER_VERSION = "2.0.6";
 
 const userAgent =
   "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126 Safari/537.36";
@@ -1398,39 +1398,15 @@ export function applyNetworkPromoData(skuPrices, networkPayloads = [], options =
   });
 }
 
-async function fetchMobilePromotionPayloads(itemId, skuPrices, authSession) {
+async function fetchMobilePromotionPayloads(itemId, skuPrices, authSession, renderPage = getRenderedHtml) {
   if (authSession?.source !== "taobao-browser") return { networkPayloads: [], skuNetworkPayloads: {}, selectionResults: [] };
   const desktopProductUrl = `https://detail.tmall.com/item.htm?id=${encodeURIComponent(itemId)}`;
   try {
-    const first = await getRenderedHtml(desktopProductUrl, authSession, {
+    return await renderPage(desktopProductUrl, authSession, {
       selectSkus: skuPrices.map((sku) => ({ skuId: sku.skuId, valueIds: sku.selectionValueIds || [] })),
+      localCapture: true,
+      preserveCache: true,
     });
-    const missingSkuIds = new Set(first.selectionResults.filter((item) => !item.responseObserved).map((item) => String(item.skuId)));
-    if (!missingSkuIds.size) return first;
-    const retrySkus = skuPrices.filter((sku) => missingSkuIds.has(String(sku.skuId)) && sku.selectionValueIds?.length);
-    if (!retrySkus.length) return first;
-    let retry;
-    try {
-      retry = await getRenderedHtml(desktopProductUrl, authSession, {
-        selectSkus: retrySkus.map((sku) => ({ skuId: sku.skuId, valueIds: sku.selectionValueIds })),
-        selectSkuNames: retrySkus.flatMap((sku) => String(sku.name || "").split(/\s*\/\s*/).map((name) => name.trim()).filter(Boolean)),
-      });
-    } catch {
-      return first;
-    }
-    const networkPayloads = [...first.networkPayloads, ...retry.networkPayloads];
-    const skuNetworkPayloads = {};
-    for (const payload of networkPayloads) {
-      if (!payload.skuId) continue;
-      (skuNetworkPayloads[payload.skuId] ||= []).push(payload);
-    }
-    const retrySelections = new Map(retry.selectionResults.map((item) => [String(item.skuId), item]));
-    return {
-      ...first,
-      networkPayloads,
-      skuNetworkPayloads,
-      selectionResults: first.selectionResults.map((item) => retrySelections.get(String(item.skuId))?.responseObserved ? retrySelections.get(String(item.skuId)) : item),
-    };
   } catch {
     return { networkPayloads: [], skuNetworkPayloads: {}, selectionResults: [] };
   }
@@ -1614,13 +1590,7 @@ export function calculatePriceScenarios(sku) {
 
 export function calculateAccountPriceScenario(sku, accountType = "normal") {
   const scoped = { ...sku };
-  if (accountType !== "normal") {
-    scoped.surprisePrice = null;
-    scoped.surpriseStatus = "none";
-    scoped.surpriseDiscountAmount = null;
-    scoped.surpriseInference = null;
-  }
-  if (accountType !== "gift") {
+  if (accountType !== "gift" && accountType !== "vip88") {
     scoped.giftPrice = null;
     scoped.giftStatus = "none";
     scoped.giftDiscountAmount = null;
@@ -1638,8 +1608,8 @@ export function calculateAccountPriceScenario(sku, accountType = "normal") {
     accountType,
     priceCalculation: {
       normal: calculated.priceCalculation.normal,
-      surprise: accountType === "normal" ? calculated.priceCalculation.surprise : "当前账号不参与惊喜立减计算",
-      gift: accountType === "gift" ? calculated.priceCalculation.gift : "当前账号不参与礼金计算",
+      surprise: calculated.priceCalculation.surprise,
+      gift: accountType === "gift" || accountType === "vip88" ? calculated.priceCalculation.gift : "当前账号不参与礼金计算",
       vip88: accountType === "vip88" ? calculated.priceCalculation.vip88 : "当前账号不参与88VIP计算",
       coin: calculated.priceCalculation.coin,
     },
@@ -1736,15 +1706,21 @@ export function applyMediaCapturePreference(snapshot, captureMediaAssets) {
   };
 }
 
-async function fetchHtml(product, authSession) {
+async function fetchHtml(product, authSession, renderPage = getRenderedHtml) {
   if (authSession?.source === "taobao-browser") {
     let lastError;
     for (let attempt = 1; attempt <= 2; attempt++) {
       try {
-        const page = await getRenderedHtml(product.url, authSession, { captureVideo: product.captureMediaAssets === true, captureBuyerShow: product.captureBuyerShows !== false });
+        const page = await renderPage(product.url, authSession, {
+          captureVideo: product.captureMediaAssets === true,
+          captureBuyerShow: product.captureBuyerShows !== false,
+          localCapture: true,
+          preserveCache: true,
+        });
         const looksBlocked = isTaobaoLoginDocument(page.finalUrl, page.html);
         if (!looksBlocked) return page;
-        throw new Error("当前抓到登录或验证页面");
+        if (isTaobaoLoginUrl(page.finalUrl)) throw new Error("账号登录已明确失效：商品页跳转到淘宝登录页。");
+        throw new Error("账号页面需要安全验证，本次抓取已停止，登录状态保留待复检。");
       } catch (error) {
         lastError = error;
         if (/登录|验证|captcha|滑块/i.test(error.message)) break;
@@ -1767,16 +1743,125 @@ async function fetchHtml(product, authSession) {
   return { html, finalUrl: response.url, statusCode: response.status, source: "fetch" };
 }
 
+export function resolveCaptureAccessMode(authSession, page = {}) {
+  if (!authSession) return "anonymous";
+  if (authSession.source === "taobao-browser") {
+    return page.accessVerified === true || (page.authState?.loggedIn && page.cookieHeader) ? "authenticated" : "anonymous";
+  }
+  return "anonymous";
+}
+
+function compactBrowserPayload(payload) {
+  return {
+    url: String(payload?.url || ""),
+    mimeType: String(payload?.mimeType || ""),
+    skuId: String(payload?.skuId || ""),
+    requestSkuId: String(payload?.requestSkuId || ""),
+    responseSkuId: String(payload?.responseSkuId || ""),
+    responseKind: payload?.responseKind === "buyer-show" ? "buyer-show" : "price",
+    body: String(payload?.body || ""),
+  };
+}
+
+export function buildBrowserCaptureEvidence({ product, accountType, itemId, page, promotionCapture, capturedAt }) {
+  const payloads = [];
+  const seen = new Set();
+  for (const raw of [...(page.networkPayloads || []), ...(promotionCapture.networkPayloads || [])]) {
+    const payload = compactBrowserPayload(raw);
+    if (!payload.url || !payload.body) continue;
+    const fingerprint = crypto.createHash("sha256").update(`${payload.url}\n${payload.body}`).digest("hex");
+    if (seen.has(fingerprint)) continue;
+    seen.add(fingerprint);
+    payloads.push(payload);
+  }
+  return {
+    captureType: "account-browser-local-source",
+    capturedAt,
+    requestedUrl: product.url,
+    finalUrl: page.finalUrl,
+    itemId,
+    accountType,
+    page: {
+      html: String(page.html || ""),
+      visibleText: String(page.visibleText || ""),
+      finalUrl: String(page.finalUrl || product.url),
+      statusCode: Number(page.statusCode || 200),
+      source: "browser",
+      accessVerified: resolveCaptureAccessMode({ source: "taobao-browser" }, page) === "authenticated",
+      networkPayloads: payloads,
+      buyerShowInteractions: Array.isArray(page.buyerShowInteractions) ? page.buyerShowInteractions : [],
+      selectionResults: Array.isArray(promotionCapture.selectionResults) ? promotionCapture.selectionResults : [],
+    },
+  };
+}
+
+function hydrateBrowserCapturePage(record) {
+  const stored = record?.page || {};
+  const networkPayloads = Array.isArray(stored.networkPayloads) ? stored.networkPayloads.map(compactBrowserPayload) : [];
+  const skuNetworkPayloads = Object.fromEntries(Array.from(new Set(networkPayloads.map((payload) => payload.skuId).filter(Boolean))).map((skuId) => [
+    skuId,
+    networkPayloads.filter((payload) => payload.skuId === skuId),
+  ]));
+  return {
+    html: String(stored.html || ""),
+    visibleText: String(stored.visibleText || ""),
+    finalUrl: String(stored.finalUrl || record.finalUrl || record.requestedUrl || ""),
+    statusCode: Number(stored.statusCode || 200),
+    source: "browser",
+    accessVerified: stored.accessVerified === true,
+    networkPayloads,
+    buyerShowPayloads: networkPayloads.filter((payload) => payload.responseKind === "buyer-show"),
+    priceNetworkPayloads: networkPayloads.filter((payload) => payload.responseKind === "price"),
+    skuNetworkPayloads,
+    buyerShowInteractions: Array.isArray(stored.buyerShowInteractions) ? stored.buyerShowInteractions : [],
+    selectionResults: Array.isArray(stored.selectionResults) ? stored.selectionResults : [],
+  };
+}
+
+async function persistAndReloadBrowserCapture(evidence) {
+  const { readBrowserCaptureSource, saveBrowserCaptureSource } = await import("./localImportService.js");
+  const saved = await saveBrowserCaptureSource(evidence);
+  const record = await readBrowserCaptureSource(saved.captureId);
+  return {
+    page: hydrateBrowserCapturePage(record),
+    promotionCapture: { networkPayloads: [], skuNetworkPayloads: {}, selectionResults: record.page?.selectionResults || [] },
+    captureId: saved.captureId,
+    sourceFile: record.sourceFile,
+    localFirst: record.localFirst,
+  };
+}
+
 export async function scrapeTmallBuyerShows(product, authSession) {
-  const page = authSession?.source === "taobao-browser"
-    ? await getRenderedHtml(product.url, authSession, { captureBuyerShow: true })
+  if (authSession?.source !== "taobao-browser") {
+    throw new Error("买家秀只允许使用已扫码授权的账号浏览器采集，已阻止后端直接请求淘宝接口。");
+  }
+  let page = authSession?.source === "taobao-browser"
+    ? await getRenderedHtml(product.url, authSession, { captureBuyerShow: true, localCapture: true, preserveCache: true })
     : await fetchHtml(product, authSession);
   if (isTaobaoLoginDocument(page.finalUrl, page.html)) {
-    throw new Error("浏览器登录态已失效，请重新授权后再重试买家秀。");
+    if (isTaobaoLoginUrl(page.finalUrl)) throw new Error("账号登录已明确失效：买家秀页面跳转到淘宝登录页。");
+    throw new Error("账号页面需要安全验证，本次买家秀抓取已停止，登录状态保留待复检。");
   }
-  const html = page.html || "";
+  let html = page.html || "";
   const itemId = extractItemId(page.finalUrl, product.url, html);
   assertMatchingProductId(product.url, itemId, page.finalUrl);
+  let browserCapture = null;
+  if (authSession?.source === "taobao-browser") {
+    if (resolveCaptureAccessMode(authSession, page) !== "authenticated") {
+      throw new Error("账号浏览器未通过登录身份校验，本次买家秀结果已丢弃。");
+    }
+    browserCapture = await persistAndReloadBrowserCapture(buildBrowserCaptureEvidence({
+      product,
+      accountType: authSession.accountType || "normal",
+      itemId,
+      page,
+      promotionCapture: { networkPayloads: [], selectionResults: [] },
+      capturedAt: new Date().toISOString(),
+    }));
+    page = browserCapture.page;
+    html = page.html;
+    assertMatchingProductId(product.url, extractItemId(page.finalUrl, product.url, html), page.finalUrl);
+  }
   const existingImages = [
     product.lastSnapshot?.mainImage800,
     product.lastSnapshot?.mainImage,
@@ -1787,25 +1872,70 @@ export async function scrapeTmallBuyerShows(product, authSession) {
   const accountSessionId = authSession?.id || "guest";
   const domItems = extractBuyerShowItems(html, page.buyerShowPayloads || []);
   const observed = buyerShowCaptureFromNetwork(page.buyerShowPayloads || [], { itemId, accountSessionId });
-  const direct = await fetchTmallBuyerShows(itemId, sellerId, page.cookieHeader || authSession?.cookie || "", product.url, accountSessionId);
+  const direct = authSession?.source === "taobao-browser"
+    ? null
+    : await fetchTmallBuyerShows(itemId, sellerId, page.cookieHeader || authSession?.cookie || "", product.url, accountSessionId);
   const dom = domItems.length
     ? buyerShowCaptureResult({ status: "partial", source: "verified-dom", itemId, sellerId, accountSessionId, pageCount: 1, items: domItems })
     : buyerShowCaptureResult({ status: "failed", source: "verified-dom", failureCode: "REVIEW_UI_NOT_FOUND", itemId, sellerId, accountSessionId });
   const capture = bestBuyerShowCapture([observed, direct, dom]);
-  return { capture, items: capture.items || [], interactions: page.buyerShowInteractions || [] };
+  return {
+    capture,
+    items: capture.items || [],
+    interactions: page.buyerShowInteractions || [],
+    ...(browserCapture ? {
+      browserEvidenceId: browserCapture.captureId,
+      browserEvidenceFile: browserCapture.sourceFile,
+      localFirst: browserCapture.localFirst,
+    } : {}),
+  };
 }
 
-export async function scrapeTmallProduct(product, authSession) {
+export async function scrapeTmallProduct(product, authSession, { renderPage = getRenderedHtml } = {}) {
+  if (authSession?.source !== "taobao-browser") {
+    throw new Error("商品抓取只允许使用已扫码授权的账号浏览器采集，已阻止后端直接请求淘宝接口。");
+  }
   const startedAtMs = Date.now();
   const startedAt = new Date(startedAtMs).toISOString();
-  const page = await fetchHtml(product, authSession);
+  let page = await fetchHtml(product, authSession, renderPage);
+  let accessMode = resolveCaptureAccessMode(authSession, page);
+  if (authSession?.source === "taobao-browser" && accessMode !== "authenticated") {
+    throw new Error("账号浏览器未通过登录身份校验，本次公开页面结果已丢弃；请在账号授权中检测登录后重试。");
+  }
   const pageCaptureCompletedAt = Date.now();
-  const { html } = page;
+  let html = page.html || "";
   const itemId = extractItemId(page.finalUrl, product.url, html);
   assertMatchingProductId(product.url, itemId, page.finalUrl);
 
   if ((/login|验证|captcha|滑块/i.test(page.finalUrl) || /扫码登录|密码登录|安全验证|请完成验证/i.test(html)) && !/skuCore|skuBase/i.test(html)) {
-    throw new Error("需要登录或触发验证，请在账号授权中更新淘宝会话后重试。");
+    if (isTaobaoLoginUrl(page.finalUrl)) throw new Error("账号登录已明确失效：商品页跳转到淘宝登录页。");
+    throw new Error("账号页面需要安全验证，本次抓取已停止，登录状态保留待复检。");
+  }
+
+  const accountType = authSession?.accountType || "normal";
+  const promotionCaptureSkus = extractStructuredSku(html).skuPrices;
+  const promotionCaptureStartedAt = Date.now();
+  let mobilePromotionCapture = promotionCaptureSkus.length
+    ? await fetchMobilePromotionPayloads(itemId, promotionCaptureSkus, authSession, renderPage)
+    : { networkPayloads: [], skuNetworkPayloads: {}, selectionResults: [] };
+  const promotionCaptureCompletedAt = Date.now();
+  let browserCapture = null;
+  if (authSession?.source === "taobao-browser") {
+    const reloaded = await persistAndReloadBrowserCapture(buildBrowserCaptureEvidence({
+      product,
+      accountType,
+      itemId,
+      page,
+      promotionCapture: mobilePromotionCapture,
+      capturedAt: startedAt,
+    }));
+    page = reloaded.page;
+    mobilePromotionCapture = reloaded.promotionCapture;
+    browserCapture = reloaded;
+    html = page.html;
+    accessMode = resolveCaptureAccessMode(authSession, page);
+    assertMatchingProductId(product.url, extractItemId(page.finalUrl, product.url, html), page.finalUrl);
+    if (accessMode !== "authenticated") throw new Error("本地采集文件未通过账号访问校验，已停止解析。");
   }
 
   const jsonData = extractFromJson(parseJsonBlobs(html));
@@ -1814,17 +1944,10 @@ export async function scrapeTmallProduct(product, authSession) {
     throw new Error("当前抓到的是登录页，请在账号授权中重新同步淘宝扫码会话。");
   }
   const structuredSku = extractStructuredSku(html);
-  const accountType = authSession?.accountType || "normal";
   const embeddedResolutions = new Map(structuredSku.skuPrices.map((sku) => [
     String(sku.skuId),
     resolveEmbeddedSkuPriceEvidence(sku, { itemId, skuId: sku.skuId, accountType, capturedAt: startedAt }),
   ]));
-  const unresolvedPromotionSkus = structuredSku.skuPrices.filter((sku) => embeddedResolutions.get(String(sku.skuId))?.status !== "verified");
-  const promotionCaptureStartedAt = Date.now();
-  const mobilePromotionCapture = unresolvedPromotionSkus.length
-    ? await fetchMobilePromotionPayloads(itemId, unresolvedPromotionSkus, authSession)
-    : { networkPayloads: [], skuNetworkPayloads: {}, selectionResults: [] };
-  const promotionCaptureCompletedAt = Date.now();
   const excludedPromotionSkuImages = new Set(structuredSku.skuPrices
     .filter((sku) => isUnselectablePromotionSku(sku, mobilePromotionCapture.selectionResults.find((item) => String(item.skuId) === String(sku.skuId))))
     .map((sku) => sku.image)
@@ -1835,6 +1958,7 @@ export async function scrapeTmallProduct(product, authSession) {
   ));
   structuredSku.skuImages = structuredSku.skuImages.filter((image) => !excludedPromotionSkuImages.has(image));
   const visibleText = page.visibleText || cheerio.load(html)("body").text();
+  const governmentProgramObserved = /政府补贴|国家补贴|国补/.test(visibleText);
   const visibleDiscountItems = collectDiscountItemsFromText(visibleText);
   structuredSku.skuPrices = applyVisibleDiscountItems(structuredSku.skuPrices, visibleDiscountItems);
   const selectedSkuId = extractSelectedSkuId(page.finalUrl, html, structuredSku.skuPrices.map((sku) => sku.skuId));
@@ -1858,10 +1982,9 @@ export async function scrapeTmallProduct(product, authSession) {
       selectedSkuVerified: Boolean(selection?.responseObserved),
       capturedAt: startedAt,
     });
-    if (resolution.status === "verified") return applyPriceResolution(sku, resolution);
     const embeddedResolution = embeddedResolutions.get(String(sku.skuId));
-    if (embeddedResolution?.status === "verified") return applyPriceResolution(sku, embeddedResolution);
-    if (resolution.matched) return applyPriceResolution(sku, resolution);
+    const authoritativeResolution = selectAuthoritativePriceResolution(resolution, embeddedResolution, { governmentProgramObserved });
+    if (authoritativeResolution?.matched) return applyPriceResolution(sku, authoritativeResolution);
     const [resolved] = applyNetworkPromoData([sku], skuPayloads, { accountType: authSession?.accountType || "normal" });
     return calculateAccountPriceScenario(resolved, accountType);
   });
@@ -1875,10 +1998,12 @@ export async function scrapeTmallProduct(product, authSession) {
   const maxPrice = allPrices.length ? Math.max(...allPrices) : null;
   const skuImages = unique([...structuredSku.skuImages, ...jsonData.skuImages]).filter((image) => !excludedPromotionSkuImages.has(image)).slice(0, 40);
   const mobileDetailStartedAt = Date.now();
-  const mobileDetailData = await fetchMobileDetailData(itemId, {
-    ...authSession,
-    cookie: page.cookieHeader || authSession?.cookie || "",
-  }, product.url);
+  const mobileDetailData = authSession?.source === "taobao-browser"
+    ? null
+    : await fetchMobileDetailData(itemId, {
+        ...authSession,
+        cookie: page.cookieHeader || authSession?.cookie || "",
+      }, product.url);
   const mobileDetailCompletedAt = Date.now();
   if (mobileDetailData) {
     structuredSku.skuPrices = structuredSku.skuPrices.map((sku) => {
@@ -1910,19 +2035,14 @@ export async function scrapeTmallProduct(product, authSession) {
   const buyerShowStartedAt = Date.now();
   if (product.captureBuyerShows !== false) {
     const observedBuyerShows = buyerShowCaptureFromNetwork(page.buyerShowPayloads || [], { itemId, accountSessionId });
-    const directBuyerShows = await fetchTmallBuyerShows(itemId, sellerId, page.cookieHeader || authSession?.cookie || "", product.url, accountSessionId);
+    const directBuyerShows = authSession?.source === "taobao-browser"
+      ? null
+      : await fetchTmallBuyerShows(itemId, sellerId, page.cookieHeader || authSession?.cookie || "", product.url, accountSessionId);
     const domBuyerShows = media.buyerShows.length
       ? buyerShowCaptureResult({ status: "partial", source: "verified-dom", itemId, sellerId, accountSessionId, pageCount: 1, items: media.buyerShows })
       : buyerShowCaptureResult({ status: "failed", source: "verified-dom", failureCode: "REVIEW_UI_NOT_FOUND", itemId, sellerId, accountSessionId });
     buyerShowCapture = bestBuyerShowCapture([observedBuyerShows, directBuyerShows, domBuyerShows]);
     buyerShowInteractions = page.buyerShowInteractions || [];
-    if (buyerShowCapture.status === "failed" && authSession?.source === "taobao-browser") {
-      const retry = await scrapeTmallBuyerShows(product, authSession);
-      const firstAttempts = buyerShowCapture.attempts || [];
-      buyerShowCapture = bestBuyerShowCapture([buyerShowCapture, retry.capture]);
-      buyerShowCapture.attempts = [...firstAttempts, ...(retry.capture.attempts || [])];
-      buyerShowInteractions = [...buyerShowInteractions, ...retry.interactions.map((interaction) => ({ ...interaction, retry: true }))];
-    }
   }
   const buyerShowCompletedAt = Date.now();
   media.buyerShows = buyerShowCapture.items;
@@ -1960,7 +2080,7 @@ export async function scrapeTmallProduct(product, authSession) {
     statusCode: page.statusCode,
     finalUrl: page.finalUrl,
     source: page.source,
-    accessMode: authSession ? "authenticated" : "anonymous",
+    accessMode,
     itemId,
     title,
     shopName,
@@ -1979,6 +2099,11 @@ export async function scrapeTmallProduct(product, authSession) {
     skuPrices,
     price: snapshotPrice,
     priceRange: minPrice && maxPrice ? [minPrice, maxPrice] : null,
+    ...(browserCapture ? {
+      browserEvidenceId: browserCapture.captureId,
+      browserEvidenceFile: browserCapture.sourceFile,
+      localFirst: browserCapture.localFirst,
+    } : {}),
     rawSignals: {
       htmlBytes: html.length,
       imageCount: mainImages.length,
@@ -2002,7 +2127,10 @@ export async function scrapeTmallProduct(product, authSession) {
         buyerShow: buyerShowCompletedAt - buyerShowStartedAt,
         total: Date.now() - startedAtMs,
       },
-      promotionCaptureSkipped: unresolvedPromotionSkus.length === 0,
+      promotionCaptureSkipped: promotionCaptureSkus.length === 0,
+      browserEvidenceSourceSaved: browserCapture?.localFirst?.sourceSaved === true,
+      browserEvidenceParsedFromDisk: browserCapture?.localFirst?.parsedFromDisk === true,
+      networkAccessedAfterLocalSave: false,
     },
   }, product.captureMediaAssets);
 }

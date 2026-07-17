@@ -107,29 +107,41 @@ const channelLabels = {
 };
 
 export function accountPriceContext(product, snapshot = product?.lastSnapshot || {}) {
-  const accountType = product?.accountType || snapshot.accountCaptures?.find((item) => item.accountType)?.accountType || "normal";
+  const capture = snapshot.accountCaptures?.find((item) => item.sessionId === snapshot.primaryAccountSessionId)
+    || snapshot.accountCaptures?.find((item) => item.primary)
+    || snapshot.accountCaptures?.find((item) => item.accountType === snapshot.primaryAccountType)
+    || snapshot.accountCaptures?.[0];
+  const accountType = capture?.accountType || snapshot.primaryAccountType || product?.accountType || "normal";
   const account = accountLabels[accountType] || accountLabels.normal;
-  const capture = snapshot.accountCaptures?.find((item) => item.accountType === accountType) || snapshot.accountCaptures?.[0];
   return { accountType, account, accountName: capture?.accountName || "" };
 }
 
 export function effectivePriceForSku(sku, accountType = "normal") {
-  const account = accountLabels[accountType] || accountLabels.normal;
   const verified = (kind) => sku?.resolutionStatus === "verified" && sku?.priceResolution?.channels?.[kind]?.status === "verified";
-  const options = [
-    verified("normal") ? { label: /秒杀/.test(`${sku.priceTitle || ""} ${sku.priceCalculation?.normal || ""}`) ? "淘宝秒杀价" : "普通价", value: Number(sku.normalPrice) } : null,
-    verified("government") ? { label: "国补价", value: Number(sku.governmentPrice) } : null,
-    verified(accountType === "normal" ? "surprise" : accountType) ? { label: account.benefit, value: Number(sku[account.field]) } : null,
-    verified("coin") ? { label: "淘金币价", value: Number(sku.coinPrice) } : null,
-  ].filter((item) => item && Number.isFinite(item.value) && item.value > 0);
+  const channelFields = [
+    ["normal", /秒杀/.test(`${sku.priceTitle || ""} ${sku.priceCalculation?.normal || ""}`) ? "淘宝秒杀价" : "普通价", "normalPrice"],
+    ["government", "国补价", "governmentPrice"],
+    ["surprise", "惊喜立减价", "surprisePrice"],
+    ...(accountType === "gift" || accountType === "vip88" ? [["gift", "礼金价", "giftPrice"]] : []),
+    ...(accountType === "vip88" ? [["vip88", "88VIP价", "vipPrice"]] : []),
+    ["coin", "淘金币价", "coinPrice"],
+  ];
+  const options = channelFields.map(([kind, label, field]) => verified(kind) ? { label, value: Number(sku[field]) } : null)
+    .filter((item) => item && Number.isFinite(item.value) && item.value > 0);
   return options.reduce((lowest, item) => (!lowest || item.value < lowest.value ? item : lowest), null);
+}
+
+function accountSupportsChannel(accountType, channel) {
+  if (["normal", "government", "surprise", "coin"].includes(channel)) return true;
+  if (channel === "gift") return accountType === "gift" || accountType === "vip88";
+  return channel === "vip88" && accountType === "vip88";
 }
 
 function channelValue(sku, channel, { anonymous, accountType }) {
   if (anonymous) return "需登录";
   const kind = channel === "normal" ? "normal" : channel === "gift" ? "gift" : channel === "vip88" ? "vip88" : channel;
   if (sku?.resolutionStatus !== "verified" || sku?.priceResolution?.channels?.[kind]?.status !== "verified") {
-    if (channel !== "normal" && channel !== "government" && channel !== "coin" && channelLabels[channel]?.accountType !== accountType) return "不适用";
+    if (!accountSupportsChannel(accountType, channel)) return "不适用";
     return "本次未验证";
   }
   if (channel === "coin") {
@@ -140,7 +152,7 @@ function channelValue(sku, channel, { anonymous, accountType }) {
   const channelInfo = channelLabels[channel];
   const value = channel === "normal" ? Number(sku.normalPrice ?? sku.price) : Number(sku[channelInfo?.field || channel]);
   if (Number.isFinite(value) && value > 0) return priceText(value);
-  if (channel !== "normal" && channel !== "government" && channelInfo?.accountType !== accountType) return "不适用";
+  if (!accountSupportsChannel(accountType, channel)) return "不适用";
   const status = channel === "normal" ? "available" : sku[channelInfo?.status || `${channel}Status`];
   if (status === "none") return channel === "normal" ? "无普通价" : `无${channelInfo?.benefit || "优惠"}`;
   return "未获取";

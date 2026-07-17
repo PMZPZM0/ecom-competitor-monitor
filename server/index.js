@@ -6,18 +6,41 @@ import { execFileSync } from "node:child_process";
 import fs from "node:fs";
 import { z } from "zod";
 import JSZip from "jszip";
+import multer from "multer";
 import sharp from "sharp";
 import { loadEnv } from "./utils/env.js";
 import { dbRuntimeInfo, newId, readDb, updateDb } from "./storage/db.js";
 import { analyzeData } from "./services/analysisService.js";
-import { buildTaobaoOAuthUrl, maskSecret } from "./services/authService.js";
-import { clearFinishedCaptureJobs, getCaptureQueueStatus, preserveBuyerShowHistory, rescheduleMonitor, resolveCaptureProtectionMinutes, runMonitorOnce, runProductOnce, scheduleProduct, setSkuMonitorPrice, startScheduler, stopScheduler } from "./services/monitorService.js";
+import { buildTaobaoOAuthUrl } from "./services/authService.js";
+import { clearFinishedCaptureJobs, getCaptureQueueStatus, preserveBuyerShowHistory, rescheduleMonitor, runMonitorOnce, runProductOnce, scheduleProduct, sessionsForProduct, setSkuMonitorPrice, snapshotHasVerifiedNormalPrice, startScheduler, stopScheduler, withAccountCaptureLock } from "./services/monitorService.js";
 import { createNotificationLog, effectivePriceForSku, publicFeishuConfig, sendFeishuNotification, updateFeishuConfig } from "./services/feishuService.js";
 import { appendPriceDocument, cliStatus, createPriceDocument, readAuthQr, startCliLogin, startCliSetup } from "./services/larkCliService.js";
-import { browserRuntimeInfo, checkTaobaoSession, closeAccountBrowser, getTaobaoAuthState, isTaobaoLoginUrl, keepAccountBrowserWarm, minimizeAccountBrowser, openProductInAccountChrome, openTaobaoLogin } from "./services/browserService.js";
-import { scrapeTmallBuyerShows, SCRAPER_VERSION } from "./services/tmallScraper.js";
+import { browserRuntimeInfo, checkTaobaoSession, closeAccountBrowser, findAvailableBrowserPort, getTaobaoAuthState, isTaobaoLoginUrl, keepAccountBrowserWarm, minimizeAccountBrowser, openProductInAccountChrome, openTaobaoLogin } from "./services/browserService.js";
+import { scrapeTmallBuyerShows, scrapeTmallProduct, SCRAPER_VERSION } from "./services/tmallScraper.js";
 import { normalizeProductUrl } from "./utils/productUrl.js";
 import { checkForUpdate } from "./services/updateService.js";
+import {
+  deleteGeneratedImage,
+  generateImages,
+  imageGenerationLimits,
+  listGeneratedImages,
+  readGeneratedImageFile,
+  saveGeneratedImages,
+  updateGeneratedImage,
+} from "./services/imageGenerationService.js";
+import { clearPhotoshopWorkfile, openGeneratedImageInPhotoshop, syncPhotoshopWorkfile } from "./services/photoshopService.js";
+import { MODEL_CHANNEL_IDS, ModelApiError, publicModelConfig, recordModelTestResult, resolveModelConfig, testImageModel, updateModelConfig } from "./services/modelConfigService.js";
+import {
+  clearLocalEvidenceFiles,
+  createLocalImport,
+  getLocalEvidenceStorageOverview,
+  loadLocalImportRecord,
+  LOCAL_IMPORT_MAX_BYTES,
+  mergeLocalImportSnapshot,
+  saveCapturedSnapshotLocalEvidence,
+  validateLocalEvidenceDirectory,
+} from "./services/localImportService.js";
+import { isAllowedLocalRequest, localCorsOptions } from "./utils/localOrigin.js";
 
 loadEnv();
 
@@ -50,15 +73,78 @@ function runtimeInfo() {
 
 export const app = express();
 const pendingScans = new Map();
+const pendingBrowserPorts = new Set();
 let authCheckActive = false;
+let imageGenerationActive = false;
 let staticMiddleware = null;
 let schedulerStarted = false;
+const localImportCommits = new Map();
+const rawDataCaptures = new Map();
 
-function publicAuthSession(session) {
-  return { ...session, cookie: session.cookie ? "configured" : "" };
+const imageUpload = multer({
+  storage: multer.memoryStorage(),
+  limits: {
+    fileSize: imageGenerationLimits.maxReferenceBytes,
+    files: imageGenerationLimits.maxReferenceFiles + 1,
+    fields: 2,
+    parts: imageGenerationLimits.maxReferenceFiles + 3,
+  },
+  fileFilter: (_req, file, callback) => {
+    const type = String(file.mimetype || "").toLowerCase();
+    if (["image/png", "image/jpeg", "image/webp"].includes(type)) return callback(null, true);
+    return callback(Object.assign(new Error("参考图只支持 PNG、JPEG 或 WEBP。"), {
+      status: 400,
+      code: "IMAGE_REFERENCE_TYPE_INVALID",
+    }));
+  },
+});
+const imageUploadFields = imageUpload.fields([
+  { name: "referenceImages", maxCount: imageGenerationLimits.maxReferenceFiles },
+  { name: "maskImage", maxCount: 1 },
+]);
+
+function reserveImageGeneration(req, res, next) {
+  if (imageGenerationActive) {
+    res.status(409).json({ message: "已有图片正在生成，请等待完成后再提交下一次任务。" });
+    return;
+  }
+  imageGenerationActive = true;
+  let parsing = true;
+  let uploadAborted = false;
+  const releaseAbortedUpload = () => {
+    if (parsing) {
+      uploadAborted = true;
+      imageGenerationActive = false;
+    }
+  };
+  req.once("aborted", releaseAbortedUpload);
+  imageUploadFields(req, res, (error) => {
+    parsing = false;
+    req.off("aborted", releaseAbortedUpload);
+    const uploadError = error || (uploadAborted
+      ? Object.assign(new Error("参考图上传已中断。"), { status: 400, code: "IMAGE_MULTIPART_ABORTED" })
+      : null);
+    if (uploadError && !(uploadError instanceof multer.MulterError) && !uploadError.status) {
+      uploadError.status = 400;
+      uploadError.code = "IMAGE_MULTIPART_INVALID";
+    }
+    if (uploadError) imageGenerationActive = false;
+    next(uploadError);
+  });
 }
 
-app.use(cors());
+function publicAuthSession(session) {
+  const result = { ...session, cookie: session.cookie ? "configured" : "" };
+  delete result.cooldownUntil;
+  if (result.healthStatus === "cooldown") result.healthStatus = "degraded";
+  return result;
+}
+
+app.use((req, res, next) => {
+  if (isAllowedLocalRequest({ origin: req.get("origin"), host: req.get("host"), secFetchSite: req.get("sec-fetch-site") })) return next();
+  return res.status(403).json({ message: "只允许本机软件访问该接口。" });
+});
+app.use(cors(localCorsOptions));
 app.use(express.json({ limit: "2mb" }));
 
 app.get("/api/runtime/update", async (_req, res) => {
@@ -228,18 +314,303 @@ app.get("/api/overview", async (_req, res) => {
     analyses: db.analyses.slice(-8).reverse(),
     authSessions: db.authSessions.map(publicAuthSession),
     runs: db.runs.slice(-50).reverse(),
-  modelConfig: {
-      baseUrl: db.modelConfig.baseUrl || process.env.OPENAI_BASE_URL || "https://api.openai.com/v1",
-      model: db.modelConfig.model || process.env.OPENAI_MODEL || "gpt-4.1-mini",
-      apiKey: db.modelConfig.apiKey ? maskSecret(db.modelConfig.apiKey) : "",
-      hasApiKey: Boolean(db.modelConfig.apiKey || process.env.OPENAI_API_KEY),
-  },
+    modelConfig: publicModelConfig(db.modelConfig),
     feishu: publicFeishuConfig(db.feishu),
     notificationLogs: db.notificationLogs.filter((log) => log.status !== "suppressed").slice(-80).reverse(),
     monitor: db.monitor,
     captureQueue: getCaptureQueueStatus(),
     runtime: runtimeInfo(),
   });
+});
+
+app.get("/api/local-evidence", async (_req, res) => {
+  const db = await readDb();
+  res.json(await getLocalEvidenceStorageOverview(db.localEvidence?.directory));
+});
+
+app.patch("/api/local-evidence", async (req, res) => {
+  const { directory } = z.object({ directory: z.string().trim().max(2048).nullable() }).parse(req.body);
+  const restoreDefault = directory == null || directory === "";
+  const validatedDirectory = await validateLocalEvidenceDirectory(directory);
+  await updateDb((db) => {
+    db.localEvidence = { directory: restoreDefault ? "" : validatedDirectory };
+    return db;
+  });
+  res.json(await getLocalEvidenceStorageOverview(restoreDefault ? "" : validatedDirectory));
+});
+
+app.delete("/api/local-evidence", async (_req, res) => {
+  const db = await readDb();
+  const result = await clearLocalEvidenceFiles(db.localEvidence?.directory);
+  const deletedIds = new Set(result.deletedImportIds);
+  const deletedCaptureIds = new Set(result.deletedCaptureIds || []);
+  if (deletedIds.size || deletedCaptureIds.size) {
+    const clearDeletedReference = (snapshot) => {
+      if (!snapshot || (!deletedIds.has(snapshot.localImportId) && !deletedCaptureIds.has(snapshot.browserEvidenceId) && !deletedCaptureIds.has(snapshot.buyerShowEvidenceId))) return snapshot;
+      const cleaned = { ...snapshot };
+      if (deletedIds.has(snapshot.localImportId)) {
+        delete cleaned.localImportId;
+        delete cleaned.localImportFile;
+      }
+      if (deletedCaptureIds.has(snapshot.browserEvidenceId)) {
+        delete cleaned.browserEvidenceId;
+        delete cleaned.browserEvidenceFile;
+        delete cleaned.localFirst;
+      }
+      if (deletedCaptureIds.has(snapshot.buyerShowEvidenceId)) {
+        delete cleaned.buyerShowEvidenceId;
+        delete cleaned.buyerShowEvidenceFile;
+        delete cleaned.buyerShowLocalFirst;
+      }
+      return cleaned;
+    };
+    await updateDb((current) => {
+      current.snapshots = current.snapshots.map(clearDeletedReference);
+      current.products = current.products.map((product) => ({
+        ...product,
+        lastSnapshot: clearDeletedReference(product.lastSnapshot),
+      }));
+      return current;
+    });
+  }
+  const { deletedImportIds: _deletedImportIds, deletedCaptureIds: _deletedCaptureIds, ...response } = result;
+  res.json(response);
+});
+
+app.post("/api/local-evidence/select-directory", async (_req, res) => {
+  if (!process.versions.electron) return res.status(501).json({ message: "网页版请直接填写证据保存目录。" });
+  const { dialog } = await import("electron");
+  const result = await dialog.showOpenDialog({ properties: ["openDirectory", "createDirectory"] });
+  res.json({ directory: result.canceled ? null : result.filePaths[0] || null });
+});
+
+app.post("/api/local-evidence/open-directory", async (_req, res) => {
+  if (!process.versions.electron) return res.status(501).json({ message: "网页版无法调用系统文件管理器。" });
+  const db = await readDb();
+  const directory = await validateLocalEvidenceDirectory(db.localEvidence?.directory);
+  const { shell } = await import("electron");
+  const error = await shell.openPath(directory);
+  if (error) throw localImportError("OPEN_EVIDENCE_DIRECTORY_FAILED", error, 500);
+  res.json({ ok: true, directory });
+});
+
+function localImportError(code, message, status) {
+  const error = new Error(message);
+  error.code = code;
+  error.status = status;
+  return error;
+}
+
+function existingLocalImportResult(data, record) {
+  const snapshot = data.snapshots.find((item) => item.localImportId === record.importId);
+  if (!snapshot) return null;
+  const product = data.products.find((item) => item.id === snapshot.productId);
+  if (!product) return null;
+  const run = [...data.runs].reverse().find((item) => item.source === "local-import" && item.items?.some((entry) => entry.productId === product.id)) || {
+    id: `existing_${record.importId}`,
+    source: "local-import",
+    scope: product.id,
+    status: "success",
+    startedAt: snapshot.capturedAt,
+    finishedAt: snapshot.capturedAt,
+    total: 1,
+    success: 1,
+    failed: 0,
+    items: [],
+    message: "该本地数据已经导入，未重复写入价格记录。",
+  };
+  return { created: false, alreadyCommitted: true, savedFile: record.savedFile, sourceFile: record.sourceFile || "", product, snapshot, run };
+}
+
+async function commitLocalImportRecord(importId) {
+  const record = await loadLocalImportRecord(importId);
+  if (!record.canCommit) {
+    throw localImportError("LOCAL_IMPORT_UNVERIFIED", `当前内容不能写入监控：${record.blockingReasons.join("；") || "没有可核验的 SKU 价格"}。`, 409);
+  }
+
+  const previous = existingLocalImportResult(await readDb(), record);
+  if (previous) return previous;
+
+  let productId = "";
+  let created = false;
+  const now = new Date().toISOString();
+  await updateDb((data) => {
+    const existing = data.products.find((product) => String(product.itemId || itemIdFromUrl(product.url)) === record.itemId);
+    if (existing) {
+      productId = existing.id;
+      existing.captureMode = "local-only";
+      existing.enabled = false;
+      existing.nextMonitorAt = null;
+      existing.updatedAt = now;
+      return data;
+    }
+    const product = {
+      id: newId("prod"),
+      name: record.snapshot.title || `本地导入商品 ${record.itemId}`,
+      shopName: record.snapshot.shopName || "",
+      model: record.snapshot.model || "",
+      itemId: record.itemId,
+      url: normalizeProductUrl(record.snapshot.finalUrl || `https://detail.tmall.com/item.htm?id=${record.itemId}`),
+      group: "本地导入",
+      accountType: record.accountType,
+      captureBuyerShows: false,
+      captureMediaAssets: false,
+      captureMode: "local-only",
+      enabled: false,
+      mainImage: "",
+      lastStatus: "pending",
+      lastError: "",
+      createdAt: now,
+      updatedAt: now,
+    };
+    productId = product.id;
+    created = true;
+    data.products.unshift(product);
+    return data;
+  });
+
+  const localSnapshot = {
+    ...structuredClone(record.snapshot),
+    localImportId: record.importId,
+    localImportFile: record.savedFile,
+  };
+  const accountLabels = { normal: "普通", gift: "礼金", vip88: "88VIP" };
+  const pseudoSession = {
+    id: `local_${record.importId.slice(6, 18)}`,
+    name: `本地${accountLabels[record.accountType]}数据`,
+    cookie: "",
+    source: "manual-cookie",
+    accountType: record.accountType,
+    active: true,
+    enabled: true,
+    healthStatus: "healthy",
+    loginStatus: "valid",
+    createdAt: record.createdAt,
+  };
+  const result = await runProductOnce(productId, {
+    source: "local-import",
+    authSessions: [pseudoSession],
+    scraper: async (product) => {
+      const expectedItemId = String(product.itemId || itemIdFromUrl(product.url));
+      if (expectedItemId !== record.itemId) throw localImportError("LOCAL_IMPORT_ITEM_MISMATCH", "本地数据与目标商品 ID 不一致，已停止写入。", 409);
+      return mergeLocalImportSnapshot(product, localSnapshot);
+    },
+  });
+  if (!result.snapshot) {
+    throw localImportError("LOCAL_IMPORT_COMMIT_FAILED", result.product.lastError || "本地数据写入失败。", 422);
+  }
+  await rescheduleMonitor();
+  return { created, alreadyCommitted: false, savedFile: record.savedFile, sourceFile: record.sourceFile || "", product: result.product, snapshot: result.snapshot, run: result.run };
+}
+
+app.post("/api/local-imports/preview", express.text({ type: "text/plain", limit: LOCAL_IMPORT_MAX_BYTES }), async (req, res) => {
+  const options = z.object({
+    accountType: z.enum(["normal", "gift", "vip88"]).default("normal"),
+    itemIdHint: z.string().regex(/^\d{6,20}$/).optional(),
+  }).parse(req.query);
+  res.status(201).json(await createLocalImport(req.body, options));
+});
+
+app.post("/api/local-imports/:id/commit", async (req, res) => {
+  let operation = localImportCommits.get(req.params.id);
+  if (!operation) {
+    operation = commitLocalImportRecord(req.params.id).finally(() => localImportCommits.delete(req.params.id));
+    localImportCommits.set(req.params.id, operation);
+  }
+  res.json(await operation);
+});
+
+export async function captureSanitizedDataPreview(input, { scraper = scrapeTmallProduct } = {}) {
+  const data = await readDb();
+  const session = data.authSessions.find((item) => item.id === input.sessionId);
+  if (!session || session.source !== "taobao-browser" || !session.browserProfileKey || !session.browserPort) {
+    throw localImportError("BROWSER_SESSION_NOT_FOUND", "请选择一个已经扫码授权的账号浏览器。", 409);
+  }
+  if (!(session.enabled ?? session.active ?? true) || session.loginStatus === "expired") {
+    throw localImportError("BROWSER_SESSION_UNAVAILABLE", "该账号当前不可用，请先检测登录或重新授权。", 409);
+  }
+  const url = input.url;
+  const itemId = input.itemId;
+  const captureCandidate = {
+    id: `raw_${itemId}`,
+    name: `数据查看 ${itemId}`,
+    itemId,
+    url,
+    group: "数据查看器",
+    accountType: session.accountType || "normal",
+    captureBuyerShows: false,
+    captureMediaAssets: false,
+  };
+  const captured = await withAccountCaptureLock(session, () => scraper(captureCandidate, session));
+  if (captured.localFirst?.sourceSaved !== true || captured.localFirst?.parsedFromDisk !== true || !captured.browserEvidenceFile) {
+    throw localImportError("LOCAL_FIRST_CAPTURE_INCOMPLETE", "浏览器数据没有完成脱敏落盘和重新读盘，无法生成查看数据。", 422);
+  }
+  if (!snapshotHasVerifiedNormalPrice(captured)) {
+    throw localImportError("RAW_DATA_PRICE_UNVERIFIED", "本地文件没有解析出可验证的 SKU 普通价；未创建或修改监控商品。", 422);
+  }
+  const accountType = session.accountType || "normal";
+  const preview = await saveCapturedSnapshotLocalEvidence({ ...captured, primaryAccountType: accountType });
+  const exported = {
+    schemaVersion: 1,
+    dataType: "sanitized-price-evidence",
+    sanitized: true,
+    itemId,
+    accountType,
+    capturedAt: captured.capturedAt,
+    title: preview.title,
+    shopName: preview.shopName,
+    resolutionStatus: preview.resolutionStatus,
+    price: preview.price,
+    priceRange: preview.priceRange,
+    skuPrices: preview.skuPrices,
+    warnings: preview.warnings,
+  };
+  const jsonText = JSON.stringify(exported, null, 2);
+  const byteSize = Buffer.byteLength(jsonText, "utf8");
+  if (byteSize > LOCAL_IMPORT_MAX_BYTES) {
+    throw localImportError("RAW_DATA_TOO_LARGE", "脱敏数据超过 8 MB，已保留本地证据，但不在界面中返回不完整内容。", 413);
+  }
+  return {
+    ok: true,
+    evidenceId: preview.importId,
+    itemId,
+    accountType,
+    capturedAt: captured.capturedAt,
+    sourceFile: preview.savedFile,
+    byteSize,
+    skuCount: preview.skuPrices.length,
+    verifiedSkuCount: preview.verifiedSkuCount,
+    sanitized: true,
+    jsonText,
+  };
+}
+
+app.post("/api/raw-data/capture", async (req, res) => {
+  const input = z.object({
+    sessionId: z.string().trim().min(1),
+    url: z.string().trim().url().optional(),
+    itemId: z.string().regex(/^\d{6,20}$/).optional(),
+    platform: z.enum(["tmall", "taobao"]).default("tmall"),
+  }).refine((value) => Boolean(value.url || value.itemId), { message: "请填写商品链接或商品 ID。" }).parse(req.body);
+  let url;
+  let itemId;
+  try {
+    url = normalizeProductUrl(input.url || `https://${input.platform === "taobao" ? "item.taobao.com" : "detail.tmall.com"}/item.htm?id=${input.itemId}`);
+    itemId = itemIdFromUrl(url);
+  } catch {
+    throw localImportError("INVALID_PRODUCT_URL", "请填写有效的淘宝或天猫商品链接，或 6 至 20 位商品 ID。", 400);
+  }
+  if (input.url && input.itemId && input.itemId !== itemId) {
+    throw localImportError("PRODUCT_ID_MISMATCH", "商品链接与填写的商品 ID 不一致，请核对后重试。", 400);
+  }
+  const normalizedInput = { ...input, url, itemId };
+  const key = `${input.sessionId}:${itemId}`;
+  let operation = rawDataCaptures.get(key);
+  if (!operation) {
+    operation = captureSanitizedDataPreview(normalizedInput).finally(() => rawDataCaptures.delete(key));
+    rawDataCaptures.set(key, operation);
+  }
+  res.status(201).json(await operation);
 });
 
 app.post("/api/products", async (req, res) => {
@@ -355,6 +726,9 @@ app.patch("/api/products/:id", async (req, res) => {
   await updateDb((db) => {
     db.products = db.products.map((product) => {
       if (product.id !== req.params.id) return product;
+      if (product.captureMode === "local-only" && patch.enabled === true) {
+        throw localImportError("LOCAL_ONLY_MONITOR_DISABLED", "该商品使用本地数据模式，不能启用浏览器定时抓取。请通过“本地数据导入”更新价格。", 409);
+      }
       scheduleChanged = patch.enabled !== undefined || patch.monitorScheduleMode !== undefined || patch.monitorIntervalMinutes !== undefined || patch.monitorStartAt !== undefined;
       updated = { ...product, ...patch, updatedAt: new Date().toISOString() };
       if (scheduleChanged) updated = scheduleProduct(updated, db.monitor, { reset: true });
@@ -478,7 +852,7 @@ app.post("/api/products/:id/feishu-sync", async (req, res) => {
   if (!product) return res.status(404).json({ message: "商品不存在。" });
   const snapshot = product.lastSnapshot;
   const candidates = (snapshot?.skuPrices || []).map((sku) => {
-    const effective = effectivePriceForSku(sku, product.accountType || "normal");
+    const effective = effectivePriceForSku(sku, snapshot?.primaryAccountType || product.accountType || "normal");
     return { price: effective?.value, priceLabel: effective?.label || "普通价", skuName: sku.name || "", skuId: sku.skuId };
   }).filter((item) => Number.isFinite(item.price));
   const current = candidates.sort((left, right) => left.price - right.price)[0] || { price: Number(snapshot?.price) || 0, skuName: "" };
@@ -530,16 +904,12 @@ app.post("/api/products/:id/buyer-shows/retry", async (req, res) => {
   const db = await readDb();
   const product = db.products.find((item) => item.id === req.params.id);
   if (!product) return res.status(404).json({ message: "商品不存在。" });
+  if (product.captureMode === "local-only") return res.status(409).json({ message: "该商品使用本地数据模式，已阻止买家秀网页抓取。" });
   if (!product.lastSnapshot) return res.status(409).json({ message: "商品还没有价格快照，请先完成首次抓取。" });
 
-  const activeSessions = db.authSessions.filter((session) => (session.enabled ?? session.active ?? true) && session.loginStatus !== "expired");
+  const activeSessions = db.authSessions.filter((session) => session.source === "taobao-browser" && (session.enabled ?? session.active ?? true) && session.loginStatus !== "expired");
   const accountType = product.accountType || "normal";
-  const preferredSessions = [
-    ...activeSessions.filter((item) => (item.accountType || "normal") === accountType),
-    ...activeSessions.filter((item) => (item.accountType || "normal") === "normal"),
-    ...activeSessions,
-  ];
-  const sessionCandidates = Array.from(new Map(preferredSessions.map((session) => [session.id, session])).values());
+  const sessionCandidates = sessionsForProduct(activeSessions, accountType);
   if (!sessionCandidates.length) return res.status(409).json({ message: "没有可用的淘宝登录账号，请先到账号授权页面登录。" });
 
   const captures = [];
@@ -558,10 +928,17 @@ app.post("/api/products/:id/buyer-shows/retry", async (req, res) => {
     ...structuredClone(product.lastSnapshot),
     buyerShowCapture: result.capture,
     buyerShows: result.items,
+    ...(result.browserEvidenceFile ? {
+      buyerShowEvidenceId: result.browserEvidenceId,
+      buyerShowEvidenceFile: result.browserEvidenceFile,
+      buyerShowLocalFirst: result.localFirst,
+    } : {}),
     rawSignals: {
       ...(product.lastSnapshot.rawSignals || {}),
       buyerShowCount: result.items.length,
       buyerShowInteractions: result.interactions,
+      buyerShowEvidenceSourceSaved: result.localFirst?.sourceSaved === true,
+      buyerShowEvidenceParsedFromDisk: result.localFirst?.parsedFromDisk === true,
     },
   }, product.lastSnapshot);
   nextSnapshot.rawSignals.buyerShowCount = nextSnapshot.buyerShows?.length || 0;
@@ -589,16 +966,15 @@ app.post("/api/products/:id/open", async (req, res) => {
     res.status(404).json({ message: "商品不存在。" });
     return;
   }
-  const accountType = product.accountType || "normal";
-  const authSession = db.authSessions.find((session) =>
-    (session.enabled ?? session.active ?? true)
-    && (session.accountType || "normal") === accountType
-    && session.browserProfileKey
-    && session.browserPort,
-  );
+  const accountType = product.lastSnapshot?.primaryAccountType || product.accountType || "normal";
+  const requestedSessionId = z.object({ sessionId: z.string().optional() }).parse(req.body || {}).sessionId;
+  const activeSessions = db.authSessions.filter((session) => session.source === "taobao-browser" && (session.enabled ?? session.active ?? true) && session.loginStatus !== "expired" && session.browserProfileKey && session.browserPort);
+  const authSession = activeSessions.find((session) => session.id === requestedSessionId)
+    || activeSessions.find((session) => session.id === product.lastSnapshot?.primaryAccountSessionId)
+    || sessionsForProduct(activeSessions, accountType)[0];
   if (!authSession) {
     const accountLabel = accountType === "gift" ? "礼金" : accountType === "vip88" ? "88VIP" : "普通";
-    res.status(409).json({ message: `没有可用的${accountLabel}账号登录态，请先在账号授权页面登录。` });
+    res.status(409).json({ message: `没有可用的${accountLabel}账号登录态，也没有其他可回退的扫码账号，请先在账号授权页面登录。` });
     return;
   }
   res.json(await openProductInAccountChrome(product.url, authSession));
@@ -620,12 +996,6 @@ app.post("/api/products/batch-capture", async (req, res) => {
 app.patch("/api/monitor/settings", async (req, res) => {
   const schema = z.object({
     intervalMinutes: z.number().int().min(30).max(1440).optional(),
-    captureProtectionMinutes: z.number().int().min(0).max(120).optional(),
-    captureProtectionByAccount: z.object({
-      normal: z.number().int().min(0).max(120).nullable().optional(),
-      vip88: z.number().int().min(0).max(120).nullable().optional(),
-      gift: z.number().int().min(0).max(120).nullable().optional(),
-    }).optional(),
     running: z.boolean().optional(),
   });
   const parsed = schema.parse(req.body);
@@ -636,21 +1006,8 @@ app.patch("/api/monitor/settings", async (req, res) => {
     db.monitor = {
       ...db.monitor,
       ...parsed,
-      captureProtectionByAccount: {
-        ...(db.monitor.captureProtectionByAccount || {}),
-        ...(parsed.captureProtectionByAccount || {}),
-      },
       nextRunAt: running ? new Date(Date.now() + intervalMinutes * 60_000).toISOString() : null,
     };
-    db.authSessions = db.authSessions.map((session) => {
-      const accountType = session.accountType || "normal";
-      if (resolveCaptureProtectionMinutes(db.monitor, accountType) !== 0) return session;
-      return {
-        ...session,
-        cooldownUntil: null,
-        healthStatus: session.healthStatus === "cooldown" ? "degraded" : session.healthStatus,
-      };
-    });
     if (parsed.running !== undefined) {
       // The global switch is a scheduler master gate. Keep each card's own
       // enabled state so a global pause/resume cannot undo per-product choices.
@@ -682,28 +1039,177 @@ app.post("/api/analysis/run", async (_req, res) => {
 
 app.patch("/api/model-config", async (req, res) => {
   const schema = z.object({
-    baseUrl: z.string().url().optional().or(z.literal("")),
-    apiKey: z.string().optional(),
-    model: z.string().min(1).optional(),
-  });
-  const parsed = schema.parse(req.body);
+    channel: z.enum(MODEL_CHANNEL_IDS).optional(),
+    customBaseUrl: z.string().trim().min(1).max(500).optional(),
+    baseUrl: z.string().trim().min(1).max(500).optional(),
+    apiKey: z.string().max(500).optional(),
+    clearApiKey: z.boolean().optional(),
+    model: z.string().trim().min(1).max(200).optional(),
+    imageModel: z.string().trim().min(1).max(200).optional(),
+  }).strict();
+  const parsed = schema.parse(req.body || {});
   let config;
-  await updateDb((db) => {
-    db.modelConfig = {
-      ...db.modelConfig,
-      baseUrl: parsed.baseUrl ?? db.modelConfig.baseUrl,
-      model: parsed.model ?? db.modelConfig.model,
-      apiKey: parsed.apiKey === undefined || parsed.apiKey === "" ? db.modelConfig.apiKey : parsed.apiKey,
-    };
-    config = db.modelConfig;
-    return db;
-  });
-  res.json({
-    baseUrl: config.baseUrl || process.env.OPENAI_BASE_URL || "https://api.openai.com/v1",
-    model: config.model || process.env.OPENAI_MODEL || "gpt-4.1-mini",
-    apiKey: config.apiKey ? maskSecret(config.apiKey) : "",
-    hasApiKey: Boolean(config.apiKey || process.env.OPENAI_API_KEY),
-  });
+  try {
+    await updateDb((db) => {
+      db.modelConfig = updateModelConfig(db.modelConfig, parsed);
+      config = db.modelConfig;
+      return db;
+    });
+  } catch (error) {
+    throw new ModelApiError(error.message || "模型配置无效。", { code: "MODEL_CONFIG_INVALID", status: 400 });
+  }
+  res.json(publicModelConfig(config));
+});
+
+app.post("/api/model-config/test", async (req, res) => {
+  const schema = z.object({
+    channel: z.enum(MODEL_CHANNEL_IDS).optional(),
+    customBaseUrl: z.string().trim().min(1).max(500).optional(),
+    baseUrl: z.string().trim().min(1).max(500).optional(),
+    apiKey: z.string().max(500).optional(),
+    imageModel: z.string().trim().min(1).max(200).optional(),
+  }).strict();
+  const parsed = schema.parse(req.body || {});
+  const db = await readDb();
+  let draft;
+  try {
+    draft = updateModelConfig(db.modelConfig, parsed);
+  } catch (error) {
+    throw new ModelApiError(error.message || "模型配置无效。", { code: "MODEL_CONFIG_INVALID", status: 400 });
+  }
+  const started = Date.now();
+  try {
+    const result = await testImageModel(draft);
+    const tested = resolveModelConfig(draft);
+    let testingStoredConfig = false;
+    try {
+      const stored = resolveModelConfig(db.modelConfig, { channel: tested.channel });
+      testingStoredConfig = !String(parsed.apiKey || "").trim() && stored.baseUrl === tested.baseUrl && stored.imageModel === tested.imageModel;
+    } catch {
+      testingStoredConfig = false;
+    }
+    if (testingStoredConfig) await updateDb((current) => {
+      current.modelConfig = recordModelTestResult(current.modelConfig, { channel: tested.channel, status: result.status, testedAt: result.testedAt });
+      return current;
+    });
+    res.json({
+      ok: result.ok,
+      status: result.status,
+      model: result.model,
+      channel: tested.channel,
+      latencyMs: Date.now() - started,
+      testedAt: result.testedAt,
+      message: result.message,
+    });
+  } catch (error) {
+    const tested = resolveModelConfig(draft);
+    let testingStoredConfig = false;
+    try {
+      const stored = resolveModelConfig(db.modelConfig, { channel: tested.channel });
+      testingStoredConfig = !String(parsed.apiKey || "").trim() && stored.baseUrl === tested.baseUrl && stored.imageModel === tested.imageModel;
+    } catch {
+      testingStoredConfig = false;
+    }
+    if (testingStoredConfig) await updateDb((current) => {
+      current.modelConfig = recordModelTestResult(current.modelConfig, { channel: tested.channel, status: "failed" });
+      return current;
+    });
+    throw error;
+  }
+});
+
+app.get("/api/images", async (req, res) => {
+  const { scope } = z.object({ scope: z.enum(["all", "active", "favorites", "archived"]).default("all") }).parse(req.query);
+  res.json(await listGeneratedImages({ scope }));
+});
+
+app.get("/api/images/:id/file", async (req, res) => {
+  const thumbnail = req.query.thumbnail === "1";
+  const image = await readGeneratedImageFile(req.params.id, { thumbnail });
+  res.setHeader("content-type", image.mimeType);
+  res.setHeader("cache-control", "private, max-age=31536000, immutable");
+  res.setHeader("x-content-type-options", "nosniff");
+  res.setHeader("content-disposition", `inline; filename*=UTF-8''${encodeURIComponent(image.filename)}`);
+  res.send(image.buffer);
+});
+
+app.patch("/api/images/:id", async (req, res) => {
+  const patch = z.object({ isFavorite: z.boolean().optional(), isArchived: z.boolean().optional() })
+    .refine((value) => value.isFavorite !== undefined || value.isArchived !== undefined, "请选择要更新的图片状态。")
+    .parse(req.body);
+  res.json(await updateGeneratedImage(req.params.id, patch));
+});
+
+app.delete("/api/images/:id", async (req, res) => {
+  await deleteGeneratedImage(req.params.id);
+  await clearPhotoshopWorkfile(req.params.id);
+  res.status(204).end();
+});
+
+app.post("/api/images/:id/photoshop/open", async (req, res) => {
+  const { imageId, reused, applicationName } = await openGeneratedImageInPhotoshop(req.params.id);
+  res.json({ imageId, reused, applicationName });
+});
+
+app.post("/api/images/:id/photoshop/sync", async (req, res) => {
+  const { image, modifiedAt } = await syncPhotoshopWorkfile(req.params.id);
+  res.json({ image, modifiedAt });
+});
+
+app.post("/api/images/generate", reserveImageGeneration, async (req, res) => {
+  const started = Date.now();
+  try {
+    const schema = z.object({
+      prompt: z.string().trim().min(1, "请输入正向提示词。").max(4_000),
+      negativePrompt: z.string().trim().max(2_000).optional(),
+      ratio: z.enum(["1:1", "3:4", "4:3", "16:9"]),
+      quality: z.enum(["low", "medium", "high"]),
+      format: z.enum(["png", "jpeg", "webp"]),
+      background: z.enum(["auto", "opaque", "transparent"]),
+      compression: z.number().int().min(0).max(100).optional(),
+      count: z.number().int().min(1).max(4),
+      resolution: z.enum(["1k", "2k", "4k"]).default("1k"),
+      sourceImageId: z.string().trim().max(80).optional(),
+      editMode: z.enum(["mask", "annotation"]).optional(),
+    });
+    let requestBody = req.body;
+    if (req.is("multipart/form-data")) {
+      try {
+        requestBody = JSON.parse(String(req.body?.request || ""));
+      } catch {
+        throw Object.assign(new Error("参考图生图请求缺少有效的 request JSON 字段。"), { status: 400, code: "IMAGE_MULTIPART_REQUEST_INVALID" });
+      }
+    }
+    const parsed = schema.parse(requestBody);
+    const referenceImages = Array.isArray(req.files?.referenceImages) ? req.files.referenceImages : [];
+    const maskImage = Array.isArray(req.files?.maskImage) ? req.files.maskImage[0] : null;
+    const db = await readDb();
+    const generated = await generateImages(db.modelConfig, parsed, {
+      referenceImages,
+      maskImage,
+    });
+    const createdAt = new Date().toISOString();
+    const images = await saveGeneratedImages(generated.images, {
+      ...parsed,
+      model: generated.model,
+      createdAt,
+      referenceImageCount: generated.appliedOptions.referenceImageCount,
+      maskApplied: generated.appliedOptions.maskApplied,
+    });
+    if (!res.destroyed) {
+      res.json({
+        images,
+        model: generated.model,
+        size: generated.size,
+        durationMs: Date.now() - started,
+        createdAt,
+        warnings: generated.warnings,
+        appliedOptions: generated.appliedOptions,
+      });
+    }
+  } finally {
+    imageGenerationActive = false;
+  }
 });
 
 app.get("/api/auth/taobao/oauth-url", (_req, res) => {
@@ -717,10 +1223,23 @@ app.post("/api/auth/taobao/scan/start", async (req, res) => {
   });
   const parsed = schema.parse(req.body || {});
   const profileKey = newId("taobao");
-  const browserPort = 9300 + Math.floor(Math.random() * 500);
-  const login = await openTaobaoLogin({ profileKey, port: browserPort });
-  pendingScans.set(profileKey, { ...parsed, profileKey, browserPort, loginTargetId: login.targetId, createdAt: Date.now() });
-  res.json(login);
+  const db = await readDb();
+  const browserPort = await findAvailableBrowserPort([
+    ...db.authSessions.map((session) => session.browserPort),
+    ...Array.from(pendingScans.values(), (scan) => scan.browserPort),
+    ...pendingBrowserPorts,
+  ].filter(Boolean));
+  pendingBrowserPorts.add(browserPort);
+  try {
+    const login = await openTaobaoLogin({ profileKey, port: browserPort });
+    pendingScans.set(profileKey, { ...parsed, profileKey, browserPort, loginTargetId: login.targetId, createdAt: Date.now() });
+    res.json(login);
+  } catch (error) {
+    await closeAccountBrowser({ profileKey, port: browserPort }).catch(() => undefined);
+    throw error;
+  } finally {
+    pendingBrowserPorts.delete(browserPort);
+  }
 });
 
 app.post("/api/auth/sessions/:id/reauthorize", async (req, res) => {
@@ -774,7 +1293,6 @@ async function syncPendingScan(profileKey) {
           lastCheckedAt: new Date().toISOString(),
           healthStatus: "healthy",
           consecutiveFailures: 0,
-          cooldownUntil: null,
           lastFailureAt: null,
         };
         return session;
@@ -800,7 +1318,7 @@ async function syncPendingScan(profileKey) {
     return db;
   });
   pendingScans.delete(profileKey);
-  minimizeAccountBrowser({ profileKey: pending.profileKey, port: pending.browserPort });
+  await minimizeAccountBrowser({ profileKey: pending.profileKey, port: pending.browserPort }).catch((error) => console.error("[browser-minimize]", error.message));
   return { status: "synced", session };
 }
 
@@ -810,25 +1328,30 @@ async function checkAuthSession(session) {
   }
   const state = await checkTaobaoSession({ profileKey: session.browserProfileKey, port: session.browserPort });
   const checkedAt = new Date().toISOString();
-  const loginStatus = state.loggedIn && state.cookie ? "valid" : "expired";
+  const status = state.status || (state.loggedIn && state.cookie ? "valid" : "degraded");
+  const loginStatus = status === "valid" ? "valid" : status === "expired" ? "expired" : session.loginStatus || "valid";
   let updated;
   await updateDb((db) => {
     db.authSessions = db.authSessions.map((item) => {
       if (item.id !== session.id) return item;
       updated = {
         ...item,
-        cookie: loginStatus === "valid" ? state.cookie : item.cookie,
+        cookie: status === "valid" ? state.cookie : item.cookie,
         loginStatus,
         lastCheckedAt: checkedAt,
-        healthStatus: loginStatus === "valid" ? "healthy" : "degraded",
-        cooldownUntil: loginStatus === "valid" ? null : item.cooldownUntil,
-        consecutiveFailures: loginStatus === "valid" ? 0 : item.consecutiveFailures,
+        healthStatus: status === "valid" ? "healthy" : "degraded",
+        consecutiveFailures: status === "valid" ? 0 : item.consecutiveFailures,
       };
       return updated;
     });
     return db;
   });
-  return { id: session.id, loginStatus, checkedAt, message: loginStatus === "valid" ? "账号登录有效。" : "登录已失效，请重新授权。", session: publicAuthSession(updated) };
+  const message = status === "valid"
+    ? "账号登录有效。"
+    : status === "expired"
+      ? "登录已明确失效，请重新授权。"
+      : "账号浏览器仍保留，检测页面暂时异常；本次仅标记为待复检，不会清除登录状态。";
+  return { id: session.id, status, loginStatus, checkedAt, message, session: publicAuthSession(updated) };
 }
 
 app.post("/api/auth/sessions/check-all", async (_req, res) => {
@@ -841,7 +1364,14 @@ app.post("/api/auth/sessions/check-all", async (_req, res) => {
       results.push(await checkAuthSession(session));
       if (session !== db.authSessions.at(-1)) await new Promise((resolve) => setTimeout(resolve, 1500));
     }
-    res.json({ total: results.length, valid: results.filter((result) => result.loginStatus === "valid").length, expired: results.filter((result) => result.loginStatus === "expired").length, manual: results.filter((result) => result.loginStatus === "manual").length, results });
+    res.json({
+      total: results.length,
+      valid: results.filter((result) => result.status === "valid").length,
+      degraded: results.filter((result) => result.status === "degraded").length,
+      expired: results.filter((result) => result.status === "expired").length,
+      manual: results.filter((result) => result.loginStatus === "manual").length,
+      results,
+    });
   } finally {
     authCheckActive = false;
   }
@@ -858,26 +1388,6 @@ app.post("/api/auth/sessions/:id/check", async (req, res) => {
   } finally {
     authCheckActive = false;
   }
-});
-
-app.post("/api/auth/sessions/:id/release-cooldown", async (req, res) => {
-  let updated;
-  await updateDb((db) => {
-    db.authSessions = db.authSessions.map((session) => {
-      if (session.id !== req.params.id) return session;
-      if (session.loginStatus === "expired") return session;
-      updated = {
-        ...session,
-        cooldownUntil: null,
-        healthStatus: "healthy",
-        consecutiveFailures: 0,
-      };
-      return updated;
-    });
-    return db;
-  });
-  if (!updated) return res.status(404).json({ message: "账号不存在，或登录已失效，请重新授权。" });
-  res.json(publicAuthSession(updated));
 });
 
 app.post("/api/auth/taobao/scan/status", async (req, res) => {
@@ -900,7 +1410,7 @@ app.post("/api/auth/taobao/scan/cancel", async (req, res) => {
   const pending = pendingScans.get(parsed.profileKey);
   if (pending) {
     pendingScans.delete(parsed.profileKey);
-    if (pending.sessionId) minimizeAccountBrowser({ profileKey: pending.profileKey, port: pending.browserPort });
+    if (pending.sessionId) await minimizeAccountBrowser({ profileKey: pending.profileKey, port: pending.browserPort }).catch((error) => console.error("[browser-minimize]", error.message));
     else await closeAccountBrowser({ profileKey: pending.profileKey, port: pending.browserPort });
   }
   res.json({ ok: true });
@@ -974,7 +1484,7 @@ app.post("/api/auth/sessions/:id/activate", async (req, res) => {
   }
   if (activated.source === "taobao-browser" && activated.browserProfileKey && activated.browserPort) {
     if (activated.enabled) await keepAccountBrowserWarm(activated);
-    else await closeAccountBrowser({ profileKey: activated.browserProfileKey, port: activated.browserPort });
+    else await minimizeAccountBrowser({ profileKey: activated.browserProfileKey, port: activated.browserPort }).catch((error) => console.error("[browser-minimize]", error.message));
   }
   res.json(publicAuthSession(activated));
 });
@@ -1244,8 +1754,18 @@ app.use((err, _req, res, _next) => {
     res.status(400).json({ message: err.issues.map((issue) => issue.message).join("；") });
     return;
   }
-  console.error("[api]", err);
-  res.status(500).json({ message: err.message || "服务端运行失败。" });
+  if (err instanceof multer.MulterError) {
+    const message = err.code === "LIMIT_FILE_SIZE"
+      ? "每张参考图或蒙版不能超过 8 MB。"
+      : err.code === "LIMIT_FILE_COUNT" || err.code === "LIMIT_UNEXPECTED_FILE"
+        ? "参考图最多 4 张，批注蒙版最多 1 张。"
+        : "参考图上传内容过多或格式无效。";
+    res.status(413).json({ message, error: { code: `IMAGE_UPLOAD_${err.code}`, message } });
+    return;
+  }
+  const status = Number.isInteger(err.status) && err.status >= 400 && err.status <= 599 ? err.status : 500;
+  if (status >= 500) console.error("[api]", err);
+  res.status(status).json({ message: err.message || "服务端运行失败。", ...(err.code ? { error: { code: err.code, message: err.message } } : {}) });
 });
 
 export async function startServer({ host = "127.0.0.1", port = Number(process.env.PORT || 4317), staticDir = "" } = {}) {
@@ -1274,7 +1794,16 @@ export async function startServer({ host = "127.0.0.1", port = Number(process.en
       readDb()
         .then(async (db) => {
           for (const session of db.authSessions.filter((item) => item.source === "taobao-browser" && (item.enabled ?? item.active ?? true))) {
-            await keepAccountBrowserWarm(session);
+            try {
+              await keepAccountBrowserWarm(session);
+            } catch (firstError) {
+              await new Promise((resolve) => setTimeout(resolve, 1000));
+              try {
+                await keepAccountBrowserWarm(session);
+              } catch (error) {
+                console.error(`[browser-warmup] ${session.id}:`, error.message || firstError.message);
+              }
+            }
             await new Promise((resolve) => setTimeout(resolve, 750));
           }
         })

@@ -10,6 +10,7 @@ function sourceLabel(source: RunRecord['source']) {
   if (source === 'manual-product') return '单品手动'
   if (source === 'manual-all') return '全部手动'
   if (source === 'manual-batch') return '批量抓取'
+  if (source === 'local-import') return '本地导入'
   return '单品抓取'
 }
 

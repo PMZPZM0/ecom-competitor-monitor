@@ -133,13 +133,16 @@ export function reportXml(product, snapshot, { includeTitle = false } = {}) {
   const model = product.model || snapshot.model || product.name || "未知型号";
   const thresholds = product.skuMonitorPrices || {};
   const anonymous = snapshot.accessMode === "anonymous";
-  const accountType = product.accountType || "normal";
-  const accountName = { normal: "普通账号", gift: "礼金账号", vip88: "88VIP账号" }[accountType] || "普通账号";
+  const primaryCapture = snapshot.accountCaptures?.find((item) => item.sessionId === snapshot.primaryAccountSessionId)
+    || snapshot.accountCaptures?.find((item) => item.primary);
+  const accountType = primaryCapture?.accountType || snapshot.primaryAccountType || product.accountType || "normal";
+  const accountName = primaryCapture?.accountName || { normal: "普通账号", gift: "礼金账号", vip88: "88VIP账号" }[accountType] || "普通账号";
   const formattedPrice = (value, fallback = "未获取") => Number.isFinite(Number(value)) && Number(value) > 0 ? `¥${Number(value).toFixed(2)}` : fallback;
   const accountPrice = (sku, type, field, statusField, noneLabel) => {
     if (anonymous) return "需登录";
     if (Number.isFinite(Number(sku[field])) && Number(sku[field]) > 0) return formattedPrice(sku[field]);
-    if (type !== accountType) return "不适用";
+    const supported = type === "normal" || type === accountType || (type === "gift" && accountType === "vip88");
+    if (!supported) return "不适用";
     return sku[statusField] === "none" ? noneLabel : "未获取";
   };
   const coinPrice = (sku) => anonymous

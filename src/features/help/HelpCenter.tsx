@@ -1,8 +1,9 @@
-import { ArrowRight, BadgeDollarSign, BellRing, BookOpen, CalendarClock, ChevronDown, CircleAlert, CircleCheck, ClipboardCheck, CloudDownload, Download, KeyRound, ListChecks, PlayCircle, Power, Search, ShieldCheck, TimerReset } from 'lucide-react'
+import { ArrowRight, BadgeDollarSign, BellRing, BookOpen, CalendarClock, ChevronDown, CircleAlert, CircleCheck, ClipboardCheck, CloudDownload, Download, KeyRound, ListChecks, PlayCircle, Power, Search, TimerReset, WandSparkles } from 'lucide-react'
 import type { LucideIcon } from 'lucide-react'
 
 const sections = [
   ['guide-start', '快速开始'],
+  ['guide-launch', '启动方式'],
   ['guide-monitor', '监控逻辑'],
   ['guide-account', '账号授权'],
   ['guide-product', '添加与抓取'],
@@ -11,7 +12,7 @@ const sections = [
   ['guide-capture-queue', '抓取队列'],
   ['guide-feishu', '飞书提醒'],
   ['guide-media', '素材与买家秀'],
-  ['guide-risk', '采集保护'],
+  ['guide-image', 'AI 生图'],
   ['guide-update', '版本更新'],
   ['guide-troubleshoot', '异常处理'],
 ] as const
@@ -34,7 +35,7 @@ function Checklist({ items }: { items: string[] }) {
   return <ul className="space-y-2">{items.map((item) => <li key={item} className="flex items-start gap-2"><CircleCheck className="mt-1.5 h-4 w-4 shrink-0 text-emerald-600" /><span>{item}</span></li>)}</ul>
 }
 
-export function HelpCenter({ onNavigate }: { onNavigate: (page: 'auth' | 'overview' | 'queue') => void }) {
+export function HelpCenter({ onNavigate }: { onNavigate: (page: 'auth' | 'overview' | 'queue' | 'image-workbench') => void }) {
   function openSection(id: string) {
     const element = document.getElementById(id)
     if (element instanceof HTMLDetailsElement) element.open = true
@@ -72,6 +73,11 @@ export function HelpCenter({ onNavigate }: { onNavigate: (page: 'auth' | 'overvi
           <div className="flex items-start gap-2 border-l-4 border-amber-400 bg-amber-50 px-4 py-3 text-amber-900"><CircleAlert className="mt-1.5 h-4 w-4 shrink-0" /><span>第一次使用时，先用 1 个商品完成授权、抓取、核价和定时测试，确认价格与前台一致后再批量添加。</span></div>
         </Section>
 
+        <Section id="guide-launch" title="选择桌面 APP 或浏览器网页" summary="两种方式共用本机服务、账号和商品数据" icon={PlayCircle}>
+          <div className="flex items-start gap-3"><PlayCircle className="mt-1 h-5 w-5 shrink-0 text-blue-600" /><p>首次启动会询问使用“桌面 APP”还是“浏览器网页”。桌面方式使用独立窗口；网页方式会启动同一套本机服务，再用系统默认浏览器打开。勾选“记住我的选择”后，下次会直接进入。</p></div>
+          <Checklist items={['网页方式仍只在当前电脑运行，不会把商品、账号或飞书配置上传到远程服务器。', '右键系统托盘图标，可随时切换桌面 APP/浏览器网页，或清除选择并在下次启动时重新询问。', '网页方式关闭浏览器标签后，本机服务仍驻留托盘；桌面 APP 方式关闭窗口会退出软件。需要确认完全停止时，可在托盘菜单点击“退出”。']} />
+        </Section>
+
         <Section id="guide-monitor" title="监控为什么会执行" summary="总开关、本商品和计划时间必须同时满足" icon={Power}>
           <div className="grid grid-cols-[1fr_auto_1fr_auto_1fr_auto_1fr] items-stretch gap-2 max-[900px]:grid-cols-1">
             {[
@@ -85,24 +91,26 @@ export function HelpCenter({ onNavigate }: { onNavigate: (page: 'auth' | 'overvi
             '顶部“全局自动监控”是总开关。暂停后，所有商品都不会按时间自动抓取，但单品启停与计划会保留。',
             '商品卡片“启用本商品”只影响当前商品。启用后会进入监控队列；移出队列不会删除商品和历史数据。',
             '商品卡片底部二选一：单次定时只执行所选日期时间并在完成后暂停；循环监控只按分钟周期执行。',
-            '手动点击“抓取”不依赖定时计划，但仍会遵守当前账号状态和采集保护设置。',
+            '手动点击“抓取”不依赖定时计划；同一账号仍会按顺序执行，避免多个任务同时操作一个浏览器。',
           ]} />
         </Section>
 
-        <Section id="guide-account" title="账号授权与账号类型" summary="普通、礼金、88VIP 各自负责什么价格" icon={KeyRound}>
-          <div className="flex items-start gap-3"><KeyRound className="mt-1 h-5 w-5 shrink-0 text-blue-600" /><div><p>打开“账号授权”，填写账号备注并选择类型，然后点击扫码授权。淘宝 App 扫码完成后，必须点击“检测登录”，状态有效才会参与抓取。</p></div></div>
-          <div className="overflow-x-auto"><table className="w-full border-collapse text-left text-sm"><thead><tr className="border-y border-slate-200 bg-slate-50 text-slate-600"><th className="px-3 py-2">账号类型</th><th className="px-3 py-2">主要用途</th><th className="px-3 py-2">重要说明</th></tr></thead><tbody className="divide-y divide-slate-100"><tr><td className="px-3 py-3 font-medium">普通账号</td><td className="px-3 py-3">普通价、淘宝秒杀价、惊喜立减价、淘金币价</td><td className="px-3 py-3">礼金与 88VIP 计算也需要公共价格基准，建议至少保持一个普通账号在线。</td></tr><tr><td className="px-3 py-3 font-medium">礼金账号</td><td className="px-3 py-3">首单礼金、新人专享等资格价</td><td className="px-3 py-3">没有真实礼金资格时显示“未获取”，不会拿标价代替。</td></tr><tr><td className="px-3 py-3 font-medium">88VIP 账号</td><td className="px-3 py-3">88VIP 专享价格</td><td className="px-3 py-3">必须由对应账号页面返回可信权益依据。</td></tr></tbody></table></div>
-          <Checklist items={['“一键检测全部”只检查登录状态，不会开始抓取。', '账号失效时优先点击“重新授权”，不必删除账号卡片。', '一个账号固定使用自己的浏览器资料目录，关闭抓取窗口不会删除登录状态。']} />
+        <Section id="guide-account" title="账号授权与账号类型" summary="一个账号会采集页面可见的全部价格通道" icon={KeyRound}>
+          <div className="flex items-start gap-3"><KeyRound className="mt-1 h-5 w-5 shrink-0 text-blue-600" /><div><p>打开“账号授权”，填写账号备注并选择类型，然后点击扫码授权。淘宝 App 扫码完成后点击“检测登录”；未明确标记“登录失效”的扫码账号才会进入抓取候选。</p></div></div>
+          <div className="overflow-x-auto"><table className="w-full border-collapse text-left text-sm"><thead><tr className="border-y border-slate-200 bg-slate-50 text-slate-600"><th className="px-3 py-2">账号类型</th><th className="px-3 py-2">可采集价格</th><th className="px-3 py-2">重要说明</th></tr></thead><tbody className="divide-y divide-slate-100"><tr><td className="px-3 py-3 font-medium">普通账号</td><td className="px-3 py-3">普通、淘宝秒杀、国补、惊喜立减、淘金币等公共通道</td><td className="px-3 py-3">一个普通账号即可采集其页面实际可见的全部公共价格。</td></tr><tr><td className="px-3 py-3 font-medium">礼金账号</td><td className="px-3 py-3">全部可见公共通道 + 礼金价</td><td className="px-3 py-3">不再要求另有普通账号；没有真实礼金资格时显示“未获取”。</td></tr><tr><td className="px-3 py-3 font-medium">88VIP 账号</td><td className="px-3 py-3">全部可见公共通道 + 页面实际返回的礼金价、88VIP 价</td><td className="px-3 py-3">能抓多少取决于该账号对当前商品的真实权益证据。</td></tr></tbody></table></div>
+          <Checklist items={['选择账号类型是在指定首选监控视角；首选不可用时，会在其余可用账号中按 88VIP → 礼金 → 普通的能力顺序回退。', '多个账号的价格结果完全隔离，不会互相覆盖；商品卡片可切换账号视角查看，其中标记“监控”的主账号视角才用于监控阈值和飞书。', '页面没有返回可信价格证据时仍会失败或显示“未获取”，不会用标价或其他账号结果补造。', '“待复检”表示检测页临时异常但登录资料仍保留，可稍后重试；只有明确跳转登录页才标记“登录失效”，此时再点击“重新授权”。', '“一键检测全部”只检查登录状态，不会开始商品抓取。一个账号固定使用自己的浏览器资料目录。']} />
         </Section>
 
         <Section id="guide-product" title="添加商品与抓取" summary="链接和商品 ID 都能用，买家秀按需开启" icon={Search}>
           <div className="flex items-start gap-3"><Search className="mt-1 h-5 w-5 shrink-0 text-blue-600" /><div><p><strong>链接模式：</strong>粘贴淘宝或天猫商品链接，软件会自动删除跟踪参数，只保留平台、商品路径和商品 ID。</p><p className="mt-2"><strong>商品 ID 模式：</strong>只输入纯数字 ID，选择淘宝或天猫，软件会自动补全有效地址前缀。</p></div></div>
           <Checklist items={[
-            '单个添加会创建商品并立即抓取；新商品默认处于“本商品未启用”，先核对数据再加入监控。',
+            '单个添加的主按钮是“自动采集并本地解析”：软件会使用已授权账号在后台打开商品页面，每个账号视角可能分别访问；采集完成后先脱敏保存原始证据，再从本地文件读取和解析价格。',
+            '自动采集仍会访问淘宝商品页面；本地落盘用于保证解析来源可核对、同一份证据可重复验证，不代表绕过淘宝验证，也不能保证不会遇到平台风控。',
+            '新商品默认处于“本商品未启用”，先核对主图、SKU 和各价格通道，再按需要启用定时监控。之后的手动抓取、批量抓取和定时监控也使用相同的“采集 → 脱敏落盘 → 读盘解析”流程。',
             '“同时抓取买家秀”默认关闭；勾选后，该商品的首次、手动和定时抓取才会自动包含买家秀。',
-            '批量添加用于多个新链接或 ID，一次最多 30 个；买家秀选项对本批商品统一生效，每组最多 5 个并发。',
+            '批量自动采集用于多个新链接或 ID，一次最多 30 个；每个商品都会先保存本地证据再解析，买家秀和完整素材选项对整批统一生效。',
             '商品简称不是必填。抓取成功后优先展示平台真实标题、店铺和型号。',
-            '抓取完成后先检查主图、SKU 数量、普通价和账号专享价；有疑问时打开“核对价格”。',
+            '抓取完成后先检查主图、SKU 数量和各账号视角价格；有疑问时切换账号并打开“核对价格”。',
           ]} />
         </Section>
 
@@ -112,13 +120,13 @@ export function HelpCenter({ onNavigate }: { onNavigate: (page: 'auth' | 'overvi
             '“核对价格”逐 SKU 展示证据、金额和公式；验证不闭合时不会保存猜测值。',
             '“优惠明细”按标价、商品优惠、账号权益和最终价格分层展示，每个 SKU 独立。',
             '监控价必须按 SKU 单独设置。价格更新不会清除监控价。',
-            '任一已验证价格低于该 SKU 监控价时，才进入飞书低价提醒判断。',
+            '只有标记“监控”的主账号视角中，已验证价格低于该 SKU 监控价时，才进入飞书低价提醒判断；切换卡片账号只改变展示。',
           ]} />
         </Section>
 
         <Section id="guide-queue" title="监控队列怎么用" summary="只看已启用商品、计划时间和执行顺序" icon={ListChecks}>
           <div className="flex items-start gap-3"><ListChecks className="mt-1 h-5 w-5 shrink-0 text-blue-600" /><p>“监控队列”只显示已启用商品，默认按下次抓取时间排列。全局暂停时商品仍保留在队列中，但状态会统一显示“等待全局开启”。</p></div>
-          <Checklist items={['队列序号表示当前页面中的执行先后；同一账号严格按顺序抓取，不同账号才会并行。', '“抓取”只立即执行当前商品，并遵守账号状态和采集保护。', '“移出”只暂停本商品自动监控，商品卡片、历史价格、监控价和计划都保留。', '在总览或分类重新点击“启用本商品”，商品会立即回到队列。']} />
+          <Checklist items={['队列序号表示当前页面中的执行先后；同一账号严格按顺序抓取，不同账号才会并行。', '“抓取”只立即执行当前商品，优先使用首选账号；不可用时按账号能力回退。', '“移出”只暂停本商品自动监控，商品卡片、历史价格、监控价和计划都保留。', '在总览或分类重新点击“启用本商品”，商品会立即回到队列。']} />
         </Section>
 
         <Section id="guide-capture-queue" title="抓取队列怎么用" summary="查看当前排队和进度，刷新页面不会丢任务" icon={TimerReset}>
@@ -129,8 +137,8 @@ export function HelpCenter({ onNavigate }: { onNavigate: (page: 'auth' | 'overvi
         <Section id="guide-feishu" title="飞书文档与机器人提醒" summary="文档每次写入，机器人只在低于监控价时提醒" icon={BellRing}>
           <div className="flex items-start gap-3"><BellRing className="mt-1 h-5 w-5 shrink-0 text-blue-600" /><p>在“账号授权”完成飞书扫码授权后，可创建价格文档；群机器人需要在飞书群中创建自定义机器人，再将 Webhook 和可选签名密钥填入软件。</p></div>
           <Checklist items={[
-            '飞书文档：每次成功抓取后写入店铺、型号、SKU 和各类价格。',
-            '机器人提醒：某个 SKU 的有效价格每次严格低于该 SKU 监控价时都会发送。',
+            '飞书文档：每次成功抓取后写入店铺、型号、SKU 和主账号视角的各类价格，并标注账号类型。',
+            '机器人提醒：主账号视角中，某个 SKU 的有效价格每次严格低于该 SKU 监控价时都会发送。',
             '保存配置后先点击“发送测试”，确认机器人可达，再等待真实低价触发。',
           ]} />
         </Section>
@@ -140,9 +148,9 @@ export function HelpCenter({ onNavigate }: { onNavigate: (page: 'auth' | 'overvi
           <Checklist items={['新增商品时按需勾选“同时抓取买家秀”；不需要时关闭可缩短抓取时间。', '买家秀未开启或抓取失败时，仍可使用“仅重试买家秀”，不会重新计算价格或覆盖 SKU 数据。', '本次失败但历史曾成功时，预览继续显示上次有效缓存，并明确标注缓存状态。', '生成 ZIP 时等待状态变为“下载已开始”后再关闭软件。', '没有真实视频或媒体评价时不会生成占位内容。']} />
         </Section>
 
-        <Section id="guide-risk" title="采集保护、并发和浏览器" summary="这是软件抓取间隔，不代表淘宝账号被风控" icon={ShieldCheck}>
-          <div className="flex items-start gap-3"><ShieldCheck className="mt-1 h-5 w-5 shrink-0 text-blue-600" /><p>“采集保护”是本软件设置的访问间隔，不等于淘宝账号被风控。倒计时期间手动抓取按钮会说明剩余时间，可在账号授权页按账号类型调整或关闭。</p></div>
-          <Checklist items={['批量添加、批量抓取和自动监控都按账号隔离：同一账号严格串行，不同账号最多并行处理 5 个商品。', '每个账号使用独立浏览器资料目录，抓取窗口在后台或最小化运行。', '无有效价格会自动换账号或重试；商品 ID 与最终页面不一致时拒绝保存，避免串品。', '频繁刷新、账号掉线、验证码或登录跳转属于平台状态；软件不会绕过安全验证。', '长期运行建议保留合理间隔；集中测试后再恢复采集保护。']} />
+        <Section id="guide-image" title="AI 生图怎么用" summary="参考图、高清输出、历史相册、批注与 Photoshop" icon={WandSparkles}>
+          <div className="flex items-start gap-3"><WandSparkles className="mt-1 h-5 w-5 shrink-0 text-blue-600" /><div><p>打开“AI 生图”，先点击生成设置右上角“配置”。选择内部模型通道，再填写图片模型、分析模型和对应 Key；稳定与高速通道的 Key 独立保存，切换不会串用。</p><button type="button" onClick={() => onNavigate('image-workbench')} className="mt-3 inline-flex h-9 items-center gap-2 rounded-md border border-blue-200 bg-blue-50 px-3 text-sm font-medium text-blue-700 hover:bg-blue-100"><WandSparkles className="h-4 w-4" />打开 AI 生图</button></div></div>
+          <Checklist items={['默认建议使用“稳定生图”；需要更快响应时可切换“高速通道”。两者地址已内置且隐藏；原有兼容接口仍可选“自定义配置”并填写地址。', '“测试连接”只验证当前通道、Key 和图片模型是否可用，不会生成图片或产生生图费用。', '每个通道独立保存 Key，切换不会串用；没有当前通道 Key 时请联系管理员。', '输入正向提示词和可选的排除要求；参考图可选择、拖入或粘贴，最多 4 张。超过 8 MB 会先在本机自动压缩。', '1K 是标准输出；2K、4K 是模型生成后由本机增强的高清输出。选择比例、质量、格式、背景和数量后点击“生成图片”。', '图片自动保存到生成历史；点击收藏后进入收藏相册。打开图片详情可下载、删除、复用参数或基于该图继续创作。', '在图片详情点击“批注编辑”，拖拽框选区域或点击放置编号备注点，再为每个编号填写修改内容。系统会保持未标注区域不变；新结果作为独立版本保存，不覆盖原图。', '需要设计师精修时点击“Photoshop 编辑”。软件会打开独立 PNG 工作副本；在 PS 中按 Ctrl/Cmd+S 保存后，返回点击“同步 PS 修改”，结果会作为新版本进入历史，原图不会覆盖。', '本功能要求 Photoshop 安装在运行软件的同一台电脑；请直接保存 PNG 工作副本，不要另存为 PSD 后再同步。', '“停止等待”只停止当前界面等待，上游模型可能仍在生成并计费；完成后结果仍会写入历史。', 'API Key 加密保存在本机，界面和接口不会回显完整密钥；清除操作只影响当前所选通道。']} />
         </Section>
 
         <Section id="guide-update" title="检查并安装新版本" summary="自动检查、选择对应系统安装包并覆盖更新" icon={CloudDownload}>
@@ -153,11 +161,11 @@ export function HelpCenter({ onNavigate }: { onNavigate: (page: 'auth' | 'overvi
         <Section id="guide-troubleshoot" title="常见异常与处理顺序" summary="按问题展开，只看当前需要的处理步骤" icon={CircleAlert}>
           <div className="space-y-3">
             {[
-              ['抓不到价格或价格不一致', '确认商品链接和 SKU → 检查普通账号在线 → 检查账号类型 → 打开核对价格 → 重新抓取。'],
+              ['抓不到价格或价格不一致', '确认商品链接和 SKU → 检查首选账号状态 → 切换账号视角核对 → 打开核对价格 → 重新抓取。证据不足时软件会拒绝保存。'],
               ['买家秀只有文字或数量很少', '打开买家秀预览查看状态 → 点击仅重试买家秀 → 检查账号登录 → 保留历史成功缓存。'],
               ['计划不执行', '检查页面顶部全局自动监控 → 检查本商品已启用 → 检查开始时间和周期 → 到监控队列查看下次时间。'],
-              ['飞书没有消息', '发送测试 → 检查 SKU 监控价 → 确认本次有效价格严格低于阈值 → 检查自动提醒开关。'],
-              ['账号检测正常但商品要求登录', '该商品可能出现临时登录跳转或平台验证；先重新授权对应账号，再单品重试，不要降低价格验证规则。'],
+              ['飞书没有消息', '发送测试 → 检查 SKU 监控价 → 确认主账号视角的有效价格严格低于阈值 → 检查自动提醒开关。'],
+              ['账号显示待复检或登录失效', '待复检表示检测页临时异常，登录资料仍保留，可稍后再检测；登录失效表示已明确跳转登录页，需要重新授权。'],
               ['macOS 提示已损坏或运行很慢', '“已损坏”表示旧包缺少 Apple 签名与公证，请下载最新的 mac-arm64 安装包；可信旧包的临时处理命令见完整使用说明。首次浏览器授权会较慢，避免同时启动多个抓取任务。'],
             ].map(([title, text]) => <details key={title} className="group border-b border-slate-200 pb-3"><summary className="cursor-pointer list-none font-semibold text-slate-900">{title}</summary><p className="mt-2 text-slate-600">{text}</p></details>)}
           </div>

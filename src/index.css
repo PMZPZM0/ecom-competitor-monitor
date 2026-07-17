@@ -91,9 +91,9 @@ textarea {
 }
 
 @media (max-width: 1100px) {
-  .app-sidebar { width: 4rem; }
+  .app-sidebar { width: 64px; }
   .app-sidebar .brand-copy,
   .app-sidebar .nav-label { display: none; }
   .app-sidebar button { justify-content: center; padding-inline: 0; }
-  .app-main { margin-left: 4rem; }
+  .app-main { margin-left: 64px; }
 }

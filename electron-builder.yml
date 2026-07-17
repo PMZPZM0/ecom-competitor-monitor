@@ -6,6 +6,7 @@ directories:
 files:
   - dist/**/*
   - electron/**/*
+  - '!electron/**/*.test.mjs'
   - server/**/*
   - public/app-icon.ico
   - public/app-icon.png

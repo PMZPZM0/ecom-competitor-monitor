@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { buildPriceCard, effectivePriceForSku, publicFeishuConfig, updateFeishuConfig } from "./feishuService.js";
+import { accountPriceContext, buildPriceCard, effectivePriceForSku, publicFeishuConfig, updateFeishuConfig } from "./feishuService.js";
 
 function verifiedSku(sku, channels) {
   return {
@@ -83,6 +83,34 @@ test("effective price follows normal to surprise to coin chain", () => {
   assert.deepEqual(effectivePriceForSku(verifiedSku({ price: 529, normalPrice: 529, surprisePrice: 489 }, ["normal", "surprise"]), "normal"), { label: "惊喜立减价", value: 489 });
   assert.deepEqual(effectivePriceForSku(verifiedSku({ price: 529, normalPrice: 529 }, ["normal"]), "normal"), { label: "普通价", value: 529 });
   assert.equal(effectivePriceForSku({ price: 1, normalPrice: 1 }, "normal"), null);
+});
+
+test("gift and 88VIP effective prices include every supported verified channel", () => {
+  const gift = verifiedSku({ normalPrice: 139, surprisePrice: 119, giftPrice: 109 }, ["normal", "surprise", "gift"]);
+  assert.deepEqual(effectivePriceForSku(gift, "gift"), { label: "礼金价", value: 109 });
+  const vip = verifiedSku({ normalPrice: 139, surprisePrice: 119, giftPrice: 109, vipPrice: 99 }, ["normal", "surprise", "gift", "vip88"]);
+  assert.deepEqual(effectivePriceForSku(vip, "vip88"), { label: "88VIP价", value: 99 });
+});
+
+test("monitoring and Feishu stay on the explicit primary account view", () => {
+  const snapshot = {
+    primaryAccountSessionId: "gift-session",
+    primaryAccountType: "gift",
+    accountCaptures: [
+      { sessionId: "normal-session", accountName: "普通 A", accountType: "normal" },
+      { sessionId: "gift-session", accountName: "礼金 B", accountType: "gift", primary: true },
+    ],
+  };
+  assert.deepEqual(accountPriceContext({ accountType: "normal", lastSnapshot: snapshot }, snapshot), {
+    accountType: "gift",
+    account: { account: "礼金账号", benefit: "礼金价", field: "giftPrice", status: "giftStatus" },
+    accountName: "礼金 B",
+  });
+  const primarySku = verifiedSku({
+    normalPrice: 139,
+    accountPrices: [{ sessionId: "vip-session", accountType: "vip88", normalPrice: 99, vipPrice: 79 }],
+  }, ["normal"]);
+  assert.deepEqual(effectivePriceForSku(primarySku, "normal"), { label: "普通价", value: 139 });
 });
 
 test("large Feishu cards keep SKUs beyond the visual price grid", () => {

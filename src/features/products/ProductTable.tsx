@@ -1,11 +1,10 @@
 import { useEffect, useMemo, useState } from 'react'
 import { ChevronLeft, ChevronRight } from 'lucide-react'
 import { Badge } from '../../components/ui/badge'
-import type { AuthSession, Overview, Product } from '../../types/domain'
+import type { Overview, Product } from '../../types/domain'
 import { ImagePreview, type Preview } from './productDisplay'
 import { ProductMonitorCard } from './ProductMonitorCard'
 import { productSortOptions, sortProducts, type ProductSortKey } from './productSort'
-import { productCaptureProtectionUntil } from './captureProtection'
 
 type Props = {
   products: Product[]
@@ -16,13 +15,13 @@ type Props = {
   onSaveSkuMonitorPrice: (product: Product, skuId: string, value: number | null) => Promise<void>
   onCapture: (product: Product) => Promise<Product | void>
   onRetryBuyerShows: (product: Product) => Promise<Product>
+  onLocalImport: (product?: Product) => void
   onDelete: (product: Product) => Promise<void>
   busyProductId?: string
-  authSessions: AuthSession[]
   monitor: Overview['monitor']
 }
 
-export function ProductTable({ products, totalProducts = products.length, onToggle, onSchedule, onMediaPreference, onSaveSkuMonitorPrice, onCapture, onRetryBuyerShows, onDelete, busyProductId, authSessions, monitor }: Props) {
+export function ProductTable({ products, totalProducts = products.length, onToggle, onSchedule, onMediaPreference, onSaveSkuMonitorPrice, onCapture, onRetryBuyerShows, onLocalImport, onDelete, busyProductId, monitor }: Props) {
   const [preview, setPreview] = useState<Preview | null>(null)
   const [sortKey, setSortKey] = useState<ProductSortKey>('updated-desc')
   const [page, setPage] = useState(1)
@@ -47,14 +46,14 @@ export function ProductTable({ products, totalProducts = products.length, onTogg
   return (
     <>
       <section className="min-h-[420px]">
-        <div className="mb-4 flex flex-row items-start justify-between gap-4 border-b border-slate-200 pb-3">
+        <div className="mb-4 flex flex-col items-start justify-between gap-3 border-b border-slate-200 pb-3 sm:flex-row sm:gap-4">
           <div>
             <h2 className="text-base font-semibold text-slate-950">商品抓取工作台</h2>
             <div className="mt-1 text-sm text-slate-500">最多显示排序后的 20 个商品，每页 10 个；其余 {Math.max(0, totalProducts - 20)} 个仍保留在“监控分类”。</div>
           </div>
-          <div className="flex items-center gap-2">
+          <div className="flex w-full flex-wrap items-center gap-2 sm:w-auto sm:justify-end">
             <label className="text-xs text-slate-500" htmlFor="overview-product-sort">商品排序</label>
-            <select id="overview-product-sort" value={sortKey} onChange={(event) => setSortKey(event.target.value as ProductSortKey)} className="h-9 rounded-md border border-slate-200 bg-white px-3 text-xs text-slate-700 outline-none focus:border-emerald-400">
+            <select id="overview-product-sort" value={sortKey} onChange={(event) => setSortKey(event.target.value as ProductSortKey)} className="h-9 min-w-0 flex-1 rounded-md border border-slate-200 bg-white px-3 text-xs text-slate-700 outline-none focus:border-emerald-400 sm:flex-none">
               {productSortOptions.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}
             </select>
             <Badge className="border-sky-100 bg-sky-50 text-sky-700">第 {page} / {totalPages} 页 · {cappedProducts.length} 个</Badge>
@@ -71,10 +70,10 @@ export function ProductTable({ products, totalProducts = products.length, onTogg
               onSaveSkuMonitorPrice={onSaveSkuMonitorPrice}
               onCapture={onCapture}
               onRetryBuyerShows={onRetryBuyerShows}
+              onLocalImport={onLocalImport}
               onDelete={onDelete}
               busy={busyProductId === product.id}
               onPreview={setPreview}
-              captureProtectionUntil={productCaptureProtectionUntil(product, authSessions)}
               monitor={monitor}
             />
           ))}

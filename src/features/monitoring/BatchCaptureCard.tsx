@@ -10,6 +10,16 @@ import type { AuthSession } from '../../types/domain'
 type Payload = { urls: string[]; group: string; accountType: 'normal' | 'gift' | 'vip88'; captureBuyerShows: boolean; captureMediaAssets: boolean }
 type InputMode = 'link' | 'id'
 
+const accountTypeLabels: Record<Payload['accountType'], string> = { normal: '普通', gift: '礼金', vip88: '88VIP' }
+
+function availableCaptureSessions(sessions: AuthSession[]) {
+  return sessions.filter((session) => session.source === 'taobao-browser' && (session.enabled ?? session.active) && session.loginStatus !== 'expired')
+}
+
+function preferredAccountType(sessions: AuthSession[]): Payload['accountType'] {
+  return (['vip88', 'gift', 'normal'] as const).find((type) => sessions.some((session) => (session.accountType || 'normal') === type)) || 'normal'
+}
+
 type Props = {
   sessions: AuthSession[]
   busy: boolean
@@ -18,11 +28,13 @@ type Props = {
 }
 
 export function BatchCaptureCard({ sessions, busy, onRun, onRequireAuth }: Props) {
+  const availableSessions = availableCaptureSessions(sessions)
+  const fallbackAccountType = preferredAccountType(availableSessions)
   const [inputMode, setInputMode] = useState<InputMode>('link')
   const [platform, setPlatform] = useState<ProductPlatform>('tmall')
   const [rawLinks, setRawLinks] = useState('')
   const [rawIds, setRawIds] = useState('')
-  const [accountType, setAccountType] = useState<Payload['accountType']>('normal')
+  const [accountType, setAccountType] = useState<Payload['accountType']>(() => fallbackAccountType)
   const [captureBuyerShows, setCaptureBuyerShows] = useState(false)
   const [captureMediaAssets, setCaptureMediaAssets] = useState(false)
   const [status, setStatus] = useState<{ tone: 'progress' | 'success' | 'error'; message: string } | null>(null)
@@ -33,7 +45,7 @@ export function BatchCaptureCard({ sessions, busy, onRun, onRequireAuth }: Props
     : [...new Set(entries.map(normalizeProductUrlIfPossible))], [entries, inputMode, platform])
 
   async function submit() {
-    setStatus({ tone: 'progress', message: `正在创建并抓取 ${urls.length} 个商品${captureMediaAssets ? '，包含完整素材' : ''}${captureBuyerShows ? '，包含买家秀' : ''}...` })
+    setStatus({ tone: 'progress', message: `正在按队列后台采集 ${urls.length} 个商品${captureMediaAssets ? '，包含完整素材' : ''}${captureBuyerShows ? '，包含买家秀' : ''}；每个商品采集后都会脱敏保存并从本地文件解析...` })
     try {
       if (!entries.length) throw new Error(inputMode === 'id' ? '请至少输入一个商品 ID。' : '请粘贴至少一个商品链接。')
       if (entries.length > 30) throw new Error('单次最多添加 30 个商品。')
@@ -44,26 +56,25 @@ export function BatchCaptureCard({ sessions, busy, onRun, onRequireAuth }: Props
       for (const value of urls) {
         normalizeProductUrl(value)
       }
-      const available = sessions.some((session) => (session.enabled ?? session.active) && session.loginStatus !== 'expired' && (session.accountType || 'normal') === accountType)
-      if (!available) {
+      if (!availableSessions.length) {
         onRequireAuth(accountType)
-        throw new Error(`尚未授权${accountType === 'gift' ? '礼金' : accountType === 'vip88' ? '88VIP' : '普通'}账号。`)
+        throw new Error('尚未授权可用的淘宝扫码账号，请先到账号授权页面登录。')
       }
       const result = await onRun({ urls, group: '默认分组', accountType, captureBuyerShows, captureMediaAssets })
       if (inputMode === 'id') setRawIds('')
       else setRawLinks('')
-      setStatus({ tone: result.failed ? 'error' : 'success', message: result.message })
+      setStatus({ tone: result.failed ? 'error' : 'success', message: result.failed ? result.message : `批量自动采集与本地解析完成。${result.message}` })
     } catch (caught) { setStatus({ tone: 'error', message: caught instanceof Error ? caught.message : '批量添加失败' }) }
   }
 
   return (
     <Card className="flex h-full flex-col">
-      <CardHeader className="flex min-h-[78px] flex-row items-start justify-between gap-4">
-        <div><CardTitle className="flex items-center gap-2"><Layers3 className="h-4 w-4 text-blue-600" />批量添加并抓取</CardTitle><div className="mt-1 text-sm text-slate-500">批量输入商品 ID 或链接；同一账号按顺序抓取，不同账号自动并行。</div></div>
-        <div className="flex shrink-0 items-center gap-2">
-          <div className="inline-flex rounded-md bg-slate-100 p-1" aria-label="批量输入方式">
-            <button type="button" onClick={() => setInputMode('link')} className={`inline-flex h-8 items-center gap-1.5 rounded px-3 text-xs font-medium ${inputMode === 'link' ? 'bg-white text-blue-700 shadow-sm' : 'text-slate-500 hover:text-slate-800'}`}><Link2 className="h-3.5 w-3.5" />商品链接</button>
-            <button type="button" onClick={() => setInputMode('id')} className={`inline-flex h-8 items-center gap-1.5 rounded px-3 text-xs font-medium ${inputMode === 'id' ? 'bg-white text-blue-700 shadow-sm' : 'text-slate-500 hover:text-slate-800'}`}><Hash className="h-3.5 w-3.5" />商品 ID</button>
+      <CardHeader className="flex min-h-[78px] flex-col items-stretch justify-between gap-3 sm:flex-row sm:items-start sm:gap-4">
+        <div><CardTitle className="flex items-center gap-2"><Layers3 className="h-4 w-4 text-blue-600" />批量自动采集</CardTitle><div className="mt-1 text-sm text-slate-500">批量输入商品 ID 或链接；后台采集后先保存本地证据，再从磁盘解析。同一账号按顺序执行。</div></div>
+        <div className="flex w-full shrink-0 items-center gap-2 sm:w-auto">
+          <div className="inline-flex min-w-0 flex-1 rounded-md bg-slate-100 p-1" aria-label="批量输入方式">
+            <button type="button" onClick={() => setInputMode('link')} className={`inline-flex h-8 flex-1 items-center justify-center gap-1.5 whitespace-nowrap rounded px-3 text-xs font-medium ${inputMode === 'link' ? 'bg-white text-blue-700 shadow-sm' : 'text-slate-500 hover:text-slate-800'}`}><Link2 className="h-3.5 w-3.5" />商品链接</button>
+            <button type="button" onClick={() => setInputMode('id')} className={`inline-flex h-8 flex-1 items-center justify-center gap-1.5 whitespace-nowrap rounded px-3 text-xs font-medium ${inputMode === 'id' ? 'bg-white text-blue-700 shadow-sm' : 'text-slate-500 hover:text-slate-800'}`}><Hash className="h-3.5 w-3.5" />商品 ID</button>
           </div>
           <Badge className="border-blue-100 bg-blue-50 text-blue-700">{entries.length}/30 条</Badge>
         </div>
@@ -86,12 +97,19 @@ export function BatchCaptureCard({ sessions, busy, onRun, onRequireAuth }: Props
           </label>
         )}
         <fieldset className="mt-1 grid gap-2">
-          <legend className="text-sm font-medium text-slate-700">账号选择</legend>
+          <legend className="text-sm font-medium text-slate-700">主价格视角 / 监控来源</legend>
           <div className="grid grid-cols-3 gap-2">
           {[{ type: 'normal' as const, label: '普通账号', icon: UserRound }, { type: 'gift' as const, label: '礼金账号', icon: Gift }, { type: 'vip88' as const, label: '88VIP账号', icon: Crown }].map((option) => {
-            const count = sessions.filter((session) => (session.enabled ?? session.active) && (session.accountType || 'normal') === option.type).length
-            return <button key={option.type} type="button" onClick={() => setAccountType(option.type)} className={`flex h-12 items-center justify-center gap-2 rounded-md border px-2 text-xs ${accountType === option.type ? 'border-blue-300 bg-blue-50 text-blue-800' : 'border-slate-200 bg-white text-slate-600 hover:bg-slate-50'}`}><option.icon className="h-4 w-4" /><span className="font-medium">{option.label.replace('账号', '')}</span><span className="text-[11px] opacity-65">{count || '未授权'}</span></button>
+            const optionSessions = availableSessions.filter((session) => (session.accountType || 'normal') === option.type)
+            const healthyCount = optionSessions.filter((session) => session.healthStatus !== 'degraded').length
+            const stateText = healthyCount ? `${healthyCount} 可用` : optionSessions.length ? `${optionSessions.length} 待复检` : '未在线'
+            return <button key={option.type} type="button" aria-pressed={accountType === option.type} onClick={() => setAccountType(option.type)} className={`flex h-12 items-center justify-center gap-2 rounded-md border px-2 text-xs ${accountType === option.type ? 'border-blue-300 bg-blue-50 text-blue-800' : 'border-slate-200 bg-white text-slate-600 hover:bg-slate-50'}`}><option.icon className="h-4 w-4" /><span className="font-medium">{option.label.replace('账号', '')}</span><span className="text-[11px] opacity-65">{stateText}</span></button>
           })}
+          </div>
+          <div className="min-h-5 text-xs leading-5 text-slate-500">
+            {availableSessions.length && !availableSessions.some((session) => (session.accountType || 'normal') === accountType)
+              ? `${accountTypeLabels[accountType]}视角暂无在线账号；本批会自动使用能力最完整的${accountTypeLabels[fallbackAccountType]}账号，并将它设为监控来源。`
+              : '同一账号会尽量抓取其可见的全部价格；该选择决定整批商品的主价格视角和监控来源。'}
           </div>
         </fieldset>
         <div className="grid gap-2 sm:grid-cols-2">
@@ -106,7 +124,7 @@ export function BatchCaptureCard({ sessions, busy, onRun, onRequireAuth }: Props
             <span><span className="block font-medium">同时抓取买家秀</span><span className="block text-xs text-slate-400">整批统一，独立可选</span></span>
           </label>
         </div>
-        <div className="mt-auto grid gap-2 pt-1"><Button type="button" onClick={submit} disabled={busy || entries.length === 0} className="w-full"><Play className="h-4 w-4" />{busy ? '队列抓取中' : `添加并抓取 ${entries.length} 个`}</Button>{status && <div className={`flex min-w-0 items-center gap-1.5 text-xs ${status.tone === 'progress' ? 'text-blue-700' : status.tone === 'success' ? 'text-emerald-700' : 'text-red-700'}`} role={status.tone === 'error' ? 'alert' : 'status'} aria-live="polite">{status.tone === 'progress' ? <LoaderCircle className="h-4 w-4 shrink-0 animate-spin" /> : status.tone === 'success' ? <CircleCheck className="h-4 w-4 shrink-0" /> : <CircleAlert className="h-4 w-4 shrink-0" />}<span className="line-clamp-2">{status.message}</span></div>}</div>
+        <div className="mt-auto grid gap-2 pt-1"><Button type="button" onClick={submit} disabled={busy || entries.length === 0} className="w-full"><Play className="h-4 w-4" />{busy ? '自动采集队列运行中' : `自动采集并本地解析 ${entries.length} 个`}</Button>{status && <div className={`flex min-w-0 items-center gap-1.5 text-xs ${status.tone === 'progress' ? 'text-blue-700' : status.tone === 'success' ? 'text-emerald-700' : 'text-red-700'}`} role={status.tone === 'error' ? 'alert' : 'status'} aria-live="polite">{status.tone === 'progress' ? <LoaderCircle className="h-4 w-4 shrink-0 animate-spin" /> : status.tone === 'success' ? <CircleCheck className="h-4 w-4 shrink-0" /> : <CircleAlert className="h-4 w-4 shrink-0" />}<span className="line-clamp-2">{status.message}</span></div>}</div>
       </CardContent>
     </Card>
   )

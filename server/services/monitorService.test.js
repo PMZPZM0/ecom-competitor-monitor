@@ -3,6 +3,7 @@ import test from "node:test";
 import {
   accountCaptureDiagnostic,
   buildRunRecord,
+  captureProduct,
   clearFinishedCaptureJobs,
   completeScheduledProduct,
   dueProductIds,
@@ -13,6 +14,7 @@ import {
   historicalPrimaryImages,
   historicalProductMedia,
   hasTrustedAccountBaseline,
+  isExplicitLoginExpiryError,
   mergeAccountSnapshots,
   mergeCapturedProduct,
   mergeBuyerShowHistory,
@@ -21,10 +23,8 @@ import {
   nextProductScheduleAt,
   orderedCaptureCandidates,
   preserveVerifiedAccountPrices,
-  resolveCaptureProtectionMinutes,
   resolveProductIntervalMinutes,
   resolveProductScheduleMode,
-  riskCooldownMs,
   runInCaptureGroups,
   scheduleProduct,
   setSkuMonitorPrice,
@@ -87,6 +87,12 @@ test("per-product schedules inherit the global interval and allow an override", 
   assert.equal(scheduleProduct({ id: "b", enabled: true, monitorIntervalMinutes: 120 }, monitor, { now }).nextMonitorAt, "2026-07-12T10:00:00.000Z");
   assert.equal(scheduleProduct({ id: "c", enabled: false }, monitor, { now }).nextMonitorAt, null);
   assert.equal(scheduleProduct({ id: "d", enabled: true }, { ...monitor, running: false }, { now }).enabled, true);
+  assert.deepEqual(scheduleProduct({ id: "local", enabled: true, captureMode: "local-only" }, monitor, { now }), {
+    id: "local",
+    enabled: false,
+    captureMode: "local-only",
+    nextMonitorAt: null,
+  });
 });
 
 test("single-run and interval schedules are mutually exclusive", () => {
@@ -183,14 +189,6 @@ test("due product selection is ordered and excludes paused or future products", 
   assert.equal(earliestProductSchedule(products, { running: false, intervalMinutes: 60 }, now), null);
 });
 
-test("riskCooldownMs uses the configured local capture protection duration", () => {
-  assert.equal(riskCooldownMs(0), 0);
-  assert.equal(riskCooldownMs(1), 1 * 60_000);
-  assert.equal(riskCooldownMs(5), 5 * 60_000);
-  assert.equal(riskCooldownMs(30), 30 * 60_000);
-  assert.equal(riskCooldownMs(999), 120 * 60_000);
-});
-
 test("orderedCaptureCandidates preserves the requested batch order", () => {
   const products = [{ id: "a", enabled: true }, { id: "b", enabled: true }, { id: "c", enabled: true }];
   assert.deepEqual(orderedCaptureCandidates(products, ["c", "a", "b"], true).map((product) => product.id), ["c", "a", "b"]);
@@ -272,7 +270,7 @@ test("account merge accepts explicit gift evidence and never uses a bare cross-a
   assert.equal(guessed.skuPrices[0].giftPrice, undefined);
 });
 
-test("account merge keeps each account's evidence isolated while adopting the target channel", () => {
+test("account merge keeps the primary SKU unchanged and stores each account as an isolated view", () => {
   const resolution = (accountType, giftCents) => ({
     status: "verified",
     accountType,
@@ -287,48 +285,146 @@ test("account merge keeps each account's evidence isolated while adopting the ta
   });
   const normalSku = { skuId: "sku-1", price: 109, normalPrice: 109, giftPrice: 102, resolutionStatus: "verified", priceResolution: resolution("normal", 10200), priceLayers: [{ label: "普通价", value: 109 }, { label: "礼金价", value: 102 }] };
   const giftSku = { skuId: "sku-1", price: 109, normalPrice: 109, giftPrice: 94, resolutionStatus: "verified", priceResolution: resolution("gift", 9400), priceLayers: [{ label: "普通价", value: 109 }, { label: "礼金价", value: 94 }] };
+  const snapshot = mergeAccountSnapshots([
+    { session: { id: "normal", accountType: "normal" }, snapshot: { skuPrices: [normalSku], rawSignals: {} } },
+    { session: { id: "gift", accountType: "gift" }, snapshot: { skuPrices: [giftSku], rawSignals: {} } },
+  ], { primarySessionId: "normal" });
+  const [merged] = snapshot.skuPrices;
+
+  assert.equal(snapshot.primaryAccountSessionId, "normal");
+  assert.equal(merged.giftPrice, 102);
+  assert.equal(merged.priceResolution.channels.gift.valueCents, 10200);
+  assert.equal(merged.accountPrices[0].priceResolution.channels.gift.valueCents, 10200);
+  assert.equal(merged.accountPrices[1].priceResolution.channels.gift.valueCents, 9400);
+  assert.deepEqual(merged.priceResolution.evidence.filter((item) => item.kind === "gift").map((item) => item.valueCents), [10200]);
+  assert.deepEqual(merged.priceLayers.filter((item) => item.label === "礼金价").map((item) => item.value), [102]);
+});
+
+test("switchable account views keep their own public and benefit channels", () => {
+  const normalSku = verifiedSku({
+    skuId: "sku-1", normalPrice: 139, governmentPrice: 119, governmentStatus: "available",
+    priceCalculation: { government: "普通账号国补 119" },
+    priceLayers: [{ label: "普通价", value: 139 }, { label: "国补价", value: 119 }],
+  }, ["normal", "government"]);
+  const giftSku = verifiedSku({
+    skuId: "sku-1", normalPrice: 139, governmentPrice: 109, governmentStatus: "available", giftPrice: 99,
+    priceCalculation: { government: "礼金账号国补 109", gift: "礼金价 99" },
+    priceLayers: [{ label: "普通价", value: 139 }, { label: "国补价", value: 109 }, { label: "礼金价", value: 99 }],
+  }, ["normal", "government", "gift"]);
   const [merged] = mergeAccountSnapshots([
     { session: { id: "normal", accountType: "normal" }, snapshot: { skuPrices: [normalSku], rawSignals: {} } },
     { session: { id: "gift", accountType: "gift" }, snapshot: { skuPrices: [giftSku], rawSignals: {} } },
-  ]).skuPrices;
+  ], { primarySessionId: "gift" }).skuPrices;
 
-  assert.equal(merged.giftPrice, 94);
-  assert.equal(merged.priceResolution.channels.gift.valueCents, 9400);
-  assert.equal(merged.accountPrices[0].priceResolution.channels.gift.valueCents, 10200);
-  assert.equal(merged.accountPrices[1].priceResolution.channels.gift.valueCents, 9400);
-  assert.deepEqual(merged.priceResolution.evidence.filter((item) => item.kind === "gift").map((item) => item.valueCents), [9400]);
-  assert.deepEqual(merged.priceLayers.filter((item) => item.label === "礼金价").map((item) => item.value), [94]);
+  assert.equal(merged.normalPrice, 139);
+  assert.equal(merged.governmentPrice, 109);
+  assert.equal(merged.priceCalculation.government, "礼金账号国补 109");
+  assert.deepEqual(merged.priceLayers.filter((item) => item.label === "国补价").map((item) => item.value), [109]);
+  const normalView = merged.accountPrices.find((view) => view.sessionId === "normal");
+  const giftView = merged.accountPrices.find((view) => view.sessionId === "gift");
+  assert.equal(normalView.governmentPrice, 119);
+  assert.equal(normalView.giftPrice, null);
+  assert.equal(giftView.governmentPrice, 109);
+  assert.equal(giftView.giftPrice, 99);
 });
 
-test("a target account list price never replaces the observed normal-account price", () => {
+test("a secondary account list price never replaces the primary account price", () => {
   const normal = { price: 179, priceRange: [179, 179], skuPrices: [{ skuId: "sku-1", price: 179, normalPrice: 179, priceLayers: [], discountItems: [] }], rawSignals: {} };
   const gift = { price: 629, priceRange: [629, 629], skuPrices: [{ skuId: "sku-1", price: 629, normalPrice: 629, originalPrice: 629, giftPrice: 629, giftStatus: "available", priceLayers: [{ label: "礼金价", value: 629, kind: "price" }], discountItems: [] }], rawSignals: {} };
   const [sku] = mergeAccountSnapshots([
     { session: { id: "gift", accountType: "gift" }, snapshot: gift },
     { session: { id: "normal", accountType: "normal" }, snapshot: normal },
-  ]).skuPrices;
+  ], { primarySessionId: "normal" }).skuPrices;
 
   assert.equal(sku.normalPrice, 179);
   assert.equal(sku.giftPrice, undefined);
+  assert.equal(sku.accountPrices.find((view) => view.sessionId === "gift").normalPrice, 629);
 });
 
-test("gift and 88VIP products require both account snapshots but not a dedicated benefit", () => {
+test("account capture order prefers the requested view and each account validates itself", () => {
   const sessions = [
     { id: "n1", accountType: "normal" },
     { id: "n2", accountType: "normal" },
     { id: "g1", accountType: "gift" },
     { id: "v1", accountType: "vip88" },
   ];
-  assert.deepEqual(sessionsForProduct(sessions, "gift").map((session) => session.id), ["n1", "n2", "g1"]);
-  assert.deepEqual(sessionsForProduct(sessions, "vip88").map((session) => session.id), ["n1", "n2", "v1"]);
-  const normal = { session: sessions[0], snapshot: { skuPrices: [verifiedSku({ skuId: "sku-1", normalPrice: 179 }, ["normal"])] } };
-  const gift = { session: sessions[2], snapshot: { skuPrices: [verifiedSku({ skuId: "sku-1", normalPrice: 179, giftPrice: 126 }, ["normal", "gift"])] } };
-  const vipWithoutBenefit = { session: sessions[3], snapshot: { skuPrices: [verifiedSku({ skuId: "sku-1", normalPrice: 179 }, ["normal"])] } };
-  assert.equal(hasTrustedAccountBaseline([gift], "gift"), false);
-  assert.equal(hasTrustedAccountBaseline([normal, { session: sessions[2], snapshot: { skuPrices: [{ skuId: "sku-1", normalPrice: 126 }] } }], "gift"), false);
+  assert.deepEqual(sessionsForProduct(sessions, "gift").map((session) => session.id), ["g1", "v1", "n1", "n2"]);
+  assert.deepEqual(sessionsForProduct(sessions, "vip88").map((session) => session.id), ["v1", "g1", "n1", "n2"]);
+  const normal = { session: sessions[0], snapshot: { accessMode: "authenticated", skuPrices: [verifiedSku({ skuId: "sku-1", normalPrice: 179 }, ["normal"])] } };
+  const gift = { session: sessions[2], snapshot: { accessMode: "authenticated", skuPrices: [verifiedSku({ skuId: "sku-1", normalPrice: 179, giftPrice: 126 }, ["normal", "gift"])] } };
+  const vipWithoutBenefit = { session: sessions[3], snapshot: { accessMode: "authenticated", skuPrices: [verifiedSku({ skuId: "sku-1", normalPrice: 179 }, ["normal"])] } };
+  assert.equal(hasTrustedAccountBaseline([gift], "gift"), true);
+  assert.equal(hasTrustedAccountBaseline([normal, { session: sessions[2], snapshot: { accessMode: "authenticated", skuPrices: [{ skuId: "sku-1", normalPrice: 126 }] } }], "gift"), false);
   assert.equal(hasTrustedAccountBaseline([normal, gift], "gift"), true);
   assert.equal(hasTrustedAccountBaseline([normal], "vip88"), false);
   assert.equal(hasTrustedAccountBaseline([normal, vipWithoutBenefit], "vip88"), true);
+});
+
+test("capture refuses anonymous fallback when no scanned account is available", async () => {
+  const normal = await captureProduct({ id: "p-normal", accountType: "normal" }, []);
+  assert.equal(normal.snapshot, null);
+  assert.match(normal.product.lastError, /没有可用的扫码账号/);
+});
+
+test("local-only products never invoke the browser scraper", async () => {
+  let scraperCalls = 0;
+  const result = await captureProduct({
+    id: "local-only-product",
+    name: "本地数据商品",
+    captureMode: "local-only",
+    accountType: "normal",
+  }, [{ id: "session-1", name: "账号", accountType: "normal" }], {
+    scraper: async () => {
+      scraperCalls += 1;
+      throw new Error("must not run");
+    },
+  });
+
+  assert.equal(scraperCalls, 0);
+  assert.equal(result.snapshot, null);
+  assert.match(result.product.lastError, /本地数据模式.*阻止浏览器抓取/);
+});
+
+test("capture falls back to the next account type and keeps later failures secondary", async () => {
+  const sessions = [
+    { id: "normal", name: "普通账号", accountType: "normal", loginStatus: "valid" },
+    { id: "vip", name: "88VIP账号", accountType: "vip88", loginStatus: "valid" },
+    { id: "gift", name: "礼金账号", accountType: "gift", loginStatus: "valid" },
+  ];
+  const attempts = [];
+  const scraper = async (candidate, session) => {
+    attempts.push({ accountType: session.accountType, buyerShows: candidate.captureBuyerShows, media: candidate.captureMediaAssets });
+    if (session.accountType === "normal") throw new Error("账号登录已明确失效：商品页跳转到淘宝登录页。");
+    if (session.accountType === "gift") throw new Error("页面未返回可验证的 SKU 普通价。");
+    return {
+      accessMode: "authenticated",
+      capturedAt: "2026-07-16T08:00:00.000Z",
+      title: "测试商品",
+      skuPrices: [verifiedSku({ skuId: "sku-1", name: "白色", normalPrice: 139, surprisePrice: 129 }, ["normal", "surprise"])],
+      buyerShows: [],
+      rawSignals: {},
+    };
+  };
+
+  const result = await captureProduct({ id: "p-fallback", accountType: "normal", captureBuyerShows: true, captureMediaAssets: true }, sessions, { scraper });
+
+  assert.equal(result.product.lastStatus, "ok");
+  assert.equal(result.product.accountType, "vip88");
+  assert.equal(result.snapshot.primaryAccountSessionId, "vip");
+  assert.deepEqual(result.snapshot.accountCaptures.map((capture) => capture.sessionId), ["vip"]);
+  assert.deepEqual(attempts, [
+    { accountType: "normal", buyerShows: true, media: true },
+    { accountType: "vip88", buyerShows: true, media: true },
+    { accountType: "gift", buyerShows: false, media: false },
+  ]);
+  assert.equal(result.snapshot.accountErrors.length, 2);
+  assert.equal(sessions[0].loginStatus, "expired");
+  assert.equal(sessions[2].healthStatus, "degraded");
+});
+
+test("only an explicit Taobao login redirect expires an account", () => {
+  assert.equal(isExplicitLoginExpiryError("账号登录已明确失效：商品页跳转到淘宝登录页。"), true);
+  assert.equal(isExplicitLoginExpiryError("账号页面需要安全验证，本次抓取已停止，登录状态保留待复检。"), false);
 });
 
 test("account capture diagnostics expose failed formulas and unknown promotion codes", () => {
@@ -340,14 +436,6 @@ test("account capture diagnostics expose failed formulas and unknown promotion c
   assert.match(diagnostic, /vip88 0\/1/);
   assert.match(diagnostic, /formula-does-not-close/);
   assert.match(diagnostic, /new-code/);
-});
-
-test("resolveCaptureProtectionMinutes prefers an account pool override", () => {
-  const monitor = { captureProtectionMinutes: 3, captureProtectionByAccount: { normal: 10, gift: null, vip88: 0 } };
-  assert.equal(resolveCaptureProtectionMinutes(monitor, "normal"), 10);
-  assert.equal(resolveCaptureProtectionMinutes(monitor, "gift"), 3);
-  assert.equal(resolveCaptureProtectionMinutes(monitor, "vip88"), 0);
-  assert.equal(resolveCaptureProtectionMinutes({ captureProtectionMinutes: 0 }, "normal"), 0);
 });
 
 test("anonymous public-price snapshots never trigger account price alerts", () => {
@@ -470,8 +558,9 @@ test("run record permanently keeps each failed product reason", () => {
 
 test("verified-price guard accepts every account type only with normal SKU evidence", () => {
   for (const accountType of ["normal", "gift", "vip88"]) {
-    assert.equal(snapshotHasVerifiedNormalPrice({ accountType, skuPrices: [verifiedSku({ skuId: "sku-1" }, ["normal"])] }), true);
-    assert.equal(snapshotHasVerifiedNormalPrice({ accountType, skuPrices: [{ skuId: "sku-1", resolutionStatus: "ambiguous" }] }), false);
+    assert.equal(snapshotHasVerifiedNormalPrice({ accessMode: "authenticated", accountType, skuPrices: [verifiedSku({ skuId: "sku-1" }, ["normal"])] }), true);
+    assert.equal(snapshotHasVerifiedNormalPrice({ accessMode: "authenticated", accountType, skuPrices: [{ skuId: "sku-1", resolutionStatus: "ambiguous" }] }), false);
+    assert.equal(snapshotHasVerifiedNormalPrice({ accessMode: "anonymous", accountType, skuPrices: [verifiedSku({ skuId: "sku-1" }, ["normal"])] }), false);
   }
 });
 

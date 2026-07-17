@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { applyPriceResolution, resolveEmbeddedSkuPriceEvidence, resolveSkuPriceEvidence } from "./priceResolver.js";
+import { applyPriceResolution, resolveEmbeddedSkuPriceEvidence, resolveSkuPriceEvidence, selectAuthoritativePriceResolution } from "./priceResolver.js";
 
 function payload(skuId, price1, price2, promotions, extra = {}) {
   const data = JSON.stringify({ itemId: "843315272519", skuId });
@@ -170,7 +170,7 @@ test("resolves the real coupon2RedForNewUser gift formula", () => {
   assert.match(sku.priceCalculation.gift, /首单礼金 15\.00/);
 });
 
-test("a normal account can verify the public baseline when Taobao also returns an explicit gift benefit", () => {
+test("a normal account keeps its public baseline but does not expose a gift-account channel", () => {
   const skuId = "6110642712271";
   const resolution = resolveSkuPriceEvidence([payload(skuId, "309", "102", [
     { promotionName: "coupon2RedForNewUser", amount: 700 },
@@ -180,11 +180,12 @@ test("a normal account can verify the public baseline when Taobao also returns a
   const sku = applyPriceResolution({ skuId, priceLayers: [] }, resolution);
   assert.equal(resolution.status, "verified");
   assert.equal(sku.normalPrice, 109);
-  assert.equal(sku.giftPrice, 102);
+  assert.equal(sku.giftPrice, null);
+  assert.equal(sku.priceResolution.channels.gift.status, "unavailable");
   assert.equal(sku.surprisePrice, null);
 });
 
-test("resolves independently stacked surprise, gift and coin prices", () => {
+test("a gift account keeps public surprise, gift and coin channels", () => {
   const skuId = "stacked-benefits";
   const resolution = resolveSkuPriceEvidence([payload(skuId, "309", "84.91", [
     { promotionName: "spsd4plan", amount: 15300 },
@@ -197,7 +198,9 @@ test("resolves independently stacked surprise, gift and coin prices", () => {
   assert.equal(sku.normalPrice, 109);
   assert.equal(sku.surprisePrice, 104);
   assert.equal(sku.giftPrice, 89);
+  assert.equal(sku.giftDiscountAmount, 15);
   assert.equal(sku.coinPrice, 84.91);
+  assert.equal(sku.coinDiscountAmount, 4.09);
 });
 
 test("resolves an explicit 88VIP benefit without reusing gift or surprise fields", () => {
@@ -214,7 +217,7 @@ test("resolves an explicit 88VIP benefit without reusing gift or surprise fields
   assert.equal(sku.surprisePrice, null);
 });
 
-test("resolves stacked gift and 88VIP benefits as separate cumulative layers", () => {
+test("an 88VIP account keeps gift and 88VIP channels when both are explicit", () => {
   const skuId = "mixed-account-benefits";
   const resolution = resolveSkuPriceEvidence([payload(skuId, "199", "119", [
     { promotionName: "spsd4plan", amount: 3000 },
@@ -227,6 +230,7 @@ test("resolves stacked gift and 88VIP benefits as separate cumulative layers", (
   assert.equal(sku.normalPrice, 139);
   assert.equal(sku.giftPrice, 129);
   assert.equal(sku.vipPrice, 119);
+  assert.equal(sku.vipDiscountAmount, 10);
   assert.match(sku.priceCalculation.vip88, /礼金价 129\.00 - 88VIP优惠 10\.00 = 88VIP价 119\.00/);
 });
 
@@ -269,7 +273,7 @@ test("resolves normal, surprise and coin prices from uppAcrossPromotion", () => 
   assert.match(sku.priceCalculation.coin, /淘金币抵扣 9\.09/);
 });
 
-test("resolves the observed platform, government, surprise, gift and coin formula independently", () => {
+test("a gift account exposes government, surprise, gift and coin", () => {
   const skuId = "986865193025-sku-1";
   const resolution = resolveSkuPriceEvidence([payload(skuId, "1099", "478.56", [
     { promotionName: "spsd4cjmj", amount: 13200 },
@@ -291,6 +295,30 @@ test("resolves the observed platform, government, surprise, gift and coin formul
   assert.match(sku.priceCalculation.government, /政府补贴 84\.45/);
 });
 
+test("government subsidy stays independent for normal, gift and 88VIP accounts", () => {
+  const cases = [
+    { accountType: "normal", displayed: "119", accountPromotion: null, field: null },
+    { accountType: "gift", displayed: "109", accountPromotion: { promotionName: "coupon2RedForNewUser", amount: 1000 }, field: "giftPrice" },
+    { accountType: "vip88", displayed: "109", accountPromotion: { promotionName: "88vipDiscount", amount: 1000 }, field: "vipPrice" },
+  ];
+  for (const { accountType, displayed, accountPromotion, field } of cases) {
+    const skuId = `government-${accountType}`;
+    const promotions = [
+      { promotionName: "spsd4plan", amount: 6000 },
+      { promotionName: "zflj", amount: 2000 },
+      ...(accountPromotion ? [accountPromotion] : []),
+    ];
+    const resolution = resolveSkuPriceEvidence([payload(skuId, "199", displayed, promotions)], {
+      itemId: "843315272519", skuId, accountType, selectedSkuVerified: true,
+    });
+    const sku = applyPriceResolution({ skuId, priceLayers: [] }, resolution);
+    assert.equal(resolution.status, "verified");
+    assert.equal(sku.normalPrice, 139);
+    assert.equal(sku.governmentPrice, 119);
+    if (field) assert.equal(sku[field], 109);
+  }
+});
+
 test("fails closed when the formula does not equal price2", () => {
   const skuId = "bad-formula";
   const resolution = resolveSkuPriceEvidence([payload(skuId, "199", "138.99", [
@@ -307,6 +335,25 @@ test("response order does not change a verified result", () => {
   const unrelated = payload("another-sku", "100", "100", []);
   const options = { itemId: "843315272519", skuId, accountType: "normal", selectedSkuVerified: true, capturedAt: "2026-07-13T00:00:00.000Z" };
   assert.deepEqual(resolveSkuPriceEvidence([valid, unrelated], options), resolveSkuPriceEvidence([unrelated, valid], options));
+});
+
+test("hidden account-channel differences do not create a false conflict", () => {
+  const skuId = "normal-with-irrelevant-gift-difference";
+  const first = payload(skuId, "199", "102", [
+    { promotionName: "spsd4plan", amount: 6000 },
+    { promotionName: "coupon2RedForNewUser", amount: 3700 },
+  ]);
+  const second = payload(skuId, "199", "99", [
+    { promotionName: "spsd4plan", amount: 6000 },
+    { promotionName: "coupon2RedForNewUser", amount: 4000 },
+  ]);
+  const options = { itemId: "843315272519", skuId, accountType: "normal", selectedSkuVerified: true, capturedAt: "2026-07-16T00:00:00.000Z" };
+  const forward = resolveSkuPriceEvidence([first, second], options);
+  const reverse = resolveSkuPriceEvidence([second, first], options);
+  assert.deepEqual(forward, reverse);
+  const sku = applyPriceResolution({ skuId, priceLayers: [] }, forward);
+  assert.equal(sku.normalPrice, 139);
+  assert.equal(sku.giftPrice, null);
 });
 
 function embeddedSku(extra = {}) {
@@ -365,4 +412,19 @@ test("rejects invalid or internally inconsistent embedded SSR prices", () => {
       { label: "优惠前", value: 379, kind: "original" },
     ],
   }), embeddedOptions).reason, "embedded-price-layer-mismatch");
+});
+
+test("authoritative selection never lets SSR hide ambiguous account promotion evidence", () => {
+  const embedded = resolveEmbeddedSkuPriceEvidence(embeddedSku(), embeddedOptions);
+  const unavailable = { matched: false, status: "unavailable", reason: "supported-endpoint-not-observed" };
+  const ambiguous = { matched: true, status: "ambiguous", reason: "formula-does-not-close" };
+
+  assert.equal(selectAuthoritativePriceResolution(unavailable, embedded).status, "verified");
+  assert.equal(selectAuthoritativePriceResolution(ambiguous, embedded).reason, "formula-does-not-close");
+  assert.deepEqual(selectAuthoritativePriceResolution(unavailable, embedded, { governmentProgramObserved: true }), {
+    ...unavailable,
+    matched: true,
+    status: "ambiguous",
+    reason: "government-adjust-response-not-observed",
+  });
 });

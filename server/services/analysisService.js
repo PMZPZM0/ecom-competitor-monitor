@@ -37,9 +37,7 @@ export async function analyzeData({ products, snapshots, modelConfig = {} }) {
     recentSnapshots: snapshots.slice(-60),
   };
 
-  const apiKey = modelConfig.apiKey || process.env.OPENAI_API_KEY;
-  const baseUrl = modelConfig.baseUrl || process.env.OPENAI_BASE_URL || "https://api.openai.com/v1";
-  const model = modelConfig.model || process.env.OPENAI_MODEL || "gpt-4.1-mini";
+  const { apiKey, baseUrl, model } = resolveModelConfig(modelConfig);
 
   if (!apiKey) {
     return {
@@ -50,13 +48,11 @@ export async function analyzeData({ products, snapshots, modelConfig = {} }) {
     };
   }
 
-  const response = await fetch(`${baseUrl.replace(/\/$/, "")}/responses`, {
-    method: "POST",
-    headers: {
-      authorization: `Bearer ${apiKey}`,
-      "content-type": "application/json",
-    },
-    body: JSON.stringify({
+  const data = await requestModelApiJson(`${baseUrl}/responses`, {
+    apiKey,
+    label: "AI 分析",
+    timeoutMs: 60_000,
+    body: {
       model,
       input: [
         {
@@ -68,11 +64,8 @@ export async function analyzeData({ products, snapshots, modelConfig = {} }) {
           content: `请分析这些天猫竞品监控数据，输出 JSON：{"summary":"","insights":[],"actions":[]}。\n${JSON.stringify(payload)}`,
         },
       ],
-    }),
+    },
   });
-
-  if (!response.ok) throw new Error(`AI 分析失败：${response.status}`);
-  const data = await response.json();
   const text = data.output_text || data.output?.flatMap((item) => item.content || []).map((item) => item.text).join("\n");
 
   try {
@@ -81,3 +74,4 @@ export async function analyzeData({ products, snapshots, modelConfig = {} }) {
     return { mode: "ai", summary: text || "AI 已返回分析结果。", insights: [], actions: [], createdAt: new Date().toISOString() };
   }
 }
+import { requestModelApiJson, resolveModelConfig } from "./modelConfigService.js";

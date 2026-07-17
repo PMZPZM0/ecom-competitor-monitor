@@ -6,12 +6,11 @@ import { Card, CardContent, CardHeader, CardTitle } from '../../components/ui/ca
 import { Input } from '../../components/ui/input'
 import { currency } from '../../lib/utils'
 import { downloadFile } from '../../lib/download'
-import type { AuthSession, Overview, Product, RunRecord } from '../../types/domain'
+import type { Overview, Product, RunRecord } from '../../types/domain'
 import { ImagePreview, ShopLogo, type Preview } from '../products/productDisplay'
 import { ProductMonitorCard } from '../products/ProductMonitorCard'
 import { downloadBuyerShowsBatchHref, productHasCoinBenefit, productModel, productShopName } from '../products/productDisplayUtils'
 import { productSortOptions, sortProducts, type ProductSortKey } from '../products/productSort'
-import { productCaptureProtectionUntil } from '../products/captureProtection'
 
 type Props = {
   products: Product[]
@@ -22,12 +21,12 @@ type Props = {
   onSaveSkuMonitorPrice: (product: Product, skuId: string, value: number | null) => Promise<void>
   onCapture: (product: Product) => Promise<Product | void>
   onRetryBuyerShows: (product: Product) => Promise<Product>
+  onLocalImport: (product?: Product) => void
   onDelete: (product: Product) => Promise<void>
   onDeleteBatch: (products: Product[]) => Promise<void>
   onCaptureBatch: (products: Product[]) => Promise<RunRecord | void>
   batchBusy?: boolean
   busyProductId?: string
-  authSessions: AuthSession[]
 }
 
 type ModelGroup = {
@@ -101,7 +100,7 @@ function searchableText(product: Product) {
   ].filter(Boolean).join(' ').toLocaleLowerCase('zh-CN')
 }
 
-export function MonitorClassification({ products, monitor, onToggle, onSchedule, onMediaPreference, onSaveSkuMonitorPrice, onCapture, onRetryBuyerShows, onDelete, onDeleteBatch, onCaptureBatch, batchBusy, busyProductId, authSessions }: Props) {
+export function MonitorClassification({ products, monitor, onToggle, onSchedule, onMediaPreference, onSaveSkuMonitorPrice, onCapture, onRetryBuyerShows, onLocalImport, onDelete, onDeleteBatch, onCaptureBatch, batchBusy, busyProductId }: Props) {
   const [preview, setPreview] = useState<Preview | null>(null)
   const [query, setQuery] = useState('')
   const [shopFilter, setShopFilter] = useState('')
@@ -134,6 +133,7 @@ export function MonitorClassification({ products, monitor, onToggle, onSchedule,
   const errorCount = filteredProducts.filter((product) => product.lastStatus === 'error').length
   const visibleIds = useMemo(() => new Set(pageProducts.map((product) => product.id)), [pageProducts])
   const selectedVisibleCount = pageProducts.filter((product) => selectedIds.has(product.id)).length
+  const selectedOnlineCount = sortedProducts.filter((product) => selectedIds.has(product.id) && product.captureMode !== 'local-only').length
   const allVisibleSelected = pageProducts.length > 0 && selectedVisibleCount === pageProducts.length
   const hasFilters = Boolean(query || shopFilter || modelFilter || accountFilter || coinFilter)
 
@@ -175,7 +175,11 @@ export function MonitorClassification({ products, monitor, onToggle, onSchedule,
   }
 
   async function captureSelected() {
-    const selectedProducts = sortedProducts.filter((product) => selectedIds.has(product.id))
+    const selectedProducts = sortedProducts.filter((product) => selectedIds.has(product.id) && product.captureMode !== 'local-only')
+    if (!selectedProducts.length) {
+      setBatchFeedback({ tone: 'error', message: '所选商品均为本地数据模式，请分别导入新文件更新价格。' })
+      return
+    }
     setBatchFeedback({ tone: 'progress', message: `已加入 ${selectedProducts.length} 个商品，正在按队列抓取价格和素材...` })
     try {
       const run = await onCaptureBatch(selectedProducts)
@@ -252,7 +256,7 @@ export function MonitorClassification({ products, monitor, onToggle, onSchedule,
                 {productSortOptions.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}
               </select>
               <Button type="button" variant="secondary" size="sm" onClick={toggleVisibleSelection} disabled={!pageProducts.length}>{allVisibleSelected ? '取消本页全选' : '全选本页'}</Button>
-              <Button type="button" size="sm" onClick={captureSelected} disabled={!selectedIds.size || selectedIds.size > 20 || batchBusy} title={selectedIds.size > 20 ? '为降低访问风险，单次最多抓取 20 个商品' : '同一账号按顺序抓取，不同账号自动并行'}><Play className="h-4 w-4" />{batchBusy ? '队列抓取中' : selectedIds.size > 20 ? '最多选择 20 个' : `批量抓取（${selectedIds.size}）`}</Button>
+              <Button type="button" size="sm" onClick={captureSelected} disabled={!selectedOnlineCount || selectedOnlineCount > 20 || batchBusy} title={!selectedOnlineCount ? '本地数据商品不执行在线抓取' : selectedOnlineCount > 20 ? '为降低访问风险，单次最多抓取 20 个商品' : '只抓取选中的在线商品；本地数据商品会自动排除'}><Play className="h-4 w-4" />{batchBusy ? '队列抓取中' : selectedOnlineCount > 20 ? '最多选择 20 个' : `批量抓取（${selectedOnlineCount}）`}</Button>
               <Button type="button" variant="secondary" size="sm" onClick={downloadSelectedBuyerShows} disabled={!selectedIds.size || batchFeedback?.tone === 'progress'} title="下载选中商品的买家秀 ZIP"><Download className="h-4 w-4" />{batchFeedback?.tone === 'progress' ? '任务处理中' : `批量下载买家秀（${selectedIds.size}）`}</Button>
               <Button type="button" variant="danger" size="sm" onClick={deleteSelected} disabled={!selectedIds.size}><Trash2 className="h-4 w-4" />批量删除（{selectedIds.size}）</Button>
             </div>
@@ -354,10 +358,10 @@ export function MonitorClassification({ products, monitor, onToggle, onSchedule,
                       onSaveSkuMonitorPrice={onSaveSkuMonitorPrice}
                       onCapture={onCapture}
                       onRetryBuyerShows={onRetryBuyerShows}
+                      onLocalImport={onLocalImport}
                       onDelete={onDelete}
                       busy={busyProductId === product.id}
                       onPreview={setPreview}
-                      captureProtectionUntil={productCaptureProtectionUntil(product, authSessions)}
                       monitor={monitor}
                     />
                   </div>

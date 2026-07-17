@@ -3,6 +3,7 @@ import { itemIdFromProductUrl } from "../utils/productUrl.js";
 import { scrapeTmallProduct } from "./tmallScraper.js";
 import { createNotificationLog, effectivePriceForSku, sendFeishuNotification } from "./feishuService.js";
 import { appendPriceDocument } from "./larkCliService.js";
+import { saveCapturedSnapshotLocalEvidence } from "./localImportService.js";
 
 let timer = null;
 let captureQueueTail = Promise.resolve();
@@ -26,25 +27,6 @@ function randomProductDelay() {
   return Math.round(min + Math.random() * (max - min));
 }
 
-function isRiskControlError(message = "") {
-  return /登录|验证|captcha|滑块|风控|访问受限|cookie/i.test(message);
-}
-
-export function riskCooldownMs(configuredMinutes = 3) {
-  const minutes = Number(configuredMinutes);
-  if (Number.isFinite(minutes) && minutes <= 0) return 0;
-  return Math.min(120, Math.max(1, minutes || 3)) * 60_000;
-}
-
-export function resolveCaptureProtectionMinutes(monitor, accountType = "normal") {
-  const override = monitor?.captureProtectionByAccount?.[accountType];
-  return override !== null && override !== undefined && Number.isFinite(Number(override)) && Number(override) >= 0
-    ? Number(override)
-    : Number.isFinite(Number(monitor?.captureProtectionMinutes)) && Number(monitor.captureProtectionMinutes) >= 0
-      ? Number(monitor.captureProtectionMinutes)
-      : 3;
-}
-
 export function resolveProductIntervalMinutes(product, fallbackMinutes = 60) {
   const requested = Number(product?.monitorIntervalMinutes);
   const fallback = Number(fallbackMinutes);
@@ -54,6 +36,10 @@ export function resolveProductIntervalMinutes(product, fallbackMinutes = 60) {
       ? fallback
       : 60;
   return Math.min(MAX_PRODUCT_INTERVAL_MINUTES, Math.max(MIN_PRODUCT_INTERVAL_MINUTES, Math.round(value)));
+}
+
+export function isExplicitLoginExpiryError(message = "") {
+  return /账号登录已明确失效/.test(String(message));
 }
 
 export function resolveProductScheduleMode(product) {
@@ -70,6 +56,7 @@ export function nextProductScheduleAt(product, fallbackMinutes = 60, now = Date.
 }
 
 export function scheduleProduct(product, monitor, { reset = false, now = Date.now() } = {}) {
+  if (product?.captureMode === "local-only") return { ...product, enabled: false, nextMonitorAt: null };
   if (!monitor?.running || !product?.enabled) return { ...product, nextMonitorAt: null };
   const existing = Date.parse(product.nextMonitorAt || "");
   if (!reset && Number.isFinite(existing)) return product;
@@ -153,13 +140,6 @@ export async function withAccountCaptureLock(session, operation) {
   }
 }
 
-function availablePoolSessions(sessions) {
-  const now = Date.now();
-  return sessions
-    .filter((session) => !session.cooldownUntil || new Date(session.cooldownUntil).getTime() <= now)
-    .sort((left, right) => new Date(left.lastUsedAt || 0).getTime() - new Date(right.lastUsedAt || 0).getTime());
-}
-
 function persistSessionHealth(current, sessions) {
   const healthById = new Map(sessions.map((session) => [session.id, session]));
   current.authSessions = current.authSessions.map((session) => {
@@ -171,7 +151,6 @@ function persistSessionHealth(current, sessions) {
       lastSuccessAt: health.lastSuccessAt || null,
       lastFailureAt: health.lastFailureAt || null,
       consecutiveFailures: health.consecutiveFailures || 0,
-      cooldownUntil: health.cooldownUntil || null,
       healthStatus: health.healthStatus || "healthy",
       loginStatus: health.loginStatus || session.loginStatus,
     };
@@ -299,11 +278,14 @@ export function captureResultItem(result) {
     name: product.name || product.itemId || product.id || "未知商品",
     accountType: product.accountType || "normal",
     status,
-    message: status === "failed"
+    message: (status === "failed"
       ? product.lastError || "抓取失败，未返回可保存结果。"
       : buyerShowFailed
         ? `价格与素材已更新，买家秀失败：${snapshot.buyerShowCapture.failureCode || "未知原因"}`
-        : "价格、SKU 与素材抓取成功。",
+        : "价格、SKU 与素材抓取成功。")
+      + (snapshot?.browserEvidenceFile
+        ? " 浏览器数据已先保存本地并重新读盘解析。"
+        : snapshot?.localImportFile ? " 本地价格证据已自动保存。" : snapshot?.localImportError ? ` 本地价格证据保存失败：${snapshot.localImportError}` : ""),
     capturedAt: snapshot?.capturedAt || product.updatedAt || new Date().toISOString(),
   };
 }
@@ -348,6 +330,9 @@ export function preserveVerifiedAccountPrices(snapshot) {
 export function buildRunRecord({ source, scope, startedAt, results, message }) {
   const summary = summarizeResults(results);
   const buyerShowFailures = results.filter((result) => result.snapshot?.buyerShowCapture?.status === "failed").length;
+  const browserEvidenceSaved = results.filter((result) => result.snapshot?.browserEvidenceFile).length;
+  const localEvidenceSaved = results.filter((result) => !result.snapshot?.browserEvidenceFile && result.snapshot?.localImportFile).length;
+  const localEvidenceFailed = results.filter((result) => result.snapshot?.localImportError).length;
   return {
     id: newId("run"),
     source,
@@ -359,126 +344,96 @@ export function buildRunRecord({ source, scope, startedAt, results, message }) {
     items: results.map(captureResultItem),
     message:
       message ||
-      `抓取 ${summary.total} 个商品，成功 ${summary.success} 个，失败 ${summary.failed} 个。${buyerShowFailures ? ` 其中 ${buyerShowFailures} 个商品的买家秀本次未获取，价格与素材已正常更新。` : ""}`,
+      `抓取 ${summary.total} 个商品，成功 ${summary.success} 个，失败 ${summary.failed} 个。${buyerShowFailures ? ` 其中 ${buyerShowFailures} 个商品的买家秀本次未获取，价格与素材已正常更新。` : ""}${browserEvidenceSaved ? ` ${browserEvidenceSaved} 份浏览器数据已保存本地并重新读盘解析。` : ""}${localEvidenceSaved ? ` 本地价格证据已自动保存 ${localEvidenceSaved} 份。` : ""}${localEvidenceFailed ? ` ${localEvidenceFailed} 份本地证据保存失败，抓价结果仍已保留。` : ""}`,
   };
+}
+
+async function attachLocalPriceEvidence(result, source) {
+  if (!result?.snapshot || source === "local-import" || result.snapshot.source === "local-import") return result;
+  try {
+    const preview = await saveCapturedSnapshotLocalEvidence(result.snapshot);
+    const metadata = { localImportId: preview.importId, localImportFile: preview.savedFile };
+    Object.assign(result.snapshot, metadata);
+    if (result.product?.lastSnapshot) Object.assign(result.product.lastSnapshot, metadata);
+  } catch (error) {
+    const localImportError = String(error?.message || "本地证据写入失败").slice(0, 300);
+    result.snapshot.localImportError = localImportError;
+    if (result.product?.lastSnapshot) result.product.lastSnapshot.localImportError = localImportError;
+    console.warn("[capture-evidence]", localImportError);
+  }
+  return result;
 }
 
 function verifiedChannel(sku, kind) {
   return sku?.resolutionStatus === "verified" && sku?.priceResolution?.channels?.[kind]?.status === "verified";
 }
 
-function adoptVerifiedChannel(current, sku, kind) {
-  const sourceResolution = sku.priceResolution;
-  const channel = sourceResolution?.channels?.[kind];
-  if (channel?.status !== "verified") return;
-  current.priceResolution = structuredClone(current.priceResolution || { status: "verified", channels: {}, evidence: [] });
-  const replacedEvidenceIds = new Set(current.priceResolution.channels?.[kind]?.evidenceIds || []);
-  current.priceResolution.accountType = "merged";
-  current.priceResolution.channels = { ...(current.priceResolution.channels || {}), [kind]: structuredClone(channel) };
-  const evidenceIds = new Set(channel.evidenceIds || []);
-  const adoptedEvidence = (sourceResolution.evidence || []).filter((item) => evidenceIds.has(item.id));
-  const mergedEvidence = [...(current.priceResolution.evidence || []).filter((item) => !replacedEvidenceIds.has(item.id)), ...adoptedEvidence];
-  current.priceResolution.evidence = Array.from(new Map(mergedEvidence.map((item) => [item.id, item])).values());
-  current.priceEvidence = Array.from(new Map([...(current.priceEvidence || []).filter((item) => !replacedEvidenceIds.has(item.id)), ...adoptedEvidence].map((item) => [item.id, item])).values());
-  delete current.priceResolution.evidenceHash;
+function accountPriceView(entry, sku) {
+  return {
+    sessionId: entry.session.id,
+    accountName: entry.session.name || "已授权账号",
+    accountType: entry.session.accountType || "normal",
+    capturedAt: entry.snapshot.capturedAt,
+    price: sku.price,
+    normalPrice: sku.normalPrice,
+    governmentPrice: sku.governmentPrice ?? null,
+    governmentStatus: sku.governmentStatus || "none",
+    governmentDiscountAmount: sku.governmentDiscountAmount ?? null,
+    surprisePrice: sku.surprisePrice ?? null,
+    surpriseStatus: sku.surpriseStatus || "none",
+    surpriseDiscountAmount: sku.surpriseDiscountAmount ?? null,
+    giftPrice: sku.giftPrice ?? null,
+    giftStatus: sku.giftStatus || "none",
+    giftDiscountAmount: sku.giftDiscountAmount ?? null,
+    vipPrice: sku.vipPrice ?? null,
+    vipStatus: sku.vipStatus || "none",
+    vipDiscountAmount: sku.vipDiscountAmount ?? null,
+    coinPrice: sku.coinPrice ?? null,
+    coinStatus: sku.coinStatus || "none",
+    coinDiscountAmount: sku.coinDiscountAmount ?? null,
+    originalPrice: sku.originalPrice,
+    priceTitle: sku.priceTitle,
+    resolutionStatus: sku.resolutionStatus,
+    priceResolution: structuredClone(sku.priceResolution),
+    priceCalculation: structuredClone(sku.priceCalculation || {}),
+    priceLayers: structuredClone(sku.priceLayers || []),
+    discountItems: structuredClone(sku.discountItems || []),
+  };
 }
 
-function adoptPriceLayer(current, sku, kind, fallbackValue) {
-  const label = { surprise: "惊喜立减价", gift: "礼金价", vip88: "88VIP价", coin: "淘金币价" }[kind];
-  if (!label) return;
-  const sourceLayer = (sku.priceLayers || []).find((layer) => layer.label === label);
-  current.priceLayers = (current.priceLayers || []).filter((layer) => layer.label !== label);
-  current.priceLayers.push(structuredClone(sourceLayer || { label, value: fallbackValue, kind: "price", source: "pcdetail-adjust" }));
-}
-
-export function mergeAccountSnapshots(snapshots) {
-  const preferred = snapshots.find((entry) => entry.session?.accountType === "normal") || snapshots[0];
-  const merged = structuredClone(preferred.snapshot);
-  const bySkuId = new Map();
-  const ordered = [preferred, ...snapshots.filter((entry) => entry !== preferred)];
-  for (const entry of ordered) {
-    const accountType = entry.session?.accountType || "normal";
+export function mergeAccountSnapshots(snapshots, { primarySessionId = "", primaryAccountType = "" } = {}) {
+  const primary = snapshots.find((entry) => entry.session?.id === primarySessionId)
+    || snapshots.find((entry) => (entry.session?.accountType || "normal") === primaryAccountType)
+    || snapshots[0];
+  if (!primary) throw new Error("没有可合并的账号价格快照。");
+  const merged = structuredClone(primary.snapshot);
+  const viewsBySku = new Map();
+  for (const entry of snapshots) {
     for (const sku of entry.snapshot.skuPrices || []) {
       const skuId = String(sku.skuId);
-      const current = bySkuId.get(skuId) || { ...structuredClone(sku), accountPrices: [] };
-      const config = accountType === "gift"
-        ? { kind: "gift", priceField: "giftPrice", statusField: "giftStatus", discountField: "giftDiscountAmount", calculationField: "gift" }
-        : accountType === "vip88"
-          ? { kind: "vip88", priceField: "vipPrice", statusField: "vipStatus", discountField: "vipDiscountAmount", calculationField: "vip88" }
-          : accountType === "normal"
-            ? { kind: "surprise", priceField: "surprisePrice", statusField: "surpriseStatus", discountField: "surpriseDiscountAmount", calculationField: "surprise" }
-            : null;
-      if (config && verifiedChannel(sku, config.kind)) {
-        current[config.priceField] = sku[config.priceField];
-        current[config.statusField] = "available";
-        current[config.discountField] = sku[config.discountField] ?? null;
-        current.priceCalculation = { ...(current.priceCalculation || {}), [config.calculationField]: sku.priceCalculation?.[config.calculationField] };
-        adoptVerifiedChannel(current, sku, config.kind);
-        adoptPriceLayer(current, sku, config.kind, sku[config.priceField]);
-      }
-      if (verifiedChannel(sku, "coin")) {
-        current.coinPrice = sku.coinPrice;
-        current.coinStatus = sku.coinStatus;
-        current.coinDiscountAmount = sku.coinDiscountAmount;
-        current.priceCalculation = { ...(current.priceCalculation || {}), coin: sku.priceCalculation?.coin || current.priceCalculation?.coin };
-        adoptVerifiedChannel(current, sku, "coin");
-        adoptPriceLayer(current, sku, "coin", sku.coinPrice);
-      }
-      current.accountPrices.push({
-        sessionId: entry.session?.id || "guest",
-        accountName: entry.session?.name || "未登录前台",
-        accountType,
-        price: sku.price,
-        normalPrice: sku.normalPrice,
-        surprisePrice: sku.surprisePrice,
-        giftPrice: verifiedChannel(sku, "gift") ? sku.giftPrice : null,
-        giftDiscountAmount: verifiedChannel(sku, "gift") ? sku.giftDiscountAmount : null,
-        vipPrice: verifiedChannel(sku, "vip88") ? sku.vipPrice : null,
-        vipDiscountAmount: verifiedChannel(sku, "vip88") ? sku.vipDiscountAmount : null,
-        coinPrice: sku.coinPrice,
-        originalPrice: sku.originalPrice,
-        resolutionStatus: sku.resolutionStatus,
-        priceResolution: structuredClone(sku.priceResolution),
-        priceCalculation: structuredClone(sku.priceCalculation || {}),
-        priceLayers: structuredClone(sku.priceLayers || []),
-        discountItems: structuredClone(sku.discountItems || []),
-      });
-      const discountItems = [...(current.discountItems || []), ...(sku.discountItems || [])];
-      current.discountItems = Array.from(new Map(discountItems.map((item) => [
-        `${item.label}:${item.amount ?? ""}:${item.threshold ?? ""}:${item.text}`,
-        item,
-      ])).values());
-      bySkuId.set(skuId, current);
+      const views = viewsBySku.get(skuId) || [];
+      views.push(accountPriceView(entry, sku));
+      viewsBySku.set(skuId, views);
     }
   }
-  merged.skuPrices = Array.from(bySkuId.values());
-  const buyerShowCapture = snapshots
-    .map((entry) => entry.snapshot.buyerShowCapture)
-    .filter(Boolean)
-    .toSorted((left, right) => {
-      const rank = { complete: 4, partial: 3, "confirmed-empty": 2, failed: 1 };
-      return (rank[right.status] || 0) - (rank[left.status] || 0)
-        || Number(right.mediaCount || 0) - Number(left.mediaCount || 0)
-        || (right.items?.length || 0) - (left.items?.length || 0);
-    })[0];
-  if (buyerShowCapture) {
-    merged.buyerShowCapture = buyerShowCapture;
-    merged.buyerShows = buyerShowCapture.items || [];
-  }
+  merged.skuPrices = (primary.snapshot.skuPrices || []).map((sku) => ({
+    ...structuredClone(sku),
+    accountPrices: viewsBySku.get(String(sku.skuId)) || [],
+  }));
+  merged.primaryAccountSessionId = primary.session.id;
+  merged.primaryAccountType = primary.session.accountType || "normal";
   merged.accountCaptures = snapshots.map((entry) => ({
-    sessionId: entry.session?.id || "guest",
-    accountName: entry.session?.name || "未登录前台",
-    accountType: entry.session?.accountType || "normal",
+    sessionId: entry.session.id,
+    accountName: entry.session.name || "已授权账号",
+    accountType: entry.session.accountType || "normal",
+    primary: entry === primary,
+    capturedAt: entry.snapshot.capturedAt,
     price: entry.snapshot.price,
     priceRange: entry.snapshot.priceRange,
     resolutionStatus: entry.snapshot.resolutionStatus,
+    skuCount: entry.snapshot.skuPrices?.length || 0,
+    verifiedSkuCount: (entry.snapshot.skuPrices || []).filter((sku) => verifiedChannel(sku, "normal")).length,
   }));
-  const normalPrices = merged.skuPrices.map((sku) => Number(sku.normalPrice ?? sku.price)).filter(Number.isFinite);
-  merged.price = merged.skuPrices[0]?.normalPrice ?? merged.skuPrices[0]?.price ?? merged.price;
-  merged.priceRange = normalPrices.length ? [Math.min(...normalPrices), Math.max(...normalPrices)] : merged.priceRange;
-  merged.resolutionStatus = merged.skuPrices.length && merged.skuPrices.every((sku) => verifiedChannel(sku, "normal"))
-    ? "verified"
-    : merged.skuPrices.some((sku) => verifiedChannel(sku, "normal")) ? "partial" : "ambiguous";
   merged.rawSignals = { ...merged.rawSignals, accountCaptureCount: snapshots.length };
   return merged;
 }
@@ -487,23 +442,16 @@ export function sessionsForProduct(activeSessions, accountType = "normal", rotat
   const rotate = (sessions) => sessions.length
     ? [...sessions.slice(rotation % sessions.length), ...sessions.slice(0, rotation % sessions.length)]
     : [];
-  const normal = rotate(activeSessions.filter((session) => (session.accountType || "normal") === "normal"));
-  if (accountType === "normal") return normal;
-  return [...normal, ...rotate(activeSessions.filter((session) => session.accountType === accountType))];
+  const typeOrder = [...new Set([accountType, "vip88", "gift", "normal"])];
+  return typeOrder.flatMap((type) => rotate(activeSessions.filter((session) => (session.accountType || "normal") === type)));
 }
 
 export function snapshotHasVerifiedNormalPrice(snapshot) {
-  return (snapshot?.skuPrices || []).some((sku) => verifiedChannel(sku, "normal"));
+  return snapshot?.accessMode === "authenticated" && (snapshot?.skuPrices || []).some((sku) => verifiedChannel(sku, "normal"));
 }
 
 export function hasTrustedAccountBaseline(snapshots, accountType = "normal") {
-  const normalSkuIds = new Set(snapshots
-    .filter((entry) => (entry.session?.accountType || "normal") === "normal")
-    .flatMap((entry) => (entry.snapshot.skuPrices || []).filter((sku) => verifiedChannel(sku, "normal")).map((sku) => String(sku.skuId))));
-  if (accountType === "normal") return normalSkuIds.size > 0;
-  return normalSkuIds.size > 0 && snapshots
-    .filter((entry) => entry.session?.accountType === accountType)
-    .some((entry) => (entry.snapshot.skuPrices || []).some((sku) => normalSkuIds.has(String(sku.skuId)) && verifiedChannel(sku, "normal")));
+  return snapshots.some((entry) => (entry.session?.accountType || "normal") === accountType && snapshotHasVerifiedNormalPrice(entry.snapshot));
 }
 
 export function accountCaptureDiagnostic(snapshots) {
@@ -602,7 +550,7 @@ export async function notifyBelowThreshold(current, product, snapshot, source) {
   const pending = [];
   for (const sku of snapshot.skuPrices || []) {
     const threshold = Number(skuThresholds[sku.skuId]);
-    const effective = effectivePriceForSku(sku, product.accountType || "normal");
+    const effective = effectivePriceForSku(sku, snapshot.primaryAccountType || product.accountType || "normal");
     const price = effective?.value;
     if (!Number.isFinite(threshold) || threshold <= 0 || !Number.isFinite(price) || price >= threshold) continue;
 
@@ -626,29 +574,32 @@ export async function notifyBelowThreshold(current, product, snapshot, source) {
   return alerts;
 }
 
-export async function captureProduct(product, authSessions = [], { captureProtectionMinutes = 3, ignoreProtection = false } = {}) {
+export async function captureProduct(product, authSessions = [], { scraper = scrapeTmallProduct, allowLocalOnly = false } = {}) {
   const { knownPrimaryImages: _knownPrimaryImages, knownGalleryImages: _knownGalleryImages, knownVideoUrls: _knownVideoUrls, knownPriceSnapshot: _knownPriceSnapshot, ...persistedProduct } = product;
   try {
-    const protectionDisabled = riskCooldownMs(captureProtectionMinutes) === 0;
-    const sessions = authSessions.length
-      ? ignoreProtection || protectionDisabled
-        ? [...authSessions].sort((left, right) => new Date(left.lastUsedAt || 0).getTime() - new Date(right.lastUsedAt || 0).getTime())
-        : availablePoolSessions(authSessions)
-      : [null];
-    if (!sessions.length) throw new Error("该账号池正处于本地采集保护冷却期。这是软件控制抓取频率，不代表淘宝账号被风控；请等待倒计时结束或手动解除冷却。");
+    if (product.captureMode === "local-only" && !allowLocalOnly) {
+      throw new Error("该商品使用本地数据模式，已阻止浏览器抓取。请通过“本地数据导入”更新价格。");
+    }
+    const targetAccountType = product.accountType || "normal";
+    const sessions = [...authSessions];
+    if (!sessions.length) throw new Error("没有可用的扫码账号，已停止抓取。请先到账号授权重新检测或授权。");
+    const accountTypes = new Set(sessions.map((session) => session.accountType || "normal"));
+    const preferredPrimaryAccountType = [targetAccountType, "vip88", "gift", "normal"].find((type) => accountTypes.has(type));
     const snapshots = [];
     const accountErrors = [];
-    const sessionGroups = sessions[0] === null
-      ? [[null]]
-      : Array.from(Map.groupBy(sessions, (session) => session.accountType || "normal").values());
+    const groupOrder = [...new Set([preferredPrimaryAccountType, ...sessions.map((session) => session.accountType || "normal")])];
+    const sessionGroups = groupOrder.map((type) => sessions.filter((session) => (session.accountType || "normal") === type)).filter((group) => group.length);
     for (const group of sessionGroups) {
-      const attempts = group[0] && group.length === 1 ? [group[0], group[0]] : group.slice(0, 2);
+      const captureCandidate = snapshots.length === 0
+        ? product
+        : { ...product, captureBuyerShows: false, captureMediaAssets: false };
+      const attempts = group.slice(0, 2);
       for (let attempt = 0; attempt < attempts.length; attempt += 1) {
         const session = attempts[attempt];
         try {
           const capturedSnapshot = await withAccountCaptureLock(session, async () => {
             if (session) session.lastUsedAt = new Date().toISOString();
-            return scrapeTmallProduct(product, session);
+            return scraper(captureCandidate, session);
           });
           if (!snapshotHasVerifiedNormalPrice(capturedSnapshot)) {
             throw new Error("页面未返回可验证的 SKU 普通价。已丢弃本次页面结果并切换账号或重试。");
@@ -659,44 +610,28 @@ export async function captureProduct(product, authSessions = [], { captureProtec
           });
           break;
         } catch (error) {
-          accountErrors.push({ sessionId: session?.id || "guest", accountName: session?.name || "未登录前台", attempt: attempt + 1, message: error.message });
+          accountErrors.push({ sessionId: session.id, accountName: session.name || "已授权账号", attempt: attempt + 1, message: error.message });
           if (session) {
             session.lastFailureAt = new Date().toISOString();
             session.consecutiveFailures = Number(session.consecutiveFailures || 0) + 1;
-            if (isRiskControlError(error.message)) {
-              const cooldownMs = riskCooldownMs(captureProtectionMinutes);
-              session.cooldownUntil = cooldownMs > 0 ? new Date(Date.now() + cooldownMs).toISOString() : null;
-              session.healthStatus = cooldownMs > 0 ? "cooldown" : "degraded";
-              if (/登录|验证|captcha|滑块/i.test(error.message)) session.loginStatus = "expired";
-            } else {
-              session.healthStatus = "degraded";
-            }
+            session.healthStatus = "degraded";
+            if (isExplicitLoginExpiryError(error.message)) session.loginStatus = "expired";
           }
         }
       }
     }
     if (!snapshots.length) throw new Error(accountErrors.map((error) => `${error.accountName}：${error.message}`).join("；"));
-    const targetAccountType = product.accountType || "normal";
-    if (!hasTrustedAccountBaseline(snapshots, targetAccountType)) {
-      const diagnostic = [
-        accountCaptureDiagnostic(snapshots),
-        ...accountErrors.map((error) => `${error.accountName}第 ${error.attempt} 次：${error.message}`),
-      ].filter(Boolean).join("；");
-      if (targetAccountType === "normal") throw new Error("普通价格缺少可验证的 SKU 证据，本次结果已拒绝保存，避免把标价误当普通价。请重试抓取；若持续失败，请检查普通账号登录状态。");
-      if (!hasTrustedAccountBaseline(snapshots, "normal")) {
-        throw new Error(`${targetAccountType === "gift" ? "礼金" : "88VIP"}商品缺少普通账号的可验证 SKU 基准。${diagnostic}`);
-      }
-      throw new Error(`${targetAccountType === "gift" ? "礼金" : "88VIP"}账号未返回与普通账号一致的可验证 SKU 页面。${diagnostic}`);
-    }
+    const primaryEntry = snapshots[0];
+    const primaryAccountType = primaryEntry.session.accountType || "normal";
+    if (!hasTrustedAccountBaseline(snapshots, primaryAccountType)) throw new Error("主账号没有返回可验证的 SKU 普通价，本次结果已拒绝保存。");
     for (const { session } of snapshots) {
       if (!session) continue;
       session.lastSuccessAt = new Date().toISOString();
       session.consecutiveFailures = 0;
-      session.cooldownUntil = null;
       session.healthStatus = "healthy";
       session.loginStatus = "valid";
     }
-    const snapshot = mergeAccountSnapshots(snapshots);
+    const snapshot = mergeAccountSnapshots(snapshots, { primarySessionId: primaryEntry.session.id, primaryAccountType });
     preserveBuyerShowHistory(snapshot, product.lastSnapshot);
     if (snapshot.rawSignals) snapshot.rawSignals.buyerShowCount = snapshot.buyerShows.length;
     snapshot.accountErrors = accountErrors;
@@ -710,6 +645,8 @@ export async function captureProduct(product, authSessions = [], { captureProtec
         itemId: snapshot.itemId || product.itemId || "",
         autoGroup: snapshot.autoGroup || product.autoGroup || "",
         mainImage: snapshot.mainImage || product.mainImage,
+        accountType: primaryAccountType,
+        primaryAccountSessionId: primaryEntry.session.id,
         lastStatus: "ok",
         lastError: "",
         lastSnapshot: snapshot,
@@ -737,13 +674,13 @@ export async function captureProduct(product, authSessions = [], { captureProtec
 async function runMonitorUnlocked({ source = "manual", productIds = null, includeDisabled = false } = {}, queueJob = null) {
   const startedAt = new Date().toISOString();
   const data = await readDb();
-  const activeSessions = data.authSessions.filter((session) => (session.enabled ?? session.active ?? true) && session.loginStatus !== "expired");
+  const activeSessions = data.authSessions.filter((session) => session.source === "taobao-browser" && (session.enabled ?? session.active ?? true) && session.loginStatus !== "expired");
   const candidates = orderedCaptureCandidates(data.products, productIds, includeDisabled);
   if (queueJob) {
     queueJob.total = candidates.length;
     queueJob.products = candidates.map((product) => ({ id: product.id, name: product.name || product.itemId || product.id }));
   }
-  const ignoreProtection = source === "manual-batch";
+  const skipGroupDelay = source === "manual-batch";
   const results = await runInCaptureGroups(candidates, async (product, productIndex) => {
     if (queueJob) {
       queueJob.activeProductIds = [...new Set([...queueJob.activeProductIds, product.id])];
@@ -758,17 +695,14 @@ async function runMonitorUnlocked({ source = "manual", productIds = null, includ
     const accountType = product.accountType || "normal";
     const productSessions = sessionsForProduct(activeSessions, accountType, productIndex);
     try {
-      return await captureProduct(captureCandidate, productSessions, {
-        captureProtectionMinutes: resolveCaptureProtectionMinutes(data.monitor, accountType),
-        ignoreProtection,
-      });
+      return await attachLocalPriceEvidence(await captureProduct(captureCandidate, productSessions), source);
     } finally {
       if (queueJob) {
         queueJob.activeProductIds = queueJob.activeProductIds.filter((id) => id !== product.id);
         queueJob.completed += 1;
       }
     }
-  }, { concurrency: MAX_CAPTURE_CONCURRENCY, delayBetweenGroups: ignoreProtection ? null : randomProductDelay });
+  }, { concurrency: MAX_CAPTURE_CONCURRENCY, delayBetweenGroups: skipGroupDelay ? null : randomProductDelay });
 
   const runRecord = buildRunRecord({
     source,
@@ -819,7 +753,7 @@ export async function runMonitorOnce(options = {}) {
   }, (job) => runMonitorUnlocked(options, job));
 }
 
-async function runProductUnlocked(productId, { source = "single-product" } = {}, queueJob = null) {
+async function runProductUnlocked(productId, { source = "single-product", scraper = scrapeTmallProduct, authSessions: providedAuthSessions = null } = {}, queueJob = null) {
   const startedAt = new Date().toISOString();
   const data = await readDb();
   const product = data.products.find((item) => item.id === productId);
@@ -831,7 +765,9 @@ async function runProductUnlocked(productId, { source = "single-product" } = {},
     queueJob.message = `正在抓取 1/1：${product.name || product.itemId || product.id}`;
   }
 
-  const activeSessions = data.authSessions.filter((session) => (session.enabled ?? session.active ?? true) && session.loginStatus !== "expired");
+  const activeSessions = Array.isArray(providedAuthSessions)
+    ? providedAuthSessions
+    : data.authSessions.filter((session) => session.source === "taobao-browser" && (session.enabled ?? session.active ?? true) && session.loginStatus !== "expired");
   const accountType = product.accountType || "normal";
   const productSessions = sessionsForProduct(activeSessions, accountType);
   let result;
@@ -841,7 +777,8 @@ async function runProductUnlocked(productId, { source = "single-product" } = {},
       knownPrimaryImages: historicalPrimaryImages(data.snapshots, product.id),
       knownGalleryImages: product.captureMediaAssets === true ? Array.from(new Set([...(product.lastSnapshot?.gallery750Images || []), ...historicalProductMedia(data.snapshots, product.id).galleryImages])) : [],
       knownVideoUrls: product.captureMediaAssets === true ? Array.from(new Set([...(product.lastSnapshot?.videoUrls || []), ...historicalProductMedia(data.snapshots, product.id).videoUrls])) : [],
-    }, productSessions, { captureProtectionMinutes: resolveCaptureProtectionMinutes(data.monitor, accountType) });
+    }, productSessions, { scraper, allowLocalOnly: source === "local-import" });
+    result = await attachLocalPriceEvidence(result, source);
   } finally {
     if (queueJob) {
       queueJob.activeProductIds = [];

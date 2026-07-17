@@ -10,6 +10,7 @@ const sourceLabels: Record<string, string> = {
   'manual-batch': '新增商品批量抓取',
   'manual-all': '批量抓取',
   scheduled: '定时监控',
+  'local-import': '本地数据导入',
 }
 
 function statusView(job: CaptureQueueJob) {

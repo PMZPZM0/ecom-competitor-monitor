@@ -1,6 +1,52 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { applyAppliedCoinDiscount, applyMediaCapturePreference, applyNetworkPromoData, applyVisibleDiscountItems, applyVisibleSurprisePrice, buyerShowCaptureFromNetwork, buyerShowsFromRateDetail, calculateAccountPriceScenario, calculatePriceScenarios, collectDiscountItems, collectDiscountItemsFromText, collectProductProgramItems, collectVisibleSurprisePrices, extractBuyerShowItems, extractSelectedSkuId, extractShopName, filterProductVideoUrls, isUnselectablePromotionSku, resolveCoinBenefit, resolveSkuPrices, selectGalleryImages, selectSquareMainImage, sellerIdFromProductMedia } from "./tmallScraper.js";
+import { applyAppliedCoinDiscount, applyMediaCapturePreference, applyNetworkPromoData, applyVisibleDiscountItems, applyVisibleSurprisePrice, buildBrowserCaptureEvidence, buyerShowCaptureFromNetwork, buyerShowsFromRateDetail, calculateAccountPriceScenario, calculatePriceScenarios, collectDiscountItems, collectDiscountItemsFromText, collectProductProgramItems, collectVisibleSurprisePrices, extractBuyerShowItems, extractSelectedSkuId, extractShopName, filterProductVideoUrls, isUnselectablePromotionSku, resolveCaptureAccessMode, resolveCoinBenefit, resolveSkuPrices, scrapeTmallBuyerShows, scrapeTmallProduct, selectGalleryImages, selectSquareMainImage, sellerIdFromProductMedia } from "./tmallScraper.js";
+
+test("browser captures require a verified account identity before prices are trusted", () => {
+  const browserSession = { source: "taobao-browser", cookie: "configured" };
+  assert.equal(resolveCaptureAccessMode(browserSession, { authState: { loggedIn: true }, cookieHeader: "sid=value" }), "authenticated");
+  assert.equal(resolveCaptureAccessMode(browserSession, { accessVerified: true }), "authenticated");
+  assert.equal(resolveCaptureAccessMode(browserSession, { authState: { loggedIn: false }, cookieHeader: "sid=value" }), "anonymous");
+  assert.equal(resolveCaptureAccessMode({ source: "manual-cookie", cookie: "sid=value" }), "anonymous");
+  assert.equal(resolveCaptureAccessMode(null), "anonymous");
+});
+
+test("shared scrapers reject every non-browser source before network access", async () => {
+  await assert.rejects(
+    scrapeTmallProduct({ url: "https://detail.tmall.com/item.htm?id=843315272599" }, { source: "manual-cookie" }),
+    /已阻止后端直接请求淘宝接口/,
+  );
+  await assert.rejects(
+    scrapeTmallBuyerShows({ url: "https://detail.tmall.com/item.htm?id=843315272599" }, null),
+    /已阻止后端直接请求淘宝接口/,
+  );
+});
+
+test("browser evidence stores loaded page data once without account credentials", () => {
+  const payload = { url: "https://h5api.m.tmall.com/h5/price", body: "{\"data\":1}", skuId: "1", responseKind: "price" };
+  const evidence = buildBrowserCaptureEvidence({
+    product: { url: "https://detail.tmall.com/item.htm?id=843315272599" },
+    accountType: "vip88",
+    itemId: "843315272599",
+    capturedAt: "2026-07-17T00:00:00.000Z",
+    page: {
+      html: "<html>loaded</html>",
+      visibleText: "loaded",
+      finalUrl: "https://detail.tmall.com/item.htm?id=843315272599",
+      statusCode: 200,
+      authState: { loggedIn: true, cookie: "auth-secret" },
+      cookieHeader: "sid=cookie-secret",
+      networkPayloads: [payload],
+    },
+    promotionCapture: { networkPayloads: [payload], selectionResults: [{ skuId: "1", responseObserved: true }] },
+  });
+
+  assert.equal(evidence.page.accessVerified, true);
+  assert.equal(evidence.page.networkPayloads.length, 1);
+  assert.equal(evidence.page.selectionResults[0].responseObserved, true);
+  assert.equal(JSON.stringify(evidence).includes("auth-secret"), false);
+  assert.equal(JSON.stringify(evidence).includes("cookie-secret"), false);
+});
 
 test("Tmall Supermarket final URLs override generic shop-page noise", () => {
   assert.equal(extractShopName('{"shopName":"免费开店"}', { shopName: "免费开店" }, { shopName: "" }, "https://chaoshi.detail.tmall.com/item.htm?id=838302541852"), "天猫超市");
@@ -406,7 +452,7 @@ test("promotion telemetry keeps a one-cent surprise benefit when the SKU formula
   assert.equal(sku.surprisePrice, 438.99);
 });
 
-test("account price formulas stay isolated by account type", () => {
+test("richer accounts keep public channels while private benefits stay capability-scoped", () => {
   const mixed = {
     normalPrice: 100,
     surprisePrice: 90,
@@ -421,15 +467,17 @@ test("account price formulas stay isolated by account type", () => {
   assert.equal(normal.vipPrice, null);
 
   const gift = calculateAccountPriceScenario(mixed, "gift");
-  assert.equal(gift.surprisePrice, null);
+  assert.equal(gift.surprisePrice, 90);
   assert.equal(gift.giftPrice, 80);
   assert.equal(gift.vipPrice, null);
+  assert.match(gift.priceCalculation.surprise, /惊喜立减/);
   assert.match(gift.priceCalculation.gift, /礼金优惠/);
 
   const vip = calculateAccountPriceScenario(mixed, "vip88");
-  assert.equal(vip.surprisePrice, null);
-  assert.equal(vip.giftPrice, null);
+  assert.equal(vip.surprisePrice, 90);
+  assert.equal(vip.giftPrice, 80);
   assert.equal(vip.vipPrice, 85);
+  assert.match(vip.priceCalculation.gift, /礼金优惠/);
   assert.match(vip.priceCalculation.vip88, /88VIP优惠/);
 });
 
