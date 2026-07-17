@@ -46,6 +46,7 @@ jobs:
       - run: npm ci
       - run: npm test
       - run: npm run lint
+      - run: npm run build
       - name: Install sharp for target macOS architecture
         run: npm install --no-save --package-lock=false --include=optional --os=darwin --cpu=${{ matrix.arch }} sharp
       - name: Verify sharp target runtime
@@ -53,7 +54,7 @@ jobs:
           test -d node_modules/@img/sharp-darwin-${{ matrix.arch }}
           test -d node_modules/@img/sharp-libvips-darwin-${{ matrix.arch }}
       - name: Build ad-hoc signed macOS package
-        run: npm run pack:mac -- --${{ matrix.arch }} --publish never
+        run: npx --no-install electron-builder --mac dmg zip --${{ matrix.arch }} --publish never
       - name: Verify ad-hoc signature and DMG integrity
         shell: bash
         run: |
