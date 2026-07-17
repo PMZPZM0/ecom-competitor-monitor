@@ -195,9 +195,10 @@ test("local import routes reject cross-site writes and commit verified prices id
       body: JSON.stringify({ directory: customDirectory }),
     });
     assert.equal(updatedEvidence.status, 200);
-    assert.equal(updatedEvidence.body.directory, customDirectory);
+    const canonicalCustomDirectory = await fs.realpath(customDirectory);
+    assert.equal(updatedEvidence.body.directory, canonicalCustomDirectory);
     const persistedEvidence = await jsonRequest(`${baseUrl}/api/local-evidence`);
-    assert.equal(persistedEvidence.body.directory, customDirectory);
+    assert.equal(persistedEvidence.body.directory, canonicalCustomDirectory);
 
     const picker = await jsonRequest(`${baseUrl}/api/local-evidence/select-directory`, { method: "POST" });
     const opener = await jsonRequest(`${baseUrl}/api/local-evidence/open-directory`, { method: "POST" });

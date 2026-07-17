@@ -431,8 +431,9 @@ test("automatically saves a sanitized verified capture without account or media 
 });
 
 test("uses a writable custom evidence directory and only clears verified automatic records", async () => {
-  const directory = path.join(dataDir, "chosen-evidence");
-  assert.equal(await validateLocalEvidenceDirectory(directory), directory);
+  const requestedDirectory = path.join(dataDir, "chosen-evidence");
+  const directory = await validateLocalEvidenceDirectory(requestedDirectory);
+  assert.equal(directory, await fs.realpath(requestedDirectory));
   await assert.rejects(validateLocalEvidenceDirectory("relative/evidence"), (error) => error.code === "INVALID_EVIDENCE_DIRECTORY");
   await updateDb((db) => {
     db.localEvidence = { directory };

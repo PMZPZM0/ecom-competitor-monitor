@@ -148,23 +148,61 @@ export function classifyTaobaoSessionCheck({ authLoggedIn = false, hasCookie = f
   return "degraded";
 }
 
+function browserSwitchValues(commandLine, switchName) {
+  const command = String(commandLine || "");
+  const pattern = new RegExp(`(?:^|\\s)(["']?)--${switchName}=`, "gi");
+  const values = [];
+  let match;
+  while ((match = pattern.exec(command))) {
+    const argumentQuote = match[1];
+    const valueQuote = argumentQuote || (`"'`.includes(command[pattern.lastIndex]) ? command[pattern.lastIndex++] : "");
+    if (valueQuote) {
+      const end = command.indexOf(valueQuote, pattern.lastIndex);
+      if (end < 0 || (command[end + 1] && !/\s/.test(command[end + 1]))) {
+        values.push(null);
+        continue;
+      }
+      values.push(command.slice(pattern.lastIndex, end));
+      pattern.lastIndex = end + 1;
+      continue;
+    }
+    const nextSwitch = command.slice(pattern.lastIndex).search(/\s+["']?--[a-z0-9-]+(?:=|["']?(?=\s|$))/i);
+    values.push(command.slice(pattern.lastIndex, nextSwitch < 0 ? command.length : pattern.lastIndex + nextSwitch).trim());
+    if (nextSwitch < 0) break;
+    pattern.lastIndex += nextSwitch;
+  }
+  return values;
+}
+
+function normalizeBrowserProfilePath(value) {
+  let source = String(value || "").trim();
+  const windowsPath = /^[a-z]:[\\/]/i.test(source) || source.startsWith("\\\\");
+  if (!windowsPath) source = source.replaceAll("\\ ", " ");
+  const posixPath = !windowsPath && path.posix.isAbsolute(source);
+  const pathApi = windowsPath ? path.win32 : posixPath ? path.posix : path;
+  let normalized = pathApi.resolve(source);
+  const foreignPath = (windowsPath && process.platform !== "win32") || (posixPath && process.platform === "win32");
+  if (!foreignPath) {
+    try {
+      normalized = fs.realpathSync.native(normalized);
+    } catch {
+      // The ownership check can run before a newly selected profile directory exists.
+    }
+  }
+  return windowsPath ? normalized.replaceAll("\\", "/").toLowerCase() : normalized;
+}
+
 export function browserCommandMatchesContext(commandLine, { profilePath: expectedProfilePath, port } = {}) {
-  if (!expectedProfilePath || !Number.isFinite(Number(port))) return false;
-  const normalize = (value) => {
-    const normalized = String(value || "").replaceAll('"', "");
-    return process.platform === "win32"
-      ? normalized.replaceAll("\\", "/").toLowerCase()
-      : normalized.replaceAll("\\ ", " ");
-  };
-  const command = normalize(commandLine);
-  const expectedPath = normalize(path.resolve(expectedProfilePath));
-  const portPattern = new RegExp(`(?:^|\\s)--remote-debugging-port=${Number(port)}(?:\\s|$)`);
-  const profileFlag = `--user-data-dir=${expectedPath}`;
-  const profileIndex = command.indexOf(profileFlag);
-  const profileBoundary = profileIndex >= 0 ? command.slice(profileIndex + profileFlag.length, profileIndex + profileFlag.length + 1) : "";
-  return portPattern.test(command)
-    && profileIndex >= 0
-    && (!profileBoundary || /\s/.test(profileBoundary));
+  const expectedPort = Number(port);
+  if (!expectedProfilePath || !Number.isInteger(expectedPort)) return false;
+  const ports = browserSwitchValues(commandLine, "remote-debugging-port");
+  const profiles = browserSwitchValues(commandLine, "user-data-dir");
+  return ports.length === 1
+    && /^\d+$/.test(ports[0])
+    && Number(ports[0]) === expectedPort
+    && profiles.length === 1
+    && Boolean(profiles[0])
+    && normalizeBrowserProfilePath(profiles[0]) === normalizeBrowserProfilePath(expectedProfilePath);
 }
 
 function localPortAvailable(port) {

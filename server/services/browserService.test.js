@@ -111,6 +111,29 @@ test("browser command ownership requires both the expected profile and port", ()
   assert.equal(browserCommandMatchesContext(command, context), true);
   assert.equal(browserCommandMatchesContext(command, { ...context, port: 9518 }), false);
   assert.equal(browserCommandMatchesContext(command, { ...context, profilePath: "C:\\Users\\tester\\account-profiles\\account_b" }), false);
+  assert.equal(browserCommandMatchesContext(command, { ...context, profilePath: "C:\\Users\\tester\\account-profiles\\account" }), false);
+});
+
+test("browser command ownership normalizes native command quoting and path aliases", () => {
+  const windowsContext = { profilePath: "C:\\Users\\Tester\\account-profiles\\account_a", port: 9517 };
+  const windowsCommand = '"C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe" "--user-data-dir=C:/Users/tester/account-profiles/alias/../account_a" --remote-debugging-port=9517';
+  assert.equal(browserCommandMatchesContext(windowsCommand, windowsContext), true);
+
+  const macContext = { profilePath: "/Users/tester/Library/Application Support/ecom/account_a", port: 9517 };
+  const macCommand = "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome --user-data-dir=/Users/tester/Library/Application\\ Support/ecom/profiles/../account_a --remote-debugging-port=9517";
+  assert.equal(browserCommandMatchesContext(macCommand, macContext), true);
+});
+
+test("browser command ownership rejects ambiguous duplicate switches", () => {
+  const context = { profilePath: "C:\\Users\\tester\\account-profiles\\account_a", port: 9517 };
+  assert.equal(browserCommandMatchesContext(
+    'chrome.exe --remote-debugging-port=9517 --user-data-dir="C:\\Users\\tester\\account-profiles\\account_a" --remote-debugging-port=9518',
+    context,
+  ), false);
+  assert.equal(browserCommandMatchesContext(
+    'chrome.exe --remote-debugging-port=9517 --user-data-dir="C:\\Users\\tester\\account-profiles\\account_a" --user-data-dir="C:\\Users\\tester\\account-profiles\\account_b"',
+    context,
+  ), false);
 });
 
 test("browser port allocation skips reserved and occupied ports", async () => {

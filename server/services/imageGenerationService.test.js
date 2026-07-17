@@ -15,6 +15,24 @@ import { MODEL_CHANNELS, updateModelConfig } from "./modelConfigService.js";
 
 const env = { MODEL_CONFIG_ENCRYPTION_KEY: "image-generation-tests" };
 
+function pendingFetchUntilAbort(signal) {
+  return new Promise((_, reject) => {
+    if (signal.aborted) {
+      reject(signal.reason);
+      return;
+    }
+    const abort = () => {
+      clearTimeout(watchdog);
+      reject(signal.reason);
+    };
+    const watchdog = setTimeout(() => {
+      signal.removeEventListener("abort", abort);
+      reject(new Error("Expected the request timeout to abort the fetch mock."));
+    }, 1_000);
+    signal.addEventListener("abort", abort, { once: true });
+  });
+}
+
 test("image requests map UI ratios to supported GPT image sizes", () => {
   const expected = {
     "1:1": "1024x1024",
@@ -219,7 +237,7 @@ test("remote image downloads have an independent timeout after the model respons
       fetchImpl: async (_url, { signal }) => {
         calls += 1;
         if (calls === 1) return new Response(JSON.stringify({ data: [{ url: "https://1.1.1.1/generated.png" }] }), { status: 200 });
-        return new Promise((resolve, reject) => signal.addEventListener("abort", () => reject(signal.reason), { once: true }));
+        return pendingFetchUntilAbort(signal);
       },
     }),
     (error) => error.status === 504 && error.code === "IMAGE_REMOTE_RESULT_TIMEOUT",
@@ -242,9 +260,7 @@ test("generation errors and timeouts never leak the API key", async () => {
     generateImages(config, { prompt: "product" }, {
       env,
       timeoutMs: 5,
-      fetchImpl: async (_url, { signal }) => new Promise((resolve, reject) => {
-        signal.addEventListener("abort", () => reject(signal.reason), { once: true });
-      }),
+      fetchImpl: async (_url, { signal }) => pendingFetchUntilAbort(signal),
     }),
     (error) => error.code === "MODEL_API_TIMEOUT" && !error.message.includes(secret),
   );
