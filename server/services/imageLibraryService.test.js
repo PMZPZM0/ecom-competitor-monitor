@@ -73,6 +73,32 @@ test("generated images persist locally and support favorite, archive, file and d
   await assert.rejects(readGeneratedImageFile(saved.id), (error) => error.status === 404);
 });
 
+test("manifest writes retry transient rename failures", async (t) => {
+  const originalRename = fs.rename.bind(fs);
+  let transientFailures = 0;
+  t.mock.method(fs, "rename", async (source, destination) => {
+    if (path.basename(destination) === "manifest.json" && transientFailures < 2) {
+      transientFailures += 1;
+      throw Object.assign(new Error("temporary file lock"), { code: "EPERM" });
+    }
+    return originalRename(source, destination);
+  });
+
+  const png = await sharp({ create: { width: 16, height: 16, channels: 4, background: "#ffffff" } }).png().toBuffer();
+  const [saved] = await saveGeneratedImages([generatedImage(png)], {
+    prompt: "rename retry",
+    ratio: "1:1",
+    resolution: "1k",
+    quality: "medium",
+    background: "auto",
+    model: "gpt-image-2",
+  });
+
+  assert.equal(transientFailures, 2);
+  assert.equal((await listGeneratedImages()).some((item) => item.id === saved.id), true);
+  await deleteGeneratedImage(saved.id);
+});
+
 test("a saved source image becomes the first edit image and records transparent mask semantics", async () => {
   const source = await sharp({ create: { width: 12, height: 12, channels: 4, background: "#ffffff" } }).png().toBuffer();
   const [saved] = await saveGeneratedImages([generatedImage(source, {

@@ -35,6 +35,8 @@ const MAX_INPUT_PIXELS = 40_000_000;
 const MAX_REMOTE_IMAGE_BYTES = 32 * 1024 * 1024;
 const MAX_LIBRARY_ITEMS = 200;
 const MANIFEST_VERSION = 1;
+const RENAME_RETRY_DELAYS_MS = [20, 40, 80, 160, 250, 250, 250, 250];
+const TRANSIENT_RENAME_ERRORS = new Set(["EACCES", "EBUSY", "EPERM"]);
 
 let libraryMutationQueue = Promise.resolve();
 
@@ -548,7 +550,16 @@ async function atomicWriteFile(destination, data) {
     await handle.close();
   }
   try {
-    await fs.rename(temporary, destination);
+    for (let attempt = 0; ; attempt += 1) {
+      try {
+        await fs.rename(temporary, destination);
+        break;
+      } catch (error) {
+        const delay = RENAME_RETRY_DELAYS_MS[attempt];
+        if (!TRANSIENT_RENAME_ERRORS.has(error?.code) || delay === undefined) throw error;
+        await new Promise((resolve) => setTimeout(resolve, delay));
+      }
+    }
   } catch (error) {
     await fs.unlink(temporary).catch(() => undefined);
     throw error;
