@@ -145,14 +145,22 @@ export function reportXml(product, snapshot, { includeTitle = false } = {}) {
     if (!supported) return "不适用";
     return sku[statusField] === "none" ? noneLabel : "未获取";
   };
+  const campaignPrice = (sku, kind, field, statusField, noneLabel) => {
+    if (anonymous) return "需登录";
+    if (sku.resolutionStatus !== "verified" || sku.priceResolution?.channels?.[kind]?.status !== "verified") {
+      return sku[statusField] === "none" ? noneLabel : "本次未验证";
+    }
+    if (Number.isFinite(Number(sku[field])) && Number(sku[field]) > 0) return formattedPrice(sku[field]);
+    return sku[statusField] === "none" ? noneLabel : "未获取";
+  };
   const coinPrice = (sku) => anonymous
     ? "需登录"
     : Number.isFinite(Number(sku.coinPrice)) && Number(sku.coinPrice) > 0
       ? formattedPrice(sku.coinPrice)
       : sku.coinStatus === "none" ? "无淘金币" : "未获取";
-  const rows = (snapshot.skuPrices || []).map((sku) => `<tr><td>${escapeXml(sku.name || sku.skuId)}</td><td>${escapeXml(sku.skuId)}</td><td>${formattedPrice(sku.normalPrice ?? sku.price, "未获取")}</td><td>${formattedPrice(sku.governmentPrice, "无国补")}</td><td>${accountPrice(sku, "normal", "surprisePrice", "surpriseStatus", "无惊喜立减")}</td><td>${accountPrice(sku, "gift", "giftPrice", "giftStatus", "无礼金优惠")}</td><td>${accountPrice(sku, "vip88", "vipPrice", "vipStatus", "无88VIP优惠")}</td><td>${coinPrice(sku)}</td><td>${formattedPrice(thresholds[sku.skuId], "--")}</td></tr>`).join("");
+  const rows = (snapshot.skuPrices || []).map((sku) => `<tr><td>${escapeXml(sku.name || sku.skuId)}</td><td>${escapeXml(sku.skuId)}</td><td>${formattedPrice(sku.normalPrice ?? sku.price, "未获取")}</td><td>${campaignPrice(sku, "seckill", "seckillPrice", "seckillStatus", "无淘宝秒杀")}</td><td>${campaignPrice(sku, "billion", "billionPrice", "billionStatus", "无百亿补贴")}</td><td>${formattedPrice(sku.governmentPrice, "无国补")}</td><td>${accountPrice(sku, "normal", "surprisePrice", "surpriseStatus", "无惊喜立减")}</td><td>${accountPrice(sku, "gift", "giftPrice", "giftStatus", "无礼金优惠")}</td><td>${accountPrice(sku, "vip88", "vipPrice", "vipStatus", "无88VIP优惠")}</td><td>${coinPrice(sku)}</td><td>${formattedPrice(thresholds[sku.skuId], "--")}</td></tr>`).join("");
   const introduction = includeTitle ? '<title>电商价格监控报告</title><callout emoji="📊" background-color="light-blue" border-color="blue"><p>系统自动记录各店铺、型号与 SKU 价格。每次抓取后追加最新数据。</p></callout>' : "";
-  return `${introduction}<h2>${escapeXml(shop)} · ${escapeXml(model)}</h2><p><b>抓取时间：</b>${escapeXml(new Date(snapshot.capturedAt || Date.now()).toLocaleString("zh-CN", { hour12: false }))}</p><p><b>价格身份：</b>${anonymous ? "匿名公开价（不触发低价提醒）" : accountName}</p><table><thead><tr><th background-color="light-blue">SKU</th><th background-color="light-blue">SKU ID</th><th background-color="light-blue">普通/秒杀价</th><th background-color="light-blue">国补价</th><th background-color="light-blue">惊喜立减价</th><th background-color="light-blue">礼金价</th><th background-color="light-blue">88VIP价</th><th background-color="light-blue">淘金币价</th><th background-color="light-blue">监控价</th></tr></thead><tbody>${rows}</tbody></table><p><a href="${escapeXml(product.url)}">打开商品</a></p><hr/>`;
+  return `${introduction}<h2>${escapeXml(shop)} · ${escapeXml(model)}</h2><p><b>抓取时间：</b>${escapeXml(new Date(snapshot.capturedAt || Date.now()).toLocaleString("zh-CN", { hour12: false }))}</p><p><b>价格身份：</b>${anonymous ? "匿名公开价（不触发低价提醒）" : accountName}</p><table><thead><tr><th background-color="light-blue">SKU</th><th background-color="light-blue">SKU ID</th><th background-color="light-blue">普通价</th><th background-color="light-blue">淘宝秒杀价</th><th background-color="light-blue">百亿补贴价</th><th background-color="light-blue">国补价</th><th background-color="light-blue">惊喜立减价</th><th background-color="light-blue">礼金价</th><th background-color="light-blue">88VIP价</th><th background-color="light-blue">淘金币价</th><th background-color="light-blue">监控价</th></tr></thead><tbody>${rows}</tbody></table><p><a href="${escapeXml(product.url)}">打开商品</a></p><hr/>`;
 }
 
 export async function createPriceDocument(product) {

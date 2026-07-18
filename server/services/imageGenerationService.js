@@ -21,9 +21,14 @@ const RESOLUTION_LONG_EDGES = { "1k": 1024, "2k": 2048, "4k": 4096 };
 const QUALITIES = new Set(["low", "medium", "high"]);
 const FORMATS = new Set(["png", "jpeg", "webp"]);
 const BACKGROUNDS = new Set(["auto", "opaque", "transparent"]);
+const IMAGE_OUTPUT_BASE_PROMPT = "基础质量规范：严格服从用户明确提出的画面内容，用户的正向要求优先于额外排除要求。文字与标识：将用户明确提供的所有文案视为必须逐字执行的原文，即使原文没有使用引号。必须保持用户指定的简体或繁体、语言、字符顺序、大小写、数字、单位、标点、空格、换行、行序和全角半角完全一致，文字清晰可读；不得擅自翻译、改写、增删或转换简繁体。不得出现乱码、伪文字、错别字、同音字、形近字、部首或偏旁替换、缺字、多字、重复字、笔画增减、断笔、粘连或畸形，不得出现镜像、反向、倒置、旋转或变形字符。无论用户是否要求新增或修改文字，都不得出现用户未明确指定的额外文字、数字、价格、促销标签、二维码、条形码、水印、Logo、品牌标识或署名；用户只要求某一段文字时，只能新增或替换该段指定文字，不得连带生成其他文案。正向要求与额外排除要求冲突时，以正向要求为准，额外排除要求只约束用户未明确要求的内容。画面完整性：主体数量、身份、外形、比例、结构、颜色和关键细节必须符合用户要求，主体完整且不畸变，边缘干净，材质与光影自然；不得出现重复部件、缺失部件、穿模、悬浮、拉伸、过度锐化、明显噪点、压缩伪影或无关界面元素。";
+const IMAGE_REFERENCE_BASE_PROMPTS = {
+  source: "严格参考图编辑任务。第一张图片是待编辑原图，也是产品身份和原始画面的唯一事实依据。除用户明确要求修改的项目外，必须保持原图中的产品身份、外形、比例、结构、零部件、按键、Logo、既有文字、材质、颜色、镜头角度、透视、构图、裁切和宽高比不变。若用户明确要求新增、删除或替换原图文字，仅允许修改用户指定的文字和对应区域；新增或替换的内容必须与用户原文逐字一致，其他既有文字及其字体风格、字号、颜色、排版和位置必须保持不变。若用户未明确要求改字，禁止改写、翻译、删除或新增既有文字。若请求的输出尺寸与原图宽高比不同，该尺寸选择视为用户明确要求，仅允许为适配新画布做必要的扩图或裁切，产品本身仍须完整保真。只实施用户明确要求的变化；禁止替换产品、整体重设计、虚构或增删结构以及新增品牌。其余参考图仅用于用户指定的材质、风格或场景参考，不得覆盖第一张原图的产品事实。",
+  reference: "普通参考图任务。参考图用于约束用户指定的产品、风格、材质或构图，但不默认把第一张图片视为待编辑原图。若用户未明确要求重新设计，必须保留参考图中核心产品可辨识的身份、外形、比例、结构、按键、Logo、既有文字、材质和颜色。若用户明确要求基于参考图新增、删除或替换文字，仅允许修改用户指定的文字和对应区域；新增或替换的内容必须与用户原文逐字一致，其他既有文字及其字体风格、字号、颜色、排版和位置必须保持不变。若用户未明确要求改字，禁止改写、翻译、删除或新增既有文字。只实施用户明确要求的变化，禁止替换产品、虚构或增删结构以及新增品牌。若用户明确说明参考图只用于风格，则仅提取相关风格，不要求复刻其主体或构图。",
+};
 const IMAGE_EDIT_BASE_PROMPTS = {
-  mask: "局部蒙版编辑任务。第一张图片是待编辑原图，只修改透明蒙版覆盖的区域；其他参考图仅用于理解材质或风格。严格保持蒙版外的构图、主体、文字、Logo、颜色、光影、材质、背景、比例和清晰度不变；不得移动、重画、增删或裁切蒙版外内容。修改区域必须与周围自然衔接。",
-  annotation: "局部批注编辑任务。第一张图片是待编辑原图，最后一张带编号框选或备注点的图片只用于指示修改位置，中间图片仅作为材质或风格参考。标注编号与修改内容中的编号一一对应；框线、编号和备注点不得出现在最终图片中。只修改标注指向的区域。严格保持其他区域的构图、主体、文字、Logo、颜色、光影、材质、背景、比例和清晰度不变；不得移动、重画、增删或裁切未标注内容。修改区域必须与周围自然衔接。",
+  mask: "局部蒙版编辑任务。第一张图片是待编辑原图，也是产品身份和原始画面的唯一事实依据；其他参考图仅用于用户指定的材质或风格参考。只修改透明蒙版覆盖的区域，并且只实施用户明确要求的变化。若用户明确要求新增、删除或替换文字，只允许在蒙版内修改指定文字；新增或替换的内容必须与用户原文逐字一致，蒙版外和未指定修改的既有文字必须保持不变。严格保持蒙版外的产品身份、外形、比例、结构、零部件、按键、Logo、既有文字、材质、颜色、镜头角度、透视、构图、裁切、宽高比、背景和清晰度不变；禁止替换产品、整体重设计、虚构或增删结构、新增品牌，以及移动、重画、增删或裁切蒙版外内容。修改区域必须与周围自然衔接。",
+  annotation: "局部批注编辑任务。第一张图片是待编辑原图，也是产品身份和原始画面的唯一事实依据；最后一张带编号框选或备注点的图片只用于指示修改位置；中间图片仅作为用户指定的材质或风格参考。最后一张批注图中的编号必须与修改内容中的相同编号逐条对应，按编号分别执行，不得合并、错配或漏改；框线、编号和备注点不得出现在最终图片中。只修改每个编号指向的框选或点选区域，并且只实施该编号明确要求的变化。若某编号明确要求新增、删除或替换文字，只允许在该编号标注区域内修改指定文字；新增或替换的内容必须与该条用户原文逐字一致，其他编号、未标注区域和未指定修改的既有文字必须保持不变。严格保持未标注区域的产品身份、外形、比例、结构、零部件、按键、Logo、既有文字、材质、颜色、镜头角度、透视、构图、裁切、宽高比、背景和清晰度不变；禁止替换产品、整体重设计、虚构或增删结构、新增品牌，以及移动、重画、增删或裁切未标注内容。修改区域必须与周围自然衔接。",
 };
 const MIME_BY_FORMAT = { png: "image/png", jpeg: "image/jpeg", webp: "image/webp" };
 const FORMAT_BY_MIME = { "image/png": "png", "image/jpeg": "jpeg", "image/webp": "webp" };
@@ -63,10 +68,13 @@ function imageError(message, { code = "IMAGE_REQUEST_INVALID", status = 400 } = 
   return new ModelApiError(message, { code, status });
 }
 
-export function mergeImagePrompt(prompt, negativePrompt = "") {
+export function mergeImagePrompt(prompt, negativePrompt = "", referenceMode) {
   const positive = requiredText(prompt, "正向提示词", 32_000);
   const negative = optionalText(negativePrompt, "负面提示词", 4_000);
-  return negative ? `${positive}\n\nAvoid the following: ${negative}` : positive;
+  const reference = referenceMode ? IMAGE_REFERENCE_BASE_PROMPTS[referenceMode] : "";
+  if (referenceMode && !reference) throw new Error("参考图方式无效。");
+  const merged = [IMAGE_OUTPUT_BASE_PROMPT, reference, positive].filter(Boolean).join("\n\n");
+  return negative ? `${merged}\n\n额外排除要求（不得覆盖上述正向要求、原图事实或保留规则，只约束用户未明确要求的内容）：${negative}` : merged;
 }
 
 export function mergeImageEditPrompt(instruction, mode) {
@@ -99,10 +107,15 @@ export function buildImageGenerationRequest(input = {}, imageModel = "gpt-image-
   if (!Number.isInteger(count) || count < 1 || count > 4) throw new Error("生成数量必须为 1 到 4 之间的整数。");
   const compression = input.compression ?? 90;
   if (!Number.isInteger(compression) || compression < 0 || compression > 100) throw new Error("图片压缩率必须为 0 到 100 之间的整数。");
+  const referenceMode = input.referenceMode || (!input.editMode && input.sourceImageId ? "source" : undefined);
 
   return {
     model: String(imageModel || "").trim(),
-    prompt: mergeImagePrompt(input.editMode ? mergeImageEditPrompt(input.prompt, input.editMode) : input.prompt, input.negativePrompt),
+    prompt: mergeImagePrompt(
+      input.editMode ? mergeImageEditPrompt(input.prompt, input.editMode) : input.prompt,
+      input.negativePrompt,
+      referenceMode,
+    ),
     size: ratioConfig.nativeSize,
     quality,
     output_format: outputFormat,
@@ -425,11 +438,11 @@ function editFormData(body, references, mask) {
   return form;
 }
 
-async function prepareEditFiles(input, uploadedReferences, uploadedMask) {
+async function prepareEditFiles(input, uploadedReferences, uploadedMask, sourceImageOverride = null) {
   const references = [];
   if (input.sourceImageId) {
-    const source = await readGeneratedImageFile(input.sourceImageId);
-    references.push(await validateReferenceFile({
+    const source = sourceImageOverride || await readGeneratedImageFile(input.sourceImageId);
+    references.push(await validateReferenceFile(sourceImageOverride ? source : {
       buffer: source.buffer,
       mimetype: source.record.mimeType,
       originalname: `source.${source.record.format === "jpeg" ? "jpg" : source.record.format}`,
@@ -472,9 +485,10 @@ export async function generateImages(config = {}, input = {}, {
   remoteImageTimeoutMs = 60_000,
   referenceImages = [],
   maskImage = null,
+  sourceImageOverride = null,
 } = {}) {
   const resolved = resolveModelConfig(config, { env });
-  const prepared = await prepareEditFiles(input, referenceImages, maskImage);
+  const prepared = await prepareEditFiles(input, referenceImages, maskImage, sourceImageOverride);
   const edit = prepared.references.length > 0;
   if (prepared.mask && input.editMode && input.editMode !== "mask") {
     throw imageError("蒙版文件只能使用蒙版重绘方式。", { code: "IMAGE_EDIT_MODE_MISMATCH" });
@@ -487,7 +501,8 @@ export async function generateImages(config = {}, input = {}, {
     throw imageError("带批注参考需要待编辑原图和批注图。", { code: "IMAGE_EDIT_ANNOTATION_MISSING" });
   }
   if (editMode && !edit) throw imageError("图片编辑缺少待编辑原图。", { code: "IMAGE_EDIT_SOURCE_MISSING" });
-  const body = buildImageGenerationRequest({ ...input, editMode }, resolved.imageModel);
+  const referenceMode = !editMode && edit ? (input.sourceImageId ? "source" : "reference") : undefined;
+  const body = buildImageGenerationRequest({ ...input, editMode, referenceMode }, resolved.imageModel);
   let data;
   try {
     data = await requestModelApiJson(edit ? imageEditEndpoint(resolved.baseUrl) : imageGenerationEndpoint(resolved.baseUrl), {

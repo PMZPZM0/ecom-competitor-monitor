@@ -10,7 +10,7 @@ const profileDir = path.join(profileRoot, "legacy");
 const accountProfilesDir = profileRoot;
 const remotePort = Number(process.env.TAOBAO_BROWSER_PORT || 9223);
 const taobaoAuthUrls = ["https://i.taobao.com/my_taobao.htm", "https://www.taobao.com/", "https://detail.tmall.com/"];
-
+const tmallSsoSyncHosts = new Set(["pass.tmall.com", "pass.tmall.hk"]);
 const browserProcesses = new Map();
 const browserStartPromises = new Map();
 const browserModes = new Map();
@@ -25,7 +25,7 @@ export function skuIdFromNetworkUrl(value) {
     const parsed = new URL(value);
     const data = JSON.parse(parsed.searchParams.get("data") || "{}");
     const exParams = typeof data.exParams === "string" ? JSON.parse(data.exParams) : data.exParams || {};
-    return String(exParams.skuId || data.skuId || data.selectSkuId || "");
+    return String(exParams.skuId || data.skuId || data.selectSkuId || parsed.searchParams.get("skuId") || "");
   } catch {
     return "";
   }
@@ -53,8 +53,117 @@ export function skuIdFromNetworkBody(body) {
   }
 }
 
+export function tmallSsoSyncUrlsFromSilentLogin(body) {
+  const data = parseNetworkBody(body)?.content?.data;
+  const candidates = Array.isArray(data?.asyncUrls) ? data.asyncUrls : [];
+  const urls = [];
+  for (const candidate of candidates) {
+    try {
+      const url = new URL(String(candidate));
+      if (url.protocol !== "https:" || !tmallSsoSyncHosts.has(url.hostname) || url.pathname !== "/add") continue;
+      urls.push(url.toString());
+    } catch {
+      // Ignore malformed or untrusted bridge URLs from the page response.
+    }
+  }
+  return [...new Set(urls)];
+}
+
+export function isTmallSilentLoginResponse(value) {
+  return /\/newlogin\/silentHasLogin\.do/i.test(String(value || ""));
+}
+
+export function isTmallSessionCookie(cookie = {}) {
+  const domain = String(cookie.domain || "").replace(/^\./, "").toLowerCase();
+  return domain === "tmall.com" || domain.endsWith(".tmall.com") || domain === "tmall.hk" || domain.endsWith(".tmall.hk");
+}
+
+export async function resetTmallSession(options = {}) {
+  const context = browserContext(options);
+  if (!(await isBrowserReady(context))) return 0;
+  const [version, targets] = await Promise.all([
+    getJson(`http://127.0.0.1:${context.port}/json/version`),
+    getJson(`http://127.0.0.1:${context.port}/json/list`).catch(() => []),
+  ]);
+  await assertBrowserOwnership(context, version);
+  const browserCdp = await createCdp(version.webSocketDebuggerUrl);
+  let cookies;
+  try {
+    ({ cookies } = await browserCdp.send("Storage.getCookies", {}, 10000));
+  } finally {
+    browserCdp.close();
+  }
+  const expiredCookies = (cookies || []).filter(isTmallSessionCookie);
+  if (!expiredCookies.length) return 0;
+
+  let temporaryTab = null;
+  const pageTarget = targets.find((target) => target.type === "page" && target.webSocketDebuggerUrl)
+    || (temporaryTab = await createBackgroundTab(context));
+  const pageCdp = await createCdp(pageTarget.webSocketDebuggerUrl);
+  try {
+    await pageCdp.send("Network.enable", {}, 10000);
+    for (const cookie of expiredCookies) {
+      await pageCdp.send("Network.deleteCookies", {
+        name: cookie.name,
+        domain: cookie.domain,
+        path: cookie.path || "/",
+        ...(cookie.partitionKey ? { partitionKey: cookie.partitionKey } : {}),
+      }, 10000);
+    }
+  } finally {
+    pageCdp.close();
+    if (temporaryTab) await closeTab(temporaryTab.id, context);
+  }
+  return expiredCookies.length;
+}
+
+// Each background tab receives fresh silent-login bridge URLs. Reusing a
+// browser-wide TTL here leaves the SKU-selection tab without Tmall identity.
+async function refreshTmallSsoFromCapturedLogin(cdp, responses, productUrl) {
+  const silentResponses = [...responses.entries()].filter(([, response]) => isTmallSilentLoginResponse(response.url));
+  if (!silentResponses.length) return false;
+
+  const bodyResults = await Promise.allSettled(silentResponses.map(async ([requestId]) => {
+    const result = await cdp.send("Network.getResponseBody", { requestId }, 5000);
+    return tmallSsoSyncUrlsFromSilentLogin(result.body);
+  }));
+  const syncUrls = [...new Set(bodyResults.flatMap((result) => result.status === "fulfilled" ? result.value : []))];
+  if (!syncUrls.length) return false;
+
+  await cdp.send("Runtime.evaluate", {
+    expression: `new Promise((resolve) => {
+      const urls = ${JSON.stringify(syncUrls)};
+      let pending = urls.length;
+      const finish = () => { pending -= 1; if (pending <= 0) resolve(true); };
+      for (const url of urls) {
+        const script = document.createElement('script');
+        const timer = setTimeout(() => { script.remove(); finish(); }, 4000);
+        script.async = true;
+        script.src = url;
+        script.onload = script.onerror = () => { clearTimeout(timer); script.remove(); finish(); };
+        document.head.appendChild(script);
+      }
+    })`,
+    awaitPromise: true,
+    returnByValue: true,
+  }, 10000);
+  responses.clear();
+  await cdp.send("Page.navigate", { url: productUrl }, 10000);
+  await new Promise((resolve) => setTimeout(resolve, 7000));
+  return true;
+}
+
 export function isBuyerShowResponseUrl(value) {
   return /(?:rate|review|comment|evaluate)/i.test(String(value || ""));
+}
+
+export function shouldCaptureNetworkResponse(response = {}, type = "") {
+  const responseUrl = String(response.url || "");
+  const mimeType = String(response.mimeType || "");
+  const relevantUrl = /(?:\/h5\/mtop|mtop\.|detail|promotion|benefit|price|sku|rate|review|comment|evaluate|feed|silentHasLogin)/i.test(responseUrl);
+  const dataResponse = /json/i.test(mimeType) || /XHR|Fetch/i.test(type);
+  const silentLoginBridge = /\/newlogin\/silentHasLogin\.do/i.test(responseUrl);
+  return relevantUrl && (dataResponse || silentLoginBridge) && Number(response.status || 0) < 400;
 }
 
 export function canReuseBrowser(runtimeHeadless, requestedHeadless) {
@@ -62,6 +171,7 @@ export function canReuseBrowser(runtimeHeadless, requestedHeadless) {
 }
 
 export function shouldPreserveCaptureCache(options = {}) {
+  if (options.preserveCache === false) return false;
   return options.localCapture === true || options.preserveCache === true;
 }
 
@@ -631,8 +741,7 @@ async function minimizeBrowserForCapture(options = {}) {
   }
 }
 
-export async function openTaobaoLogin(options = {}) {
-  const loginUrl = "https://login.taobao.com/member/login.jhtml";
+async function openLoginPage(loginUrl, options, message) {
   const context = await ensureBrowser("about:blank", { ...options, headless: false });
   const tab = await createTab(loginUrl, { ...context, headless: false });
   restoreAccountBrowser(context);
@@ -642,8 +751,25 @@ export async function openTaobaoLogin(options = {}) {
     profileKey: context.profileKey,
     port: context.port,
     targetId: tab.id,
-    message: "已打开独立淘宝登录窗口，请用淘宝 App 扫码；检测到真实账号身份后会自动同步并最小化窗口。",
+    message,
   };
+}
+
+export async function openTaobaoLogin(options = {}) {
+  return openLoginPage(
+    "https://login.taobao.com/member/login.jhtml",
+    options,
+    "已打开独立淘宝登录窗口，请用淘宝 App 扫码；检测到真实账号身份后会自动同步并最小化窗口。",
+  );
+}
+
+export async function openTmallLogin(options = {}) {
+  const redirectUrl = "https://detail.tmall.com/item.htm";
+  return openLoginPage(
+    `https://login.tmall.com/?redirectURL=${encodeURIComponent(redirectUrl)}`,
+    options,
+    "已打开天猫价格授权窗口，请用淘宝 App 扫码；天猫登录完成后会自动同步并最小化窗口。",
+  );
 }
 
 export async function getTaobaoCookieHeader(options = {}) {
@@ -772,32 +898,27 @@ export async function getRenderedHtml(url, authSession = {}, renderOptions = {})
     const priceResponses = new Map();
     const buyerShowResponses = new Map();
     const buyerShowInteractions = [];
-    const skuWaiters = new Map();
+    let pcdetailResponseCount = 0;
     const requestedSelections = Array.isArray(renderOptions.selectSkus) ? renderOptions.selectSkus : [];
     if (requestedSelections.length && !preserveCache) await cdp.send("Network.clearBrowserCache");
     const priceResponseLimit = requestedSelections.length || Array.isArray(renderOptions.selectSkuNames) ? 240 : 60;
     cdp.on("Network.responseReceived", ({ requestId, response, type }) => {
       const responseUrl = String(response?.url || "");
       const mimeType = String(response?.mimeType || "");
-      const relevantUrl = /(?:\/h5\/mtop|mtop\.|detail|promotion|benefit|price|sku|rate|review|comment|evaluate|feed)/i.test(responseUrl);
       const buyerShowUrl = isBuyerShowResponseUrl(responseUrl);
-      const dataResponse = /json/i.test(mimeType) || /XHR|Fetch/i.test(type || "");
-      if (!relevantUrl || !dataResponse || Number(response?.status || 0) >= 400) return;
+      if (!shouldCaptureNetworkResponse(response, type)) return;
       const target = buyerShowUrl ? buyerShowResponses : priceResponses;
       const limit = buyerShowUrl ? 80 : priceResponseLimit;
       if (target.size < limit) {
-        const skuId = buyerShowUrl ? "" : skuIdFromNetworkUrl(responseUrl);
-        target.set(requestId, { url: responseUrl, mimeType, skuId, responseKind: buyerShowUrl ? "buyer-show" : "price" });
-        if (/mtop\.taobao\.pcdetail\.data\.adjust/i.test(responseUrl) && skuId && skuWaiters.has(skuId)) {
-          skuWaiters.get(skuId)({ requestId, url: responseUrl });
-          skuWaiters.delete(skuId);
-        }
+        target.set(requestId, { url: responseUrl, mimeType, responseKind: buyerShowUrl ? "buyer-show" : "price" });
+        if (/mtop\.taobao\.pcdetail\.data\.adjust/i.test(responseUrl)) pcdetailResponseCount += 1;
       }
     });
     await cdp.send("Runtime.enable");
     await cdp.send("Page.enable");
     await cdp.send("Page.navigate", { url });
     await new Promise((resolve) => setTimeout(resolve, 7000));
+    await refreshTmallSsoFromCapturedLogin(cdp, priceResponses, url);
     const selectSkuNames = Array.isArray(renderOptions.selectSkuNames)
       ? renderOptions.selectSkuNames.filter(Boolean)
       : renderOptions.selectSkuName ? [renderOptions.selectSkuName] : [];
@@ -806,42 +927,47 @@ export async function getRenderedHtml(url, authSession = {}, renderOptions = {})
       const skuId = String(selection?.skuId || "");
       const valueIds = Array.from(new Set((selection?.valueIds || []).map(String).filter(Boolean)));
       if (!skuId || !valueIds.length) {
-        selectionResults.push({ skuId, selected: false, responseObserved: false, reason: "missing-selection-ids" });
+        selectionResults.push({ skuId, selected: false, responseReceivedAfterSelection: false, reason: "missing-selection-ids" });
         continue;
       }
-      let waiterTimer;
-      const responseWaiter = new Promise((resolve) => {
-        skuWaiters.set(skuId, resolve);
-        waiterTimer = setTimeout(() => {
-          if (skuWaiters.has(skuId)) skuWaiters.delete(skuId);
-          resolve(null);
-        }, 8000);
-      });
+      const responseCountBeforeSelection = pcdetailResponseCount;
       const selectionResult = await cdp.send("Runtime.evaluate", {
-        expression: `(() => {
+        expression: `(async () => {
           const valueIds = ${JSON.stringify(valueIds)};
           const clicked = [];
+          const pause = (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds));
           for (const valueId of valueIds) {
             const target = document.querySelector('#skuOptionsArea [data-vid="' + valueId + '"]');
             if (!target || target.getAttribute('data-disabled') === 'true') return { selected: false, clicked, missing: valueId };
-            target.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, view: window }));
+            target.scrollIntoView({ block: 'center', inline: 'nearest' });
+            target.click?.();
             clicked.push(valueId);
+            // Multi-dimensional SKU controls update asynchronously. Waiting
+            // between dimensions prevents the second click from replacing the
+            // first before the page sends the authoritative SKU request.
+            await pause(450);
           }
           return { selected: clicked.length === valueIds.length, clicked };
         })()`,
         returnByValue: true,
+        awaitPromise: true,
       }, 10000);
-      const observedResponse = selectionResult.result?.value?.selected ? await responseWaiter : null;
-      clearTimeout(waiterTimer);
-      if (skuWaiters.has(skuId)) skuWaiters.delete(skuId);
+      let responseReceivedAfterSelection = false;
+      if (selectionResult.result?.value?.selected) {
+        const deadline = Date.now() + 8000;
+        while (Date.now() < deadline && pcdetailResponseCount <= responseCountBeforeSelection) {
+          await new Promise((resolve) => setTimeout(resolve, 100));
+        }
+        responseReceivedAfterSelection = pcdetailResponseCount > responseCountBeforeSelection;
+      }
       selectionResults.push({
         skuId,
         selected: Boolean(selectionResult.result?.value?.selected),
-        responseObserved: Boolean(observedResponse),
+        responseReceivedAfterSelection,
         clicked: selectionResult.result?.value?.clicked || [],
-        reason: selectionResult.result?.value?.missing ? `missing-value:${selectionResult.result.value.missing}` : observedResponse ? "verified" : "response-timeout",
+        reason: selectionResult.result?.value?.missing ? `missing-value:${selectionResult.result.value.missing}` : responseReceivedAfterSelection ? "response-received" : "response-timeout",
       });
-      if (observedResponse) await new Promise((resolve) => setTimeout(resolve, 600));
+      if (responseReceivedAfterSelection) await new Promise((resolve) => setTimeout(resolve, 600));
     }
     for (const selectSkuName of selectSkuNames) {
       const selectionResult = await cdp.send("Runtime.evaluate", {
@@ -971,20 +1097,21 @@ export async function getRenderedHtml(url, authSession = {}, renderOptions = {})
       expression: "window.location.href",
       returnByValue: true,
     }, 10000);
-    const authState = await getTaobaoAuthState({ ...context, url: locationResult.result?.value || url });
+    // Keep the identity check on canonical Taobao URLs. A Tmall product page
+    // may not receive the `.taobao.com` identity cookies by URL scope even
+    // though this same persistent browser is still signed in.
+    const authState = await getTaobaoAuthState(context);
     // Buyer-show responses are read first so large price telemetry cannot use
     // the payload budget before the delayed review requests finish.
-    const responseEntries = [...buyerShowResponses, ...priceResponses];
+    // JSONP login bridges can contain one-time session tokens. They are used
+    // in memory for SSO only and must never enter the local evidence file.
+    const responseEntries = [...buyerShowResponses, ...priceResponses]
+      .filter(([, response]) => !isTmallSilentLoginResponse(response.url));
     const bodyResults = await Promise.allSettled(responseEntries.map(async ([requestId, response]) => {
       const bodyResult = await cdp.send("Network.getResponseBody", { requestId }, 5000);
-      const body = String(bodyResult.body || "");
-      const responseSkuId = skuIdFromNetworkBody(body);
       return {
         ...response,
-        requestSkuId: response.skuId,
-        responseSkuId,
-        skuId: responseSkuId || response.skuId,
-        body,
+        body: String(bodyResult.body || ""),
       };
     }));
     const networkPayloads = [];
@@ -997,20 +1124,6 @@ export async function getRenderedHtml(url, authSession = {}, renderOptions = {})
       networkBytes += payload.body.length;
       networkPayloads.push(payload);
     }
-    const skuNetworkPayloads = Object.fromEntries(Array.from(new Set(networkPayloads.map((payload) => payload.skuId).filter(Boolean))).map((skuId) => [
-      skuId,
-      networkPayloads.filter((payload) => payload.skuId === skuId),
-    ]));
-    const verifiedResponseSkuIds = new Set(networkPayloads
-      .filter((payload) => /mtop\.taobao\.pcdetail\.data\.adjust/i.test(payload.url || "") && payload.responseSkuId)
-      .map((payload) => payload.responseSkuId));
-    const verifiedSelectionResults = selectionResults.map((selection) => ({
-      ...selection,
-      responseObserved: verifiedResponseSkuIds.has(selection.skuId),
-      reason: verifiedResponseSkuIds.has(selection.skuId)
-        ? "verified-body"
-        : selection.selected ? "response-body-missing" : selection.reason,
-    }));
     const buyerShowPayloads = networkPayloads.filter((payload) => payload.responseKind === "buyer-show");
     const priceNetworkPayloads = networkPayloads.filter((payload) => payload.responseKind === "price");
     return {
@@ -1020,8 +1133,8 @@ export async function getRenderedHtml(url, authSession = {}, renderOptions = {})
       buyerShowPayloads,
       buyerShowInteractions,
       priceNetworkPayloads,
-      skuNetworkPayloads,
-      selectionResults: verifiedSelectionResults,
+      skuNetworkPayloads: {},
+      selectionResults,
       finalUrl: locationResult.result?.value || tab.url,
       statusCode: 200,
       source: "browser",

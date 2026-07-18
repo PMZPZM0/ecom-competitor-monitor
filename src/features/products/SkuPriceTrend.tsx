@@ -12,13 +12,16 @@ import {
 } from 'recharts'
 import { TrendingUp } from 'lucide-react'
 import { currency } from '../../lib/utils'
-import type { Product, Snapshot } from '../../types/domain'
-import { accountPriceViewForSku, skuForAccountView } from './productDisplayUtils'
+import type { MonitorChannel, Product, Snapshot } from '../../types/domain'
+import { accountPriceViewForSku, skuForAccountView, verifiedPriceValue } from './productDisplayUtils'
 
 const lineColors = ['#0284c7', '#ea580c', '#7c3aed', '#059669', '#d97706', '#db2777', '#0891b2', '#4f46e5']
 
 const priceModes = [
-  { value: 'normalPrice', label: '普通/秒杀价' },
+  { value: 'lowest', label: '最低已验证价' },
+  { value: 'normalPrice', label: '普通价' },
+  { value: 'billionPrice', label: '百亿补贴价' },
+  { value: 'seckillPrice', label: '淘宝秒杀价' },
   { value: 'governmentPrice', label: '国补价' },
   { value: 'surprisePrice', label: '惊喜立减价' },
   { value: 'giftPrice', label: '礼金价' },
@@ -27,16 +30,36 @@ const priceModes = [
 ] as const
 
 type PriceMode = (typeof priceModes)[number]['value']
+type PriceChannel = Exclude<MonitorChannel, 'lowest'>
 
-function priceForMode(sku: Snapshot['skuPrices'][number], mode: PriceMode) {
-  const channel = mode === 'normalPrice' ? 'normal' : mode === 'governmentPrice' ? 'government' : mode === 'surprisePrice' ? 'surprise' : mode === 'giftPrice' ? 'gift' : mode === 'vipPrice' ? 'vip88' : 'coin'
-  if (sku.resolutionStatus !== 'verified' || sku.priceResolution?.channels?.[channel]?.status !== 'verified') return null
-  const value = mode === 'normalPrice' ? sku.normalPrice : sku[mode]
-  return typeof value === 'number' ? value : null
+const monitorChannelForMode: Record<PriceMode, MonitorChannel> = {
+  lowest: 'lowest',
+  normalPrice: 'normal',
+  billionPrice: 'billion',
+  seckillPrice: 'seckill',
+  governmentPrice: 'government',
+  surprisePrice: 'surprise',
+  giftPrice: 'gift',
+  vipPrice: 'vip88',
+  coinPrice: 'coin',
 }
 
-export function SkuPriceTrend({ snapshots, product, accountSessionId, accountType, accountName }: { snapshots: Snapshot[]; product: Product; accountSessionId: string; accountType: NonNullable<Product['accountType']>; accountName: string }) {
-  const [selectedSku, setSelectedSku] = useState('all')
+function priceForMode(sku: Snapshot['skuPrices'][number], mode: PriceMode, accountType: NonNullable<Product['accountType']>) {
+  if (mode === 'lowest') {
+    const supported: PriceChannel[] = accountType === 'vip88'
+      ? ['normal', 'billion', 'seckill', 'government', 'surprise', 'gift', 'vip88', 'coin']
+      : accountType === 'gift'
+        ? ['normal', 'billion', 'seckill', 'government', 'surprise', 'gift', 'coin']
+        : ['normal', 'billion', 'seckill', 'government', 'surprise', 'coin']
+    const values = supported.map((channel) => sku.priceResolution?.channels?.[channel]).filter((resolution) => resolution?.status === 'verified' && typeof resolution.valueCents === 'number').map((resolution) => resolution!.valueCents! / 100)
+    return values.length ? Math.min(...values) : null
+  }
+  const channel = monitorChannelForMode[mode] as PriceChannel
+  return verifiedPriceValue(sku, channel)
+}
+
+export function SkuPriceTrend({ snapshots, product, accountSessionId, accountType, accountName, showMonitorThresholds = true }: { snapshots: Snapshot[]; product: Product; accountSessionId: string; accountType: NonNullable<Product['accountType']>; accountName: string; showMonitorThresholds?: boolean }) {
+  const [selectedSku, setSelectedSku] = useState('group:0')
   const [priceMode, setPriceMode] = useState<PriceMode>('normalPrice')
   const orderedSnapshots = useMemo(
     () => [...snapshots].sort((left, right) => new Date(left.capturedAt).getTime() - new Date(right.capturedAt).getTime()),
@@ -53,10 +76,17 @@ export function SkuPriceTrend({ snapshots, product, accountSessionId, accountTyp
   }, [orderedSnapshots])
 
   useEffect(() => {
-    if (selectedSku !== 'all' && !skuOptions.some((sku) => sku.id === selectedSku)) setSelectedSku('all')
+    if (selectedSku.startsWith('group:')) {
+      const groupIndex = Number(selectedSku.slice(6))
+      if (!Number.isInteger(groupIndex) || groupIndex < 0 || groupIndex * 8 >= Math.max(1, skuOptions.length)) setSelectedSku('group:0')
+      return
+    }
+    if (!skuOptions.some((sku) => sku.id === selectedSku)) setSelectedSku('group:0')
   }, [selectedSku, skuOptions])
 
-  const visibleSkus = selectedSku === 'all' ? skuOptions.slice(0, 8) : skuOptions.filter((sku) => sku.id === selectedSku)
+  const skuGroups = useMemo(() => Array.from({ length: Math.ceil(skuOptions.length / 8) }, (_, index) => skuOptions.slice(index * 8, index * 8 + 8)), [skuOptions])
+  const selectedGroup = selectedSku.startsWith('group:') ? Number(selectedSku.slice(6)) || 0 : -1
+  const visibleSkus = selectedGroup >= 0 ? skuGroups[selectedGroup] || [] : skuOptions.filter((sku) => sku.id === selectedSku)
   const chartData = orderedSnapshots.map((snapshot) => {
     const capturedAt = new Date(snapshot.capturedAt)
     const point: Record<string, string | number> = {
@@ -65,11 +95,8 @@ export function SkuPriceTrend({ snapshots, product, accountSessionId, accountTyp
     }
     for (const sku of snapshot.skuPrices || []) {
       const accountView = accountPriceViewForSku(sku, accountSessionId, accountType)
-      const snapshotAccountType = snapshot.primaryAccountType
-        || snapshot.accountCaptures?.find((capture) => capture.sessionId === snapshot.primaryAccountSessionId)?.accountType
-        || product.accountType
-      if (accountSessionId && !accountView && snapshotAccountType && snapshotAccountType !== accountType) continue
-      const value = priceForMode(accountView ? skuForAccountView(sku, accountSessionId, accountType) : sku, priceMode)
+      if (accountSessionId && !accountView) continue
+      const value = priceForMode(accountView ? skuForAccountView(sku, accountSessionId, accountType) : sku, priceMode, accountType)
       if (typeof value === 'number') point[sku.skuId] = value
     }
     return point
@@ -98,7 +125,7 @@ export function SkuPriceTrend({ snapshots, product, accountSessionId, accountTyp
             className="h-9 w-full rounded-md border border-slate-200 bg-white px-2 text-sm text-slate-700 outline-none focus:border-sky-400 sm:max-w-[300px]"
             aria-label="选择趋势图 SKU"
           >
-            <option value="all">全部 SKU</option>
+            {skuGroups.map((group, index) => <option key={`group-${index}`} value={`group:${index}`}>{skuGroups.length === 1 ? `全部 SKU（${group.length}）` : `SKU 第 ${index + 1} 组（${index * 8 + 1}-${index * 8 + group.length}）`}</option>)}
             {skuOptions.map((sku) => <option key={sku.id} value={sku.id}>{sku.name} · {sku.id}</option>)}
           </select>
         </div>
@@ -124,8 +151,9 @@ export function SkuPriceTrend({ snapshots, product, accountSessionId, accountTyp
                 contentStyle={{ borderRadius: 6, borderColor: '#cbd5e1', fontSize: '0.75rem' }}
               />
               {visibleSkus.length > 1 && <Legend wrapperStyle={{ fontSize: '0.75rem', paddingTop: 8 }} />}
-              {visibleSkus.map((sku, index) => {
-                const threshold = product.skuMonitorPrices?.[sku.id]
+              {showMonitorThresholds && visibleSkus.map((sku, index) => {
+                const monitorChannel = monitorChannelForMode[priceMode]
+                const threshold = product.skuMonitorRules?.[sku.id]?.[monitorChannel] ?? (monitorChannel === 'lowest' ? product.skuMonitorPrices?.[sku.id] : undefined)
                 return typeof threshold === 'number' && threshold > 0 ? (
                   <ReferenceLine key={`monitor-${sku.id}`} y={threshold} stroke={lineColors[index % lineColors.length]} strokeDasharray="5 4" strokeOpacity={0.55} label={visibleSkus.length === 1 ? { value: `监控价 ${currency(threshold)}`, fill: '#b45309', fontSize: 10, position: 'insideTopRight' } : undefined} />
                 ) : null

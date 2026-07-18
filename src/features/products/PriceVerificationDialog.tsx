@@ -3,13 +3,15 @@ import { useEffect } from 'react'
 import { createPortal } from 'react-dom'
 import { currency } from '../../lib/utils'
 import type { Product, Snapshot } from '../../types/domain'
-import { publicPriceLabelForSku, skuForAccountView } from './productDisplayUtils'
+import { accountPriceViewForSku, publicPriceLabelForSku, skuForAccountView } from './productDisplayUtils'
 
 type Sku = Snapshot['skuPrices'][number]
-type Channel = 'normal' | 'government' | 'surprise' | 'gift' | 'vip88' | 'coin'
+type Channel = 'normal' | 'billion' | 'seckill' | 'government' | 'surprise' | 'gift' | 'vip88' | 'coin'
 
 const channels: Array<{ key: Channel; label: string; value: (sku: Sku) => number | null | undefined; formula: keyof NonNullable<Sku['priceCalculation']> }> = [
   { key: 'normal', label: '普通价', value: (sku) => sku.normalPrice ?? sku.price, formula: 'normal' },
+  { key: 'billion', label: '百亿补贴价', value: (sku) => sku.billionPrice, formula: 'billion' },
+  { key: 'seckill', label: '淘宝秒杀价', value: (sku) => sku.seckillPrice, formula: 'seckill' },
   { key: 'government', label: '国补价', value: (sku) => sku.governmentPrice, formula: 'government' },
   { key: 'surprise', label: '惊喜立减价', value: (sku) => sku.surprisePrice, formula: 'surprise' },
   { key: 'gift', label: '礼金价', value: (sku) => sku.giftPrice, formula: 'gift' },
@@ -35,7 +37,11 @@ function inspectChannel(sku: Sku, channel: (typeof channels)[number]) {
 }
 
 export function PriceVerificationDialog({ product, accountSessionId, accountType, accountName, onClose }: { product: Product; accountSessionId: string; accountType: NonNullable<Product['accountType']>; accountName: string; onClose: () => void }) {
-  const skus = (product.lastSnapshot?.skuPrices || []).map((sku) => skuForAccountView(sku, accountSessionId, accountType))
+  const skus = (product.lastSnapshot?.skuPrices || []).flatMap((sku) => (
+    accountSessionId && !accountPriceViewForSku(sku, accountSessionId, accountType)
+      ? []
+      : [skuForAccountView(sku, accountSessionId, accountType)]
+  ))
   const inspections = skus.flatMap((sku) => channels.map((channel) => inspectChannel(sku, channel)))
   const verifiedCount = inspections.filter((item) => item.matches).length
   const mismatchCount = inspections.filter((item) => item.verified && !item.matches).length
@@ -76,7 +82,7 @@ export function PriceVerificationDialog({ product, accountSessionId, accountType
                 <div className="min-w-0 text-sm font-semibold text-slate-900"><span className="line-clamp-2">{sku.name}</span></div>
                 <div className="text-xs tabular-nums text-slate-400">SKU ID {sku.skuId}</div>
               </div>
-              <div className="mt-3 grid gap-2 md:grid-cols-3 xl:grid-cols-6">
+              <div className="mt-3 grid gap-2 md:grid-cols-3 xl:grid-cols-4">
                 {channels.map((channel) => {
                   const item = inspectChannel(sku, channel)
                   const unavailable = !item.verified

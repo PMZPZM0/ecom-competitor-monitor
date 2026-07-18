@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from 'react'
 import { ChevronLeft, ChevronRight } from 'lucide-react'
 import { Badge } from '../../components/ui/badge'
-import type { Overview, Product } from '../../types/domain'
+import type { MonitorChannel, Overview, Product, ProductCaptureOptions } from '../../types/domain'
 import { ImagePreview, type Preview } from './productDisplay'
 import { ProductMonitorCard } from './ProductMonitorCard'
 import { productSortOptions, sortProducts, type ProductSortKey } from './productSort'
@@ -12,8 +12,8 @@ type Props = {
   onToggle: (product: Product) => Promise<void>
   onSchedule: (product: Product, mode: NonNullable<Product['monitorScheduleMode']>, intervalMinutes: number, monitorStartAt: string | null) => Promise<void>
   onMediaPreference: (product: Product, captureMediaAssets: boolean) => Promise<void>
-  onSaveSkuMonitorPrice: (product: Product, skuId: string, value: number | null) => Promise<void>
-  onCapture: (product: Product) => Promise<Product | void>
+  onSaveSkuMonitorPrice: (product: Product, skuId: string, value: number | null, channel?: MonitorChannel) => Promise<void>
+  onCapture: (product: Product, options?: ProductCaptureOptions) => Promise<Product | void>
   onRetryBuyerShows: (product: Product) => Promise<Product>
   onLocalImport: (product?: Product) => void
   onDelete: (product: Product) => Promise<void>

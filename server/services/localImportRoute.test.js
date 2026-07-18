@@ -44,7 +44,13 @@ test("local import routes reject cross-site writes and commit verified prices id
   const baseUrl = `http://127.0.0.1:${address.port}`;
   const itemId = "843315272530";
   const skuId = "6198474471099";
-  const content = `mtopjsonp1(${JSON.stringify(priceResponse(skuId))})`;
+  const content = JSON.stringify({
+    itemId,
+    request: {
+      url: `https://h5api.m.tmall.com/h5/mtop.taobao.pcdetail.data.adjust/1.0/?data=${encodeURIComponent(JSON.stringify({ itemId, skuId }))}`,
+      body: priceResponse(skuId),
+    },
+  });
   const previewUrl = `${baseUrl}/api/local-imports/preview?accountType=normal&itemIdHint=${itemId}`;
 
   try {
@@ -54,6 +60,20 @@ test("local import routes reject cross-site writes and commit verified prices id
       body: content,
     });
     assert.equal(blocked.status, 403);
+
+    const barePreview = await jsonRequest(previewUrl, {
+      method: "POST",
+      headers: { "content-type": "text/plain" },
+      body: `mtopjsonp1(${JSON.stringify(priceResponse(skuId))})`,
+    });
+    assert.equal(barePreview.status, 201);
+    assert.equal(barePreview.body.canCommit, false);
+    const bareCommit = await jsonRequest(`${baseUrl}/api/local-imports/${barePreview.body.importId}/commit`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: "{}",
+    });
+    assert.equal(bareCommit.status, 409);
 
     const missingBrowserSession = await jsonRequest(`${baseUrl}/api/raw-data/capture`, {
       method: "POST",
@@ -166,7 +186,13 @@ test("local import routes reject cross-site writes and commit verified prices id
     const existingPreview = await jsonRequest(`${baseUrl}/api/local-imports/preview?accountType=normal&itemIdHint=${existingItemId}`, {
       method: "POST",
       headers: { "content-type": "text/plain" },
-      body: `mtopjsonp1(${JSON.stringify(priceResponse(existingSkuId))})`,
+      body: JSON.stringify({
+        itemId: existingItemId,
+        request: {
+          url: `https://h5api.m.tmall.com/h5/mtop.taobao.pcdetail.data.adjust/1.0/?data=${encodeURIComponent(JSON.stringify({ itemId: existingItemId, skuId: existingSkuId }))}`,
+          body: priceResponse(existingSkuId),
+        },
+      }),
     });
     const existingCommit = await jsonRequest(`${baseUrl}/api/local-imports/${existingPreview.body.importId}/commit`, { method: "POST" });
     assert.equal(existingCommit.status, 200);

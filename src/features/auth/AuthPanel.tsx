@@ -4,7 +4,6 @@ import { api } from '../../lib/api'
 import { Button } from '../../components/ui/button'
 import { Card, CardContent, CardHeader, CardTitle } from '../../components/ui/card'
 import { Input } from '../../components/ui/input'
-import { Badge } from '../../components/ui/badge'
 import type { AuthSession } from '../../types/domain'
 
 type Props = {
@@ -22,9 +21,9 @@ export function AuthPanel({ sessions, onSaved, onActivate, onDelete }: Props) {
   const [busy, setBusy] = useState('')
   const checkingScan = useRef(false)
   const accountGroups = [
-    { type: 'normal' as const, title: '普通账号', description: '采集正常前台活动价', icon: UserRoundCheck, color: 'sky' },
-    { type: 'vip88' as const, title: '88VIP 账号', description: '采集 88VIP 专享价格', icon: Crown, color: 'violet' },
-    { type: 'gift' as const, title: '礼金账号', description: '采集首单礼金与新人价格', icon: Gift, color: 'amber' },
+    { type: 'normal' as const, title: '普通账号', icon: UserRoundCheck, color: 'sky' },
+    { type: 'vip88' as const, title: '88VIP 账号', icon: Crown, color: 'violet' },
+    { type: 'gift' as const, title: '礼金账号', icon: Gift, color: 'amber' },
   ]
 
   async function openOAuth() {
@@ -51,7 +50,7 @@ export function AuthPanel({ sessions, onSaved, onActivate, onDelete }: Props) {
         const result = await api.taobaoScanStatus(pendingProfileKey)
         if (result.status === 'synced' && !cancelled) {
           setPendingProfileKey('')
-          setMessage(`${result.session?.name || '淘宝账号'}已授权并同步，账号浏览器已转入后台。`)
+          setMessage(`${result.session?.name || '淘宝账号'}的淘宝登录已同步；天猫价格能力将在首次真实商品抓取后确认。`)
           await onSaved()
         } else if (result.status === 'cancelled' && !cancelled) {
           setPendingProfileKey('')
@@ -130,8 +129,8 @@ export function AuthPanel({ sessions, onSaved, onActivate, onDelete }: Props) {
   }
 
   return (
-    <div className="grid gap-5 2xl:grid-cols-[420px_minmax(0,1fr)]">
-      <Card>
+    <div className="auth-panel grid min-w-0 gap-5">
+      <Card className="min-w-0">
         <CardHeader>
           <CardTitle className="flex items-center gap-2">
             <ShieldCheck className="h-4 w-4 text-emerald-600" />
@@ -143,7 +142,7 @@ export function AuthPanel({ sessions, onSaved, onActivate, onDelete }: Props) {
           <div className="mb-2 font-medium">扫码授权登录</div>
           <p className="leading-6">每个账号使用独立 Chrome 登录目录。普通、礼金和 88VIP 各自组成账号池，抓取时按健康状态自动轮换。</p>
         </div>
-        <div className="grid grid-cols-[1fr_180px] gap-2">
+        <div className="auth-account-form-fields grid gap-2">
           <Input value={name} onChange={(event) => setName(event.target.value)} placeholder="账号备注" />
           <select value={accountType} onChange={(event) => setAccountType(event.target.value as 'normal' | 'gift' | 'vip88')} className="h-10 rounded-md border border-slate-200 bg-white px-3 text-sm text-slate-700">
             <option value="normal">普通前台账号</option>
@@ -167,71 +166,54 @@ export function AuthPanel({ sessions, onSaved, onActivate, onDelete }: Props) {
         </CardContent>
       </Card>
 
-      <Card>
-        <CardHeader className="flex flex-row items-start justify-between gap-4">
+      <Card className="min-w-0 overflow-hidden">
+        <CardHeader className="flex flex-row flex-wrap items-center justify-between gap-3">
           <div>
             <CardTitle>已授权登录账号</CardTitle>
             <div className="mt-1 text-sm text-slate-500">{sessions.length} 个账号 · {sessions.filter((session) => session.source === 'taobao-browser' && (session.enabled ?? session.active)).length} 个参与采价</div>
           </div>
-          <div className="flex items-center gap-2">
-            <Badge>{sessions.filter((session) => session.source === 'taobao-browser').length} 个独立扫码会话</Badge>
-            <Button type="button" size="sm" variant="secondary" onClick={checkAllSessions} disabled={Boolean(busy) || Boolean(pendingProfileKey)}>
-              <RefreshCw className={`h-4 w-4 ${busy === 'check-all' ? 'animate-spin' : ''}`} />
-              {busy === 'check-all' ? '检测中' : '一键检测全部'}
-            </Button>
-          </div>
+          <Button type="button" size="sm" variant="secondary" onClick={checkAllSessions} disabled={Boolean(busy) || Boolean(pendingProfileKey)}>
+            <RefreshCw className={`h-4 w-4 ${busy === 'check-all' ? 'animate-spin' : ''}`} />
+            {busy === 'check-all' ? '检测中' : '一键检测全部'}
+          </Button>
         </CardHeader>
-        <CardContent className="grid gap-3 xl:grid-cols-3">
-          {accountGroups.flatMap((group) => {
-            const groupSessions = sessions.filter((session) => (session.accountType || 'normal') === group.type)
-            const cardSessions = groupSessions.length ? groupSessions : [null]
-            const Icon = group.icon
-            const panelClass = group.color === 'violet' ? 'border-violet-100 bg-violet-50/40' : group.color === 'amber' ? 'border-amber-100 bg-amber-50/40' : 'border-sky-100 bg-sky-50/40'
-            const iconClass = group.color === 'violet' ? 'text-violet-600' : group.color === 'amber' ? 'text-amber-600' : 'text-sky-600'
-            return cardSessions.map((session) => (
-              <section key={session?.id || group.type} className={`min-w-0 rounded-md border p-3 ${panelClass}`}>
-                <div className="mb-3 flex items-start justify-between gap-2">
+        <CardContent className="min-w-0">
+          <div className="auth-session-grid grid min-w-0 items-start gap-2">
+            {sessions.map((session) => {
+              const group = accountGroups.find((item) => item.type === (session.accountType || 'normal')) || accountGroups[0]
+              const Icon = group.icon
+              const panelClass = group.color === 'violet' ? 'border-violet-100 bg-violet-50/35' : group.color === 'amber' ? 'border-amber-100 bg-amber-50/35' : 'border-sky-100 bg-sky-50/35'
+              const iconClass = group.color === 'violet' ? 'text-violet-600' : group.color === 'amber' ? 'text-amber-600' : 'text-sky-600'
+              const checkedAt = session.lastCheckedAt || session.lastSuccessAt
+              const checkedTitle = checkedAt ? `最近检测 ${new Date(checkedAt).toLocaleString('zh-CN', { hour12: false })}` : '尚未检测登录状态'
+              return (
+                <section key={session.id} className={`min-w-0 rounded-md border p-2.5 ${panelClass}`}>
                   <div className="flex items-start gap-2">
-                    <Icon className={`mt-0.5 h-4 w-4 ${iconClass}`} />
-                    <div>
-                      <div className="text-sm font-semibold text-slate-900">{group.title}</div>
-                      <div className="mt-0.5 text-[11px] text-slate-500">{group.description}</div>
+                    <span className="flex h-7 w-7 shrink-0 items-center justify-center rounded-md bg-white/80"><Icon className={`h-3.5 w-3.5 ${iconClass}`} /></span>
+                    <div className="min-w-0 flex-1">
+                      <div className="flex min-w-0 items-center gap-2"><span className="truncate text-sm font-semibold text-slate-950" title={session.name}>{session.name}</span><span className="shrink-0 text-[11px] text-slate-500">{group.title}</span></div>
+                      <div className="mt-1 flex flex-wrap gap-1 text-[11px] font-medium">
+                        <span title={checkedTitle} className={`inline-flex items-center rounded px-1.5 py-0.5 ${session.loginStatus === 'expired' ? 'bg-red-50 text-red-700' : session.loginStatus === 'valid' ? 'bg-emerald-50 text-emerald-700' : 'bg-white/80 text-slate-500'}`}>{session.source !== 'taobao-browser' ? '旧 Cookie' : session.loginStatus === 'expired' ? '登录失效' : session.loginStatus === 'valid' ? '在线' : '未检测'}</span>
+                        <span className={`inline-flex items-center rounded px-1.5 py-0.5 ${session.source === 'taobao-browser' && (session.enabled ?? session.active) ? 'bg-blue-50 text-blue-700' : 'bg-white/80 text-slate-500'}`}>{session.source === 'taobao-browser' && (session.enabled ?? session.active) ? '采价中' : '已停用'}</span>
+                        {session.source === 'taobao-browser' && <span className={`inline-flex items-center rounded px-1.5 py-0.5 ${session.tmallPriceStatus === 'valid' ? 'bg-emerald-50 text-emerald-700' : session.tmallPriceStatus === 'cooldown' ? 'bg-amber-50 text-amber-700' : 'bg-white/80 text-slate-500'}`}>{session.tmallPriceStatus === 'valid' ? '价格已验证' : session.tmallPriceStatus === 'cooldown' ? '价格冷却' : '价格待验证'}</span>}
+                        {session.healthStatus === 'degraded' && <span className="inline-flex items-center rounded bg-amber-50 px-1.5 py-0.5 text-amber-700">抓取异常</span>}
+                      </div>
                     </div>
+                    <Button type="button" size="sm" variant="danger" className="h-7 w-7 shrink-0 p-0" onClick={() => onDelete(session)} disabled={Boolean(busy) || Boolean(pendingProfileKey)} title={`删除账号「${session.name}」`} aria-label={`删除账号「${session.name}」`}><Trash2 className="h-3.5 w-3.5" /></Button>
                   </div>
-                  {session && <Button type="button" size="sm" variant="danger" className="h-8 w-8 shrink-0 p-0" onClick={() => onDelete(session)} disabled={Boolean(busy) || Boolean(pendingProfileKey)} title={`删除账号「${session.name}」`} aria-label={`删除账号「${session.name}」`}><Trash2 className="h-3.5 w-3.5" /></Button>}
-                </div>
-                {session ? <>
-                  <div className="border-t border-white/80 pt-3">
-                    <div className="truncate text-sm font-medium text-slate-900">{session.name}</div>
-                    <div className="mt-1 flex flex-wrap gap-1">
-                      <Badge className="border-slate-200 bg-white/80 text-slate-600">{session.source === 'taobao-browser' ? '独立扫码' : '旧 Cookie'}</Badge>
-                      <Badge className={session.source === 'taobao-browser' && (session.enabled ?? session.active) ? '' : 'border-slate-200 bg-white/80 text-slate-500'}>{session.source !== 'taobao-browser' ? '不参与采价' : session.enabled ?? session.active ? '参与采价' : '已停用'}</Badge>
-                      <Badge className={session.loginStatus === 'expired' ? 'border-red-100 bg-red-50 text-red-700' : session.loginStatus === 'valid' ? 'border-emerald-100 bg-emerald-50 text-emerald-700' : 'border-slate-200 bg-white/80 text-slate-500'}>
-                        {session.source !== 'taobao-browser' ? '请删除并改用扫码' : session.loginStatus === 'expired' ? '登录失效' : session.loginStatus === 'valid' ? '已检测在线' : '登录态未检测'}
-                      </Badge>
-                      <Badge className={session.healthStatus === 'degraded' ? 'border-amber-100 bg-amber-50 text-amber-700' : 'border-emerald-100 bg-emerald-50 text-emerald-700'}>
-                        {session.healthStatus === 'degraded' ? '抓取异常' : '账号池健康'}
-                      </Badge>
+
+                  {session.source === 'taobao-browser' ? (
+                    <div className="mt-1.5 flex flex-wrap items-center gap-1 border-t border-white/80 pt-1.5">
+                      <Button type="button" size="sm" variant="secondary" className="h-7 px-2" onClick={() => checkSession(session)} disabled={Boolean(busy) || Boolean(pendingProfileKey)} title="只检测登录状态，不抓取商品"><RefreshCw className={`h-3.5 w-3.5 ${busy === `check:${session.id}` ? 'animate-spin' : ''}`} />{busy === `check:${session.id}` ? '检测中' : '检测'}</Button>
+                      <Button type="button" size="sm" variant="ghost" className="h-7 px-2" onClick={() => reauthorizeSession(session)} disabled={Boolean(busy) || Boolean(pendingProfileKey)} title="扫码后更新当前账号，不新增重复卡片"><KeyRound className="h-3.5 w-3.5" />重新授权</Button>
+                      <Button type="button" size="sm" variant="ghost" className="ml-auto h-7 px-2" onClick={() => onActivate(session)} disabled={Boolean(busy) || Boolean(pendingProfileKey)}>{session.enabled ?? session.active ? '停用' : '启用'}</Button>
                     </div>
-                    {session.lastSuccessAt && <div className="mt-1 text-[11px] text-slate-400">上次成功 {new Date(session.lastSuccessAt).toLocaleString('zh-CN', { hour12: false })}</div>}
-                    {session.lastCheckedAt && <div className="mt-1 text-[11px] text-slate-400">最后检测 {new Date(session.lastCheckedAt).toLocaleString('zh-CN', { hour12: false })}</div>}
-                  </div>
-                  {session.source === 'taobao-browser' ? <div className="mt-3 flex flex-wrap gap-1.5 border-t border-white/80 pt-3">
-                    <Button type="button" size="sm" variant="secondary" onClick={() => checkSession(session)} disabled={Boolean(busy) || Boolean(pendingProfileKey)} title="只检测登录状态，不抓取商品">
-                      <RefreshCw className={`h-3.5 w-3.5 ${busy === `check:${session.id}` ? 'animate-spin' : ''}`} />
-                      {busy === `check:${session.id}` ? '检测中' : '检测登录'}
-                    </Button>
-                    <Button type="button" size="sm" variant="ghost" onClick={() => reauthorizeSession(session)} disabled={Boolean(busy) || Boolean(pendingProfileKey)} title="扫码后更新当前账号，不新增重复卡片">
-                      <KeyRound className="h-3.5 w-3.5" />重新授权
-                    </Button>
-                    <Button type="button" size="sm" variant="ghost" className="flex-1" onClick={() => onActivate(session)} disabled={Boolean(busy) || Boolean(pendingProfileKey)}>
-                      {session.enabled ?? session.active ? '停用采价' : '启用采价'}
-                    </Button>
-                  </div> : <div className="mt-3 border-t border-white/80 pt-3 text-xs leading-5 text-slate-500">旧 Cookie 无法可靠验证身份，已停止参与价格监控。删除后使用左侧扫码授权。</div>}
-                </> : <div className="rounded-md border border-dashed border-slate-200 bg-white/70 px-3 py-8 text-center text-xs text-slate-400">尚未授权</div>}
-              </section>
-            ))
-          })}
+                  ) : <div className="mt-1.5 border-t border-white/80 pt-1.5 text-xs text-slate-500">旧 Cookie 不参与价格监控，请删除后改用扫码授权。</div>}
+                </section>
+              )
+            })}
+            {sessions.length === 0 && <div className="rounded-md border border-dashed border-slate-200 bg-slate-50 px-4 py-8 text-center text-sm text-slate-400">还没有授权账号，请先在上方打开扫码登录。</div>}
+          </div>
         </CardContent>
       </Card>
     </div>

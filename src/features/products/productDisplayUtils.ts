@@ -2,11 +2,11 @@ import { currency } from '../../lib/utils'
 import type { Product } from '../../types/domain'
 
 export type SkuPrice = NonNullable<Product['lastSnapshot']>['skuPrices'][number]
+export type VerifiedPriceChannel = 'normal' | 'billion' | 'seckill' | 'government' | 'surprise' | 'gift' | 'vip88' | 'coin'
 
 export function accountPriceViewForSku(sku: SkuPrice, sessionId = '', accountType?: Product['accountType']) {
-  return sku.accountPrices?.find((view) => view.sessionId === sessionId)
-    || sku.accountPrices?.find((view) => view.accountType === accountType)
-    || null
+  if (sessionId) return sku.accountPrices?.find((view) => view.sessionId === sessionId) || null
+  return sku.accountPrices?.find((view) => view.accountType === accountType) || null
 }
 
 export function skuForAccountView(sku: SkuPrice, sessionId = '', accountType?: Product['accountType']): SkuPrice {
@@ -16,6 +16,10 @@ export function skuForAccountView(sku: SkuPrice, sessionId = '', accountType?: P
     ...sku,
     ...view,
     normalPrice: view.normalPrice ?? view.price,
+    billionPrice: view.billionPrice ?? null,
+    billionStatus: view.billionStatus ?? 'none',
+    seckillPrice: view.seckillPrice ?? null,
+    seckillStatus: view.seckillStatus ?? 'none',
     governmentPrice: view.governmentPrice ?? null,
     governmentStatus: view.governmentStatus ?? 'none',
     governmentDiscountAmount: view.governmentDiscountAmount ?? null,
@@ -46,11 +50,19 @@ export function skuForAccountView(sku: SkuPrice, sessionId = '', accountType?: P
   }
 }
 
-export function verifiedPriceChannel(sku: SkuPrice, channel: 'normal' | 'government' | 'surprise' | 'gift' | 'vip88' | 'coin') {
-  return sku.resolutionStatus === 'verified' && sku.priceResolution?.channels?.[channel]?.status === 'verified'
+export function verifiedPriceValue(sku: SkuPrice, channel: VerifiedPriceChannel) {
+  const resolution = sku.priceResolution?.channels?.[channel]
+  return resolution?.status === 'verified' && Number.isSafeInteger(resolution.valueCents) && Number(resolution.valueCents) > 0
+    ? Number(resolution.valueCents) / 100
+    : null
+}
+
+export function verifiedPriceChannel(sku: SkuPrice, channel: VerifiedPriceChannel) {
+  return verifiedPriceValue(sku, channel) !== null
 }
 
 export function displayPriceLabel(rawLabel = '', accountType?: Product['accountType']) {
+  if (/百亿补贴|billion/i.test(rawLabel)) return '百亿补贴价'
   if (/秒杀/.test(rawLabel)) return '淘宝秒杀价'
   if (/政府补贴|国家补贴|国补/.test(rawLabel)) return '国补价'
   if (/惊喜立减|惊喜价/.test(rawLabel)) return '惊喜立减价'
@@ -67,29 +79,31 @@ export function displayPriceLabel(rawLabel = '', accountType?: Product['accountT
 }
 
 export function publicPriceLabelForSku(sku: SkuPrice) {
-  return /秒杀/.test(`${sku.priceTitle || ''} ${sku.priceCalculation?.normal || ''}`) ? '淘宝秒杀价' : '普通价'
+  const resolutionLabel = (sku.priceResolution as (typeof sku.priceResolution & { normalLabel?: string }) | undefined)?.normalLabel || ''
+  const source = `${sku.priceTitle || ''} ${resolutionLabel} ${sku.priceCalculation?.normal || ''}`
+  if (/百亿补贴|billion/i.test(source)) return '百亿补贴价'
+  if (/秒杀|seckill/i.test(source)) return '淘宝秒杀价'
+  return '普通价'
 }
 
 export function normalPriceForSku(sku: SkuPrice) {
+  const verified = verifiedPriceValue(sku, 'normal')
+  if (verified !== null) return verified
   if (sku.normalPrice) return sku.normalPrice
   const normalLayer = sku.priceLayers?.find((layer) => (
     layer.kind !== 'discount' &&
     layer.kind !== 'original' &&
-    !/政府补贴|国家补贴|国补|淘金币|金币|首单|礼金|88|会员|VIP/i.test(layer.label)
+    !/政府补贴|国家补贴|国补|百亿补贴|秒杀|淘金币|金币|首单|礼金|88|会员|VIP/i.test(layer.label)
   ))
   return normalLayer?.value || sku.price
 }
 
 export function coinPriceForSku(sku: SkuPrice) {
-  if (!verifiedPriceChannel(sku, 'coin')) return null
-  if (sku.coinPrice) return sku.coinPrice
-  return sku.priceLayers?.find((layer) => /淘金币|金币/i.test(layer.label))?.value || null
+  return verifiedPriceValue(sku, 'coin')
 }
 
 export function surprisePriceForSku(sku: SkuPrice) {
-  if (!verifiedPriceChannel(sku, 'surprise')) return null
-  if (sku.surprisePrice) return sku.surprisePrice
-  return sku.priceLayers?.find((layer) => /惊喜立减|惊喜价/i.test(layer.label))?.value || null
+  return verifiedPriceValue(sku, 'surprise')
 }
 
 export function surpriseBenefitForSku(sku: SkuPrice) {
@@ -107,7 +121,7 @@ export function surpriseBenefitForSku(sku: SkuPrice) {
 export function accountBenefitForSku(sku: SkuPrice, accountType: Product['accountType']) {
   if (accountType === 'gift') {
     if (!verifiedPriceChannel(sku, 'gift')) return { label: '礼金价', available: false, price: null, discountAmount: null }
-    const price = sku.giftPrice || sku.accountPrices?.find((item) => item.accountType === 'gift')?.giftPrice || null
+    const price = verifiedPriceValue(sku, 'gift')
     const normalPrice = normalPriceForSku(sku)
     const discountAmount = Number(sku.giftDiscountAmount) > 0
       ? Number(sku.giftDiscountAmount)
@@ -116,7 +130,7 @@ export function accountBenefitForSku(sku: SkuPrice, accountType: Product['accoun
   }
   if (accountType === 'vip88') {
     if (!verifiedPriceChannel(sku, 'vip88')) return { label: '88VIP价', available: false, price: null, discountAmount: null }
-    const price = sku.vipPrice || sku.accountPrices?.find((item) => item.accountType === 'vip88')?.vipPrice || null
+    const price = verifiedPriceValue(sku, 'vip88')
     const normalPrice = normalPriceForSku(sku)
     const discountAmount = Number(sku.vipDiscountAmount) > 0
       ? Number(sku.vipDiscountAmount)
@@ -149,6 +163,14 @@ export function productHasCoinBenefit(product: Product) {
 }
 
 export function priceLayersForSku(sku: SkuPrice, options: { includeOriginal?: boolean } = {}) {
+  const normalPrice = verifiedPriceValue(sku, 'normal')
+  const billionPrice = verifiedPriceValue(sku, 'billion')
+  const seckillPrice = verifiedPriceValue(sku, 'seckill')
+  const governmentPrice = verifiedPriceValue(sku, 'government')
+  const surprisePrice = verifiedPriceValue(sku, 'surprise')
+  const giftPrice = verifiedPriceValue(sku, 'gift')
+  const vipPrice = verifiedPriceValue(sku, 'vip88')
+  const coinPrice = verifiedPriceValue(sku, 'coin')
   const capturedLayers = sku.priceLayers?.length
     ? sku.priceLayers
     : [
@@ -156,17 +178,19 @@ export function priceLayersForSku(sku: SkuPrice, options: { includeOriginal?: bo
         ...(sku.originalPrice && sku.originalPrice !== sku.price ? [{ label: '优惠前', value: sku.originalPrice, kind: 'original' as const }] : []),
       ]
   const layers = [
-    ...(sku.normalPrice ? [{ label: publicPriceLabelForSku(sku), value: sku.normalPrice, kind: 'price' as const, source: 'normalized' }] : []),
-    ...(sku.governmentPrice ? [{ label: '国补价', value: sku.governmentPrice, kind: 'price' as const, source: 'normalized' }] : []),
-    ...(sku.surprisePrice ? [{ label: '惊喜立减价', value: sku.surprisePrice, kind: 'price' as const, source: 'normalized' }] : []),
-    ...(sku.giftPrice ? [{ label: '礼金价', value: sku.giftPrice, kind: 'price' as const, source: 'normalized' }] : []),
-    ...(sku.vipPrice ? [{ label: '88VIP价', value: sku.vipPrice, kind: 'price' as const, source: 'normalized' }] : []),
-    ...(sku.coinPrice ? [{ label: '淘金币价', value: sku.coinPrice, kind: 'price' as const, source: 'normalized' }] : []),
+    ...(normalPrice ? [{ label: publicPriceLabelForSku(sku), value: normalPrice, kind: 'price' as const, source: 'normalized' }] : []),
+    ...(billionPrice ? [{ label: '百亿补贴价', value: billionPrice, kind: 'price' as const, source: 'normalized' }] : []),
+    ...(seckillPrice ? [{ label: '淘宝秒杀价', value: seckillPrice, kind: 'price' as const, source: 'normalized' }] : []),
+    ...(governmentPrice ? [{ label: '国补价', value: governmentPrice, kind: 'price' as const, source: 'normalized' }] : []),
+    ...(surprisePrice ? [{ label: '惊喜立减价', value: surprisePrice, kind: 'price' as const, source: 'normalized' }] : []),
+    ...(giftPrice ? [{ label: '礼金价', value: giftPrice, kind: 'price' as const, source: 'normalized' }] : []),
+    ...(vipPrice ? [{ label: '88VIP价', value: vipPrice, kind: 'price' as const, source: 'normalized' }] : []),
+    ...(coinPrice ? [{ label: '淘金币价', value: coinPrice, kind: 'price' as const, source: 'normalized' }] : []),
     ...capturedLayers,
   ]
   const order = (label: string, kind?: string) => {
     if (kind === 'original' || label === '标价') return 0
-    if (/普通价|秒杀价|店铺优惠后|到手价|券后|平台/.test(label)) return 1
+    if (/普通价|秒杀价|百亿补贴价|店铺优惠后|到手价|券后|平台/.test(label)) return 1
     if (/政府补贴|国家补贴|国补/.test(label)) return 2
     if (/惊喜立减|惊喜价/.test(label)) return 3
     if (/首单|礼金/.test(label)) return 4
@@ -191,6 +215,8 @@ export function priceLayersForSku(sku: SkuPrice, options: { includeOriginal?: bo
 export function layerClass(kind?: string, label?: string) {
   if (kind === 'original' || label === '优惠前' || label === '标价') return 'border-slate-200 bg-white text-slate-400'
   if (/88\s*VIP/i.test(label || '')) return 'border-violet-100 bg-violet-50 text-violet-700'
+  if (/百亿补贴|billion/i.test(label || '')) return 'border-indigo-100 bg-indigo-50 text-indigo-700'
+  if (/秒杀|seckill/i.test(label || '')) return 'border-fuchsia-100 bg-fuchsia-50 text-fuchsia-700'
   if (/礼金/.test(label || '')) return 'border-orange-100 bg-orange-50 text-orange-700'
   if (/淘金币|金币/.test(label || '')) return 'border-amber-100 bg-amber-50 text-amber-700'
   if (/惊喜立减|惊喜价/.test(label || '')) return 'border-rose-100 bg-rose-50 text-rose-700'

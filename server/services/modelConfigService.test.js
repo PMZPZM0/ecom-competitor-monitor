@@ -1,12 +1,16 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
+  classifyAvailableModels,
+  discoverAvailableModels,
+  ModelApiError,
   MODEL_CHANNELS,
   normalizeModelBaseUrl,
   publicModelConfig,
   recordModelTestResult,
   resolveModelConfig,
   testImageModel,
+  testPromptModel,
   updateModelConfig,
 } from "./modelConfigService.js";
 
@@ -55,6 +59,7 @@ test("public model config masks secrets and reports saved or environment sources
   assert.equal(publicSaved.apiKeyMasked, "sk-sav...1234");
   assert.equal(JSON.stringify(publicSaved).includes("sk-saved-private-1234"), false);
   assert.equal("apiKey" in publicSaved, false);
+  assert.equal(publicSaved.lastTestTarget, null);
 
   const publicEnvironment = publicModelConfig({}, { env: { ...env, MODEL_STABLE_API_KEY: "sk-environment-private" } });
   assert.equal(publicEnvironment.apiKeySource, "environment");
@@ -132,19 +137,93 @@ test("legacy baseUrl patches become custom while environment keys never cross ch
   assert.equal(resolveModelConfig({}, { env: { ...env, OPENAI_API_KEY: "must-not-cross" }, channel: "fast" }).apiKey, "");
 });
 
-test("test status belongs to its channel and shared model changes invalidate every channel", () => {
+test("test status and model choices belong to their channel", () => {
   let config = updateModelConfig({}, { channel: "stable", apiKey: "stable" }, { env });
   config = updateModelConfig(config, { channel: "fast", apiKey: "fast" }, { env });
-  config = recordModelTestResult(config, { channel: "stable", status: "success", testedAt: "2026-07-16T00:00:00.000Z" }, { env });
-  config = recordModelTestResult(config, { channel: "fast", status: "failed", testedAt: "2026-07-16T01:00:00.000Z" }, { env });
+  config = recordModelTestResult(config, { channel: "stable", target: "image", status: "success", testedAt: "2026-07-16T00:00:00.000Z" }, { env });
+  config = recordModelTestResult(config, { channel: "fast", target: "prompt", status: "failed", testedAt: "2026-07-16T01:00:00.000Z" }, { env });
+  assert.equal(config.channelStates.stable.lastTestTarget, "image");
+  assert.equal(config.channelStates.stable.testStates.image.lastTestStatus, "success");
+  assert.equal(config.channelStates.fast.lastTestTarget, "prompt");
   config = updateModelConfig(config, { channel: "stable", apiKey: "stable-new" }, { env });
   assert.equal(config.channelStates.stable.lastTestStatus, null);
+  assert.equal(config.channelStates.stable.lastTestTarget, null);
+  assert.equal(config.channelStates.stable.testStates.image.lastTestStatus, null);
   assert.equal(config.channelStates.fast.lastTestStatus, "failed");
+  assert.equal(config.channelStates.fast.lastTestTarget, "prompt");
 
-  config = updateModelConfig(config, { imageModel: "new-image-model" }, { env });
+  config = updateModelConfig(config, { channel: "stable", model: "stable-text", imageModel: "stable-image" }, { env });
   assert.equal(config.channelStates.stable.lastTestStatus, null);
-  assert.equal(config.channelStates.fast.lastTestStatus, null);
+  assert.equal(config.channelStates.fast.lastTestStatus, "failed");
   assert.equal(config.channelStates.custom.lastTestStatus, null);
+  assert.equal(config.channelStates.fast.lastTestTarget, "prompt");
+  config = updateModelConfig(config, { channel: "fast", model: "fast-text", imageModel: "fast-image" }, { env });
+  assert.deepEqual(
+    ["stable", "fast"].map((channel) => {
+      const resolved = resolveModelConfig(config, { env, channel });
+      return [channel, resolved.model, resolved.imageModel];
+    }),
+    [
+      ["stable", "stable-text", "stable-image"],
+      ["fast", "fast-text", "fast-image"],
+    ],
+  );
+  const view = publicModelConfig(config, { env });
+  assert.equal(view.channel, "fast");
+  assert.equal(view.model, "fast-text");
+  assert.equal(view.imageModel, "fast-image");
+  assert.equal(view.channelStates.stable.model, "stable-text");
+  assert.equal(view.channelStates.stable.imageModel, "stable-image");
+  assert.equal(view.channelStates.fast.model, "fast-text");
+  assert.equal(view.channelStates.fast.imageModel, "fast-image");
+});
+
+test("model catalog keeps image generators out of prompt choices", async () => {
+  const classified = classifyAvailableModels([
+    { id: "gpt-5.5" },
+    { id: "gpt-image-2" },
+    { id: "vendor-text", capabilities: { responses: true } },
+    { id: "vendor-art", capabilities: { image_generation: true } },
+    { id: "text-embedding-3-large" },
+    { id: "whisper-1" },
+  ]);
+  assert.deepEqual(classified, {
+    promptModels: ["gpt-5.5", "vendor-text"],
+    imageModels: ["gpt-image-2", "vendor-art"],
+  });
+
+  let requested;
+  const config = updateModelConfig({}, { channel: "fast", apiKey: "sk-fast-catalog", model: "saved-fast-text" }, { env });
+  const result = await discoverAvailableModels(config, {
+    env,
+    now: () => "2026-07-18T00:00:00.000Z",
+    fetchImpl: async (url, init) => {
+      requested = { url, authorization: init.headers.authorization };
+      return new Response(JSON.stringify({ data: [{ id: "fast-text" }, { id: "fast-image-v2" }] }), { status: 200 });
+    },
+  });
+  assert.deepEqual(requested, {
+    url: `${MODEL_CHANNELS.fast.baseUrl}/models`,
+    authorization: "Bearer sk-fast-catalog",
+  });
+  assert.deepEqual(result, {
+    channel: "fast",
+    promptModels: ["fast-text"],
+    imageModels: ["fast-image-v2"],
+    fetchedAt: "2026-07-18T00:00:00.000Z",
+  });
+  assert.equal(resolveModelConfig(config, { env, channel: "fast" }).model, "saved-fast-text");
+});
+
+test("model catalog rejects malformed responses without changing saved models", async () => {
+  const config = updateModelConfig({}, { channel: "stable", apiKey: "sk-stable", model: "saved-text", imageModel: "saved-image" }, { env });
+  await assert.rejects(
+    discoverAvailableModels(config, { env, fetchImpl: async () => new Response(JSON.stringify({ models: [] }), { status: 200 }) }),
+    (error) => error instanceof ModelApiError && error.code === "MODEL_CATALOG_INVALID",
+  );
+  const resolved = resolveModelConfig(config, { env, channel: "stable" });
+  assert.equal(resolved.model, "saved-text");
+  assert.equal(resolved.imageModel, "saved-image");
 });
 
 test("model test uses the image model endpoint without exposing its key", async () => {
@@ -170,6 +249,81 @@ test("model test uses the image model endpoint without exposing its key", async 
     model: "vendor/image-model",
     message: "图片模型基础连接成功（未执行生图）。",
   });
+});
+
+test("prompt model test calls the configured Responses endpoint and validates strict JSON", async () => {
+  const config = updateModelConfig({ baseUrl: "https://models.example.com/v1" }, {
+    model: "vendor/prompt-model",
+    apiKey: "sk-prompt-model-secret",
+  }, { env });
+  let request;
+  const result = await testPromptModel(config, {
+    env,
+    now: () => "2026-07-17T00:00:00.000Z",
+    fetchImpl: async (url, init) => {
+      request = { url, init, body: JSON.parse(init.body) };
+      return new Response(JSON.stringify({ output_text: JSON.stringify({ ok: true }) }), { status: 200 });
+    },
+  });
+
+  assert.equal(request.url, "https://models.example.com/v1/responses");
+  assert.equal(request.init.method, "POST");
+  assert.equal(request.init.headers.authorization, "Bearer sk-prompt-model-secret");
+  assert.equal(request.body.model, "vendor/prompt-model");
+  assert.equal(request.body.text.format.type, "json_schema");
+  assert.equal(request.body.text.format.strict, true);
+  assert.deepEqual(request.body.text.format.schema, {
+    type: "object",
+    properties: { ok: { type: "boolean", enum: [true] } },
+    required: ["ok"],
+    additionalProperties: false,
+  });
+  assert.deepEqual(result, {
+    ok: true,
+    status: "success",
+    testedAt: "2026-07-17T00:00:00.000Z",
+    model: "vendor/prompt-model",
+    message: "提示词模型连接成功。",
+  });
+  assert.equal(JSON.stringify(result).includes("sk-prompt-model-secret"), false);
+});
+
+test("prompt model test rejects non-JSON and invalid structured output", async () => {
+  const config = updateModelConfig({ baseUrl: "https://models.example.com/v1" }, {
+    model: "prompt-model",
+    apiKey: "sk-prompt-invalid-response",
+  }, { env });
+  for (const outputText of ["not-json", JSON.stringify({ ok: false }), JSON.stringify({ ok: true, extra: true })]) {
+    await assert.rejects(
+      testPromptModel(config, {
+        env,
+        fetchImpl: async () => new Response(JSON.stringify({ output_text: outputText }), { status: 200 }),
+      }),
+      (error) => error instanceof ModelApiError
+        && error.code === "MODEL_API_INVALID_RESPONSE"
+        && error.status === 502,
+    );
+  }
+});
+
+test("prompt model test requires a key and redacts it from upstream errors", async () => {
+  await assert.rejects(
+    testPromptModel({ baseUrl: "https://models.example.com/v1" }, { env }),
+    (error) => error.code === "MODEL_API_KEY_MISSING" && error.status === 400,
+  );
+
+  const secret = "sk-prompt-never-leak";
+  const config = updateModelConfig({ baseUrl: "https://models.example.com/v1" }, {
+    model: "prompt-model",
+    apiKey: secret,
+  }, { env });
+  await assert.rejects(
+    testPromptModel(config, {
+      env,
+      fetchImpl: async () => new Response(JSON.stringify({ error: { message: `invalid ${secret}` } }), { status: 401 }),
+    }),
+    (error) => error.status === 401 && !error.message.includes(secret) && error.message.includes("[已隐藏]"),
+  );
 });
 
 test("model test falls back to the model list when a compatible gateway has no detail endpoint", async () => {
@@ -249,11 +403,22 @@ test("upstream and network errors redact model secrets", async () => {
 });
 
 test("recorded model test state is public without exposing storage fields", () => {
-  const recorded = recordModelTestResult({}, { ok: false, testedAt: "2026-07-16T01:00:00.000Z" }, { env });
+  const recorded = recordModelTestResult({}, { target: "prompt", ok: false, testedAt: "2026-07-16T01:00:00.000Z" }, { env });
   const view = publicModelConfig(recorded, { env });
   assert.equal(view.lastTestedAt, "2026-07-16T01:00:00.000Z");
   assert.equal(view.lastTestStatus, "failed");
+  assert.equal(view.lastTestTarget, "prompt");
+  assert.equal(view.channelStates.stable.lastTestTarget, "prompt");
 
-  const unverified = recordModelTestResult(recorded, { status: "unverified" }, { env });
-  assert.equal(publicModelConfig(unverified, { env }).lastTestStatus, "unverified");
+  const unverified = recordModelTestResult(recorded, { target: "image", status: "unverified" }, { env });
+  const unverifiedView = publicModelConfig(unverified, { env });
+  assert.equal(unverifiedView.lastTestStatus, "unverified");
+  assert.equal(unverifiedView.lastTestTarget, "image");
+  assert.equal(unverifiedView.channelStates.stable.testStates.prompt.lastTestStatus, "failed");
+  assert.equal(unverifiedView.channelStates.stable.testStates.prompt.lastTestedAt, "2026-07-16T01:00:00.000Z");
+  assert.equal(unverifiedView.channelStates.stable.testStates.image.lastTestStatus, "unverified");
+
+  const legacy = publicModelConfig({ channelStates: { stable: { lastTestStatus: "success" } } }, { env });
+  assert.equal(legacy.lastTestStatus, "success");
+  assert.equal(legacy.lastTestTarget, null);
 });

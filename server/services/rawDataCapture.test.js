@@ -75,7 +75,7 @@ test("raw data capture writes evidence without mutating products, snapshots, run
       browserEvidenceId: "capture_00000000000000000000000000000000",
       browserEvidenceFile: "capture-evidence/capture_00000000000000000000000000000000.source.txt",
       localFirst: { sourceSaved: true, sourceSanitized: true, parsedFromDisk: true, networkAccessedAfterCapture: false },
-      rawSignals: { verifiedPriceSkuCount: 1 },
+      rawSignals: { observedSkuCount: 1, outputSkuCount: 1, verifiedPriceSkuCount: 1 },
     };
   };
 

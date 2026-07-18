@@ -1,3 +1,10 @@
+export type MonitorChannel = 'lowest' | 'normal' | 'billion' | 'seckill' | 'government' | 'surprise' | 'gift' | 'vip88' | 'coin'
+export type SkuMonitorRules = Record<string, Partial<Record<MonitorChannel, number>>>
+export type ProductCaptureOptions = {
+  accountMode?: 'primary' | 'all'
+  captureKind?: 'price' | 'buyer-show' | 'materials'
+}
+
 export type Product = {
   id: string
   name: string
@@ -22,6 +29,16 @@ export type Product = {
   nextMonitorAt?: string | null
   monitorPrice?: number | null
   skuMonitorPrices?: Record<string, number>
+  skuMonitorRules?: SkuMonitorRules
+  skuLifecycle?: Record<string, {
+    skuId: string
+    name: string
+    image?: string
+    status: 'active' | 'archived'
+    firstSeenAt: string
+    lastSeenAt: string
+    archivedAt?: string | null
+  }>
   enabled: boolean
   mainImage?: string
   lastStatus: 'pending' | 'ok' | 'error'
@@ -44,10 +61,11 @@ export type PriceChannelResolution = {
 export type PriceResolution = {
   status: PriceResolutionStatus
   reason?: string
+  campaignKind?: 'billion' | 'seckill' | null
   normalLabel?: string
   parserVersion?: string
   evidenceHash?: string
-  channels?: Partial<Record<'normal' | 'government' | 'surprise' | 'gift' | 'vip88' | 'coin', PriceChannelResolution>>
+  channels?: Partial<Record<'normal' | 'billion' | 'seckill' | 'government' | 'surprise' | 'gift' | 'vip88' | 'coin', PriceChannelResolution>>
 }
 
 export type PriceEvidence = {
@@ -55,7 +73,7 @@ export type PriceEvidence = {
   itemId: string
   skuId: string
   accountType: 'normal' | 'gift' | 'vip88'
-  kind: 'list' | 'normal' | 'government' | 'surprise' | 'gift' | 'vip88' | 'coin'
+  kind: 'list' | 'normal' | 'billion' | 'seckill' | 'government' | 'surprise' | 'gift' | 'vip88' | 'coin'
   valueCents: number
   source: 'api-explicit' | 'api-formula' | 'selected-dom'
   endpoint: string
@@ -158,6 +176,10 @@ export type Snapshot = {
     image?: string
     price: number
     normalPrice?: number
+    billionPrice?: number | null
+    billionStatus?: 'available' | 'none'
+    seckillPrice?: number | null
+    seckillStatus?: 'available' | 'none'
     governmentPrice?: number | null
     governmentStatus?: 'available' | 'none'
     governmentDiscountAmount?: number | null
@@ -173,8 +195,10 @@ export type Snapshot = {
     coinPrice?: number | null
     coinStatus?: 'available' | 'none'
     coinDiscountAmount?: number | null
-    priceCalculation?: {
+      priceCalculation?: {
       normal: string
+      billion?: string
+      seckill?: string
       government?: string
       surprise: string
       gift?: string
@@ -204,6 +228,12 @@ export type Snapshot = {
     resolutionStatus?: PriceResolutionStatus
     priceResolution?: PriceResolution
     priceEvidence?: PriceEvidence[]
+    stalePrices?: Partial<Record<Exclude<MonitorChannel, 'lowest'>, {
+      value: number
+      verifiedAt: string | null
+      evidenceIds: string[]
+      field: string
+    }>>
     accountPrices?: Array<{
       sessionId: string
       accountName: string
@@ -213,6 +243,10 @@ export type Snapshot = {
       resolutionStatus?: PriceResolutionStatus
       priceResolution?: PriceResolution
       normalPrice?: number
+      billionPrice?: number | null
+      billionStatus?: 'available' | 'none'
+      seckillPrice?: number | null
+      seckillStatus?: 'available' | 'none'
       governmentPrice?: number | null
       governmentStatus?: 'available' | 'none'
       governmentDiscountAmount?: number | null
@@ -232,6 +266,8 @@ export type Snapshot = {
       priceTitle?: string
       priceCalculation?: {
         normal: string
+        billion?: string
+        seckill?: string
         government?: string
         surprise: string
         gift?: string
@@ -253,6 +289,14 @@ export type Snapshot = {
         source?: string
       }>
     }>
+  }>
+  archivedSkuPrices?: Array<{
+    skuId: string
+    name: string
+    image?: string
+    archivedAt?: string
+    resolutionStatus?: PriceResolutionStatus
+    priceResolution?: PriceResolution
   }>
   price: number | null
   priceRange: [number, number] | null
@@ -299,6 +343,13 @@ export type AuthSession = {
   lastFailureAt?: string | null
   consecutiveFailures?: number
   loginStatus?: 'valid' | 'expired'
+  tmallPriceStatus?: 'unknown' | 'valid' | 'cooldown'
+  tmallPriceCheckedAt?: string | null
+  tmallPriceCooldownUntil?: string | null
+  tmallPriceDeviceCooldownUntil?: string | null
+  tmallPriceLastFailureAt?: string | null
+  tmallPriceFailureReason?: string | null
+  tmallPriceFailureCount?: number
   lastCheckedAt?: string | null
   createdAt: string
 }
@@ -339,15 +390,22 @@ export type RunRecord = {
 
 export type CaptureQueueJob = {
   id: string
+  operationType?: 'monitor' | 'product' | 'buyer-show' | 'materials'
+  captureKind?: ProductCaptureOptions['captureKind']
   source: string
   scope: string
-  status: 'queued' | 'running' | 'completed' | 'failed'
-  outcome: 'success' | 'partial' | 'failed' | null
+  status: 'queued' | 'running' | 'auth-required' | 'completed' | 'failed'
+  stage: 'queued' | 'opening' | 'capturing' | 'saving' | 'parsing' | 'verifying' | 'retrying' | 'auth-required' | 'completed' | 'failed'
+  outcome: 'success' | 'partial' | 'failed' | 'cancelled' | null
   productIds: string[]
+  retryProductIds?: string[]
   products: Array<{ id: string; name: string }>
   activeProductIds: string[]
   total: number
   completed: number
+  attempt: number
+  retryIndex: number
+  nextAttemptAt: string | null
   message: string
   error: string
   results: RunItem[]
@@ -360,6 +418,7 @@ export type CaptureQueueStatus = {
   running: boolean
   pendingCount: number
   completedCount: number
+  authRequiredCount?: number
   retentionSeconds: number
   jobs: CaptureQueueJob[]
 }
@@ -367,11 +426,18 @@ export type CaptureQueueStatus = {
 export type ModelChannel = 'stable' | 'fast' | 'custom'
 
 export type ModelChannelState = {
+  model: string
+  imageModel: string
   hasApiKey: boolean
   apiKeyMasked: string
   apiKeySource: 'saved' | 'environment' | 'none'
   lastTestedAt: string | null
   lastTestStatus: 'success' | 'unverified' | 'failed' | null
+  lastTestTarget: ModelConfigTestTarget | null
+  testStates: Record<ModelConfigTestTarget, {
+    lastTestedAt: string | null
+    lastTestStatus: 'success' | 'unverified' | 'failed' | null
+  }>
 }
 
 export type ModelConfig = {
@@ -385,6 +451,7 @@ export type ModelConfig = {
   apiKeySource: 'saved' | 'environment' | 'none'
   lastTestedAt: string | null
   lastTestStatus: 'success' | 'unverified' | 'failed' | null
+  lastTestTarget: ModelConfigTestTarget | null
 }
 
 export type ModelConfigPatch = {
@@ -396,9 +463,25 @@ export type ModelConfigPatch = {
   clearApiKey?: boolean
 }
 
+export type ModelConfigTestTarget = 'image' | 'prompt'
+
+export type ModelConfigTestPayload = Pick<ModelConfigPatch, 'channel' | 'customBaseUrl' | 'model' | 'imageModel' | 'apiKey'> & {
+  target?: ModelConfigTestTarget
+}
+
+export type ModelCatalogRequest = Pick<ModelConfigPatch, 'channel' | 'customBaseUrl' | 'model' | 'imageModel' | 'apiKey'>
+
+export type ModelCatalog = {
+  channel: ModelChannel
+  promptModels: string[]
+  imageModels: string[]
+  fetchedAt: string
+}
+
 export type ModelConfigTestResult = {
   ok: boolean
   status: 'success' | 'unverified'
+  target: ModelConfigTestTarget
   model: string
   channel: ModelChannel
   latencyMs: number
@@ -407,6 +490,7 @@ export type ModelConfigTestResult = {
 }
 
 export type ImageGenerationRequest = {
+  clientRequestId?: string
   prompt: string
   negativePrompt?: string
   ratio: '1:1' | '3:4' | '4:3' | '16:9'
@@ -464,6 +548,34 @@ export type ImageGenerationResponse = {
     nativeSize: string
     outputSize: string
   }
+}
+
+export type ImageGenerationJobStatus = 'queued' | 'running' | 'succeeded' | 'failed' | 'cancelled'
+
+export type ImageGenerationJob = {
+  id: string
+  clientRequestId: string | null
+  status: ImageGenerationJobStatus
+  createdAt: string
+  queuedAt: string
+  updatedAt: string
+  startedAt: string | null
+  completedAt: string | null
+  finishedAt?: string | null
+  attempt: number
+  request: ImageGenerationRequest
+  referenceImageCount: number
+  maskApplied: boolean
+  queuePosition: number | null
+  position?: number | null
+  durationMs?: number | null
+  message?: string
+  result: ImageGenerationResponse | null
+  error: {
+    code: string
+    message: string
+    retryable: boolean
+  } | null
 }
 
 export type PhotoshopOpenResult = {

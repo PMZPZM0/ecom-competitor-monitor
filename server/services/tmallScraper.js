@@ -1,13 +1,10 @@
 import * as cheerio from "cheerio";
 import crypto from "node:crypto";
 import { assertMatchingProductId } from "../utils/productUrl.js";
-import { getRenderedHtml, isTaobaoLoginDocument, isTaobaoLoginUrl } from "./browserService.js";
+import { getRenderedHtml, isTaobaoLoginDocument, isTaobaoLoginUrl, skuIdFromNetworkBody, skuIdFromNetworkUrl } from "./browserService.js";
 import { applyPriceResolution, PRICE_PARSER_VERSION, resolveEmbeddedSkuPriceEvidence, resolveSkuPriceEvidence, selectAuthoritativePriceResolution } from "./priceResolver.js";
 
 export const SCRAPER_VERSION = "2.0.6";
-
-const userAgent =
-  "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126 Safari/537.36";
 
 function cleanImage(url) {
   if (!url) return "";
@@ -25,81 +22,6 @@ function cleanImage(url) {
     .replace(/[?#].*$/, "");
 }
 
-function cookieValue(cookieHeader, name) {
-  const match = String(cookieHeader || "").match(new RegExp(`(?:^|;\\s*)${name}=([^;]*)`));
-  return match?.[1] || "";
-}
-
-function mergeSetCookie(cookieHeader, setCookieHeader) {
-  const cookies = new Map();
-  for (const part of String(cookieHeader || "").split(";")) {
-    const index = part.indexOf("=");
-    if (index > 0) cookies.set(part.slice(0, index).trim(), part.slice(index + 1).trim());
-  }
-  for (const part of String(setCookieHeader || "").split(",")) {
-    const match = part.match(/^\s*([^=;,\s]+)=([^;]*)/);
-    if (match) cookies.set(match[1], match[2].trim());
-  }
-  return Array.from(cookies.entries()).map(([name, value]) => `${name}=${value}`).join("; ");
-}
-
-function mobileApiHost(productUrl) {
-  try {
-    return new URL(productUrl).hostname.match(/(?:^|\\.)([a-z0-9-]+\\.(?:com|hk))$/i)?.[1] || "tmall.com";
-  } catch {
-    return "tmall.com";
-  }
-}
-
-async function fetchMobileDetailData(itemId, authSession, productUrl) {
-  if (!itemId || !authSession?.cookie) return null;
-
-  const api = `https://h5api.m.${mobileApiHost(productUrl)}/h5/mtop.taobao.detail.getdetail/6.0/`;
-  const data = JSON.stringify({ itemNumId: String(itemId), fun: "_getMobileItemDetail" });
-  let cookie = authSession.cookie;
-  let token = cookieValue(cookie, "_m_h5_tk");
-
-  for (let attempt = 0; attempt < 3; attempt += 1) {
-    const timestamp = String(Date.now());
-    const params = {
-      jsv: "2.7.0",
-      appKey: "12574478",
-      t: timestamp,
-      api: "mtop.taobao.detail.getdetail",
-      v: "6.0",
-      ttid: "202012@taobao_h5_9.17.0",
-      ecode: "0",
-      isSec: "0",
-      AntiFlood: "true",
-      AntiCreep: "true",
-      H5Request: "true",
-      data,
-    };
-    if (token) {
-      params.sign = crypto.createHash("md5").update([token.split("_")[0], timestamp, params.appKey, data].join("&")).digest("hex");
-    }
-
-    try {
-      const response = await fetch(`${api}?${new URLSearchParams(params)}`, {
-        headers: {
-          cookie,
-          referer: productUrl,
-          "user-agent": userAgent,
-          accept: "application/json,text/plain,*/*",
-        },
-      });
-      cookie = mergeSetCookie(cookie, response.headers.get("set-cookie"));
-      token = cookieValue(cookie, "_m_h5_tk");
-      const body = await response.text();
-      const parsed = JSON.parse(body);
-      if (parsed?.ret?.some((value) => /SUCCESS/i.test(value)) && parsed.data?.item?.images?.length) return parsed.data;
-    } catch {
-      // The PC page remains usable when the optional mobile detail request is unavailable.
-    }
-  }
-
-  return null;
-}
 
 function parseTmallRateBody(body) {
   const source = String(body || "").trim();
@@ -205,69 +127,6 @@ function bestBuyerShowCapture(captures) {
   };
 }
 
-async function fetchTmallBuyerShows(itemId, sellerId, cookie, referer, accountSessionId = "") {
-  if (!itemId) return buyerShowCaptureResult({ status: "failed", source: "legacy-rate-api", failureCode: "ITEM_ID_MISSING", itemId, sellerId, accountSessionId });
-  if (!sellerId) return buyerShowCaptureResult({ status: "failed", source: "legacy-rate-api", failureCode: "SELLER_ID_UNVERIFIED", itemId, sellerId, accountSessionId });
-  const collected = [];
-  const seen = new Set();
-  const filters = [{ picture: "1", content: "" }, { picture: "", content: "1" }];
-  let requestCount = 0;
-  let pageCount = 0;
-  let reportedTotal = 0;
-  let failureCode = "";
-  for (const filter of filters) {
-    let filterCount = 0;
-    for (let page = 1; page <= 5 && collected.length < 100; page += 1) {
-      const query = new URLSearchParams({
-        itemId: String(itemId), sellerId: String(sellerId), order: "3", currentPage: String(page),
-        append: "0", content: filter.content, picture: filter.picture, callback: `jsonp${Date.now()}_${page}`,
-      });
-      try {
-        requestCount += 1;
-        const response = await fetch(`https://rate.tmall.com/list_detail_rate.htm?${query}`, {
-          headers: { cookie: cookie || "", referer, "user-agent": userAgent, accept: "application/json,text/javascript,*/*" },
-          signal: AbortSignal.timeout(12_000),
-        });
-        if (!response.ok) {
-          failureCode = `HTTP_${response.status}`;
-          break;
-        }
-        const detail = parseTmallRateBody(await response.text());
-        if (!isKnownRateDetail(detail)) {
-          failureCode = "SCHEMA_CHANGED";
-          break;
-        }
-        pageCount += 1;
-        const items = buyerShowsFromRateDetail(detail);
-        const total = Number(detail?.rateCount?.total || detail?.rateCount || detail?.total || detail?.feedAllCount || detail?.totalFuzzy || 0);
-        if (Number.isFinite(total) && total > 0) reportedTotal = Math.max(reportedTotal, total);
-        let added = 0;
-        for (const item of items) {
-          const key = item.id && !/^rate-\d+$/.test(item.id) ? `id:${item.id}` : `${item.text}|${item.images.join(",")}|${item.videoUrls.join(",")}`;
-          if (seen.has(key)) continue;
-          seen.add(key);
-          collected.push(item);
-          added += 1;
-        }
-        filterCount += added;
-        if (!items.length || !added || (total > 0 && filterCount >= total)) break;
-        await new Promise((resolve) => setTimeout(resolve, 180));
-      } catch (error) {
-        failureCode = error?.name === "TimeoutError" ? "TIMEOUT" : "HTTP_ERROR";
-        break;
-      }
-    }
-  }
-  const items = collected.slice(0, 100);
-  if (items.length) {
-    const complete = !failureCode && (!reportedTotal || items.length >= Math.min(reportedTotal, 100));
-    return buyerShowCaptureResult({ status: complete ? "complete" : "partial", source: "legacy-rate-api", failureCode, itemId, sellerId, accountSessionId, reportedTotal, pageCount, requestCount, items });
-  }
-  if (!failureCode && pageCount > 0 && reportedTotal === 0) {
-    return buyerShowCaptureResult({ status: "confirmed-empty", source: "legacy-rate-api", itemId, sellerId, accountSessionId, reportedTotal, pageCount, requestCount, items });
-  }
-  return buyerShowCaptureResult({ status: "failed", source: "legacy-rate-api", failureCode: failureCode || "UNVERIFIED_EMPTY", itemId, sellerId, accountSessionId, reportedTotal, pageCount, requestCount, items });
-}
 
 function imageKey(url) {
   return cleanImage(url)
@@ -1407,7 +1266,8 @@ async function fetchMobilePromotionPayloads(itemId, skuPrices, authSession, rend
       localCapture: true,
       preserveCache: true,
     });
-  } catch {
+  } catch (error) {
+    if (error?.code === "TMALL_PRICE_AUTH_REQUIRED") throw error;
     return { networkPayloads: [], skuNetworkPayloads: {}, selectionResults: [] };
   }
 }
@@ -1428,17 +1288,6 @@ export function collectProductProgramItems(value) {
   return items;
 }
 
-function applyProductProgramItems(skuPrices, programItems) {
-  if (!programItems.length) return skuPrices;
-  return skuPrices.map((sku) => ({
-    ...sku,
-    discountItems: Array.from(new Map([...(sku.discountItems || []), ...programItems].map((item) => [
-      `${item.label}:${item.source}`,
-      item,
-    ])).values()),
-  }));
-}
-
 export function applyVisibleDiscountItems(skuPrices, visibleItems) {
   const verifiedItems = visibleItems.filter((item) => Number(item.amount) > 0);
   const visibleTotal = verifiedItems.reduce((sum, item) => sum + Number(item.amount), 0);
@@ -1457,7 +1306,7 @@ export function applyVisibleDiscountItems(skuPrices, visibleItems) {
   });
 }
 
-export function resolveSkuPrices(layers, fallback) {
+export function resolveSkuPrices(layers) {
   const priceLayers = layers.filter((layer) => layer.kind !== "discount" && layer.kind !== "original" && layer.label !== "优惠前");
   const normalLayer =
     priceLayers.find((layer) => /普通|平台|补贴|券后|到手|店铺优惠/.test(layer.label) && !/惊喜|淘金币|金币|首单|礼金|88|会员|VIP/i.test(layer.label)) ||
@@ -1466,7 +1315,7 @@ export function resolveSkuPrices(layers, fallback) {
   const coinLayer = priceLayers.find((layer) => /淘金币|金币/i.test(layer.label));
 
   return {
-    normalPrice: normalLayer?.value || fallback || null,
+    normalPrice: normalLayer?.value || null,
     normalPriceTitle: normalLayer?.label || "普通价",
     surprisePrice: surpriseLayer?.value || null,
     coinPrice: coinLayer?.value || null,
@@ -1644,7 +1493,7 @@ export function extractStructuredSku(html) {
         kind: "original",
       });
     }
-    const resolvedPrices = resolveSkuPrices(priceLayers, subPrice ?? originalPrice);
+    const resolvedPrices = resolveSkuPrices(priceLayers);
     const discountItems = collectDiscountItems(info);
     if (details.image) skuImages.push(details.image);
     skuPrices.push({
@@ -1668,10 +1517,10 @@ export function extractStructuredSku(html) {
   }
 
   const fallbackInfo = sku2info["0"];
-  const displayPrice = parsePrice(fallbackInfo?.subPrice?.priceText) ?? parsePrice(fallbackInfo?.price?.priceText);
+  const displayPrice = parsePrice(fallbackInfo?.subPrice?.priceText);
 
   return {
-    skuPrices: skuPrices.filter((sku) => sku.normalPrice),
+    skuPrices,
     skuImages: unique(skuImages),
     displayPrice,
   };
@@ -1706,47 +1555,57 @@ export function applyMediaCapturePreference(snapshot, captureMediaAssets) {
   };
 }
 
-async function fetchHtml(product, authSession, renderPage = getRenderedHtml) {
-  if (authSession?.source === "taobao-browser") {
-    let lastError;
-    for (let attempt = 1; attempt <= 2; attempt++) {
-      try {
-        const page = await renderPage(product.url, authSession, {
-          captureVideo: product.captureMediaAssets === true,
-          captureBuyerShow: product.captureBuyerShows !== false,
-          localCapture: true,
-          preserveCache: true,
-        });
-        const looksBlocked = isTaobaoLoginDocument(page.finalUrl, page.html);
-        if (!looksBlocked) return page;
-        if (isTaobaoLoginUrl(page.finalUrl)) throw new Error("账号登录已明确失效：商品页跳转到淘宝登录页。");
-        throw new Error("账号页面需要安全验证，本次抓取已停止，登录状态保留待复检。");
-      } catch (error) {
-        lastError = error;
-        if (/登录|验证|captcha|滑块/i.test(error.message)) break;
-      }
-      if (attempt === 1) await new Promise((resolve) => setTimeout(resolve, 800));
-    }
-    throw new Error(`浏览器登录态抓取失败：${lastError?.message || "首次加载失败"}`);
+export function hasCurrentSkuPriceData(html) {
+  const source = String(html || "");
+  if (!/skuCore|skuBase/i.test(source)) return false;
+  // SSR shells can expose SKU IDs and an old list price before the current
+  // `subPrice` node arrives. A bare `优惠前` value is never current-price proof.
+  return /subPrice[\s\S]{0,320}priceText/i.test(source)
+    || /priceText[\s\S]{0,320}subPrice/i.test(source);
+}
+
+export function hasTmallPriceLoginGate(networkPayloads = []) {
+  return networkPayloads.some((payload) => {
+    if (!/mtop\.taobao\.pcdetail\.data\.adjust/i.test(String(payload?.url || ""))) return false;
+    const body = String(payload?.body || "");
+    return /登录(?:后)?(?:查看更多|查看|获取).*优惠|请登录.*优惠|\\u767b\\u5f55(?:\\u540e)?.*\\u4f18\\u60e0/i.test(body);
+  });
+}
+
+function tmallPriceAuthRequiredError() {
+  const error = new Error("淘宝账号仍在线，但天猫优惠价格授权未同步；本次未保存价格，请在账号授权中重新授权后重试。");
+  error.code = "TMALL_PRICE_AUTH_REQUIRED";
+  return error;
+}
+
+async function fetchHtml(product, authSession, renderPage = getRenderedHtml, { preserveCache = true } = {}) {
+  if (authSession?.source !== "taobao-browser") {
+    throw new Error("商品抓取只允许使用已扫码授权的账号浏览器采集，已阻止后端直接请求淘宝接口。");
   }
-
-  const headers = {
-    "user-agent": userAgent,
-    accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-    "accept-language": "zh-CN,zh;q=0.9,en;q=0.8",
-  };
-
-  if (authSession?.cookie) headers.cookie = authSession.cookie;
-
-  const response = await fetch(product.url, { headers, redirect: "follow" });
-  const html = await response.text();
-  return { html, finalUrl: response.url, statusCode: response.status, source: "fetch" };
+  try {
+    const page = await renderPage(product.url, authSession, {
+      captureVideo: product.captureMediaAssets === true,
+      captureBuyerShow: product.captureBuyerShows !== false,
+      localCapture: true,
+      preserveCache,
+    });
+    const looksBlocked = isTaobaoLoginDocument(page.finalUrl, page.html);
+    if (!looksBlocked) return page;
+    if (isTaobaoLoginUrl(page.finalUrl)) throw new Error("账号登录已明确失效：商品页跳转到淘宝登录页。");
+    throw new Error("账号页面需要安全验证，本次抓取已停止，登录状态保留待复检。");
+  } catch (error) {
+    throw new Error(`浏览器登录态抓取失败：${error?.message || "商品页加载失败"}`);
+  }
 }
 
 export function resolveCaptureAccessMode(authSession, page = {}) {
   if (!authSession) return "anonymous";
   if (authSession.source === "taobao-browser") {
-    return page.accessVerified === true || (page.authState?.loggedIn && page.cookieHeader) ? "authenticated" : "anonymous";
+    // The product URL can be on detail.tmall.com while the identity cookies
+    // are scoped to .taobao.com. `authState.loggedIn` is already computed from
+    // the account browser's canonical Taobao URLs, so requiring a target-scoped
+    // cookie header here incorrectly reports a valid account as anonymous.
+    return page.accessVerified === true || page.authState?.loggedIn === true ? "authenticated" : "anonymous";
   }
   return "anonymous";
 }
@@ -1755,9 +1614,6 @@ function compactBrowserPayload(payload) {
   return {
     url: String(payload?.url || ""),
     mimeType: String(payload?.mimeType || ""),
-    skuId: String(payload?.skuId || ""),
-    requestSkuId: String(payload?.requestSkuId || ""),
-    responseSkuId: String(payload?.responseSkuId || ""),
     responseKind: payload?.responseKind === "buyer-show" ? "buyer-show" : "price",
     body: String(payload?.body || ""),
   };
@@ -1790,18 +1646,36 @@ export function buildBrowserCaptureEvidence({ product, accountType, itemId, page
       accessVerified: resolveCaptureAccessMode({ source: "taobao-browser" }, page) === "authenticated",
       networkPayloads: payloads,
       buyerShowInteractions: Array.isArray(page.buyerShowInteractions) ? page.buyerShowInteractions : [],
-      selectionResults: Array.isArray(promotionCapture.selectionResults) ? promotionCapture.selectionResults : [],
+      selectionResults: Array.isArray(promotionCapture.selectionResults) ? promotionCapture.selectionResults.map((selection) => ({
+        skuId: String(selection?.skuId || ""),
+        selected: selection?.selected === true,
+        responseReceivedAfterSelection: selection?.responseReceivedAfterSelection === true,
+        clicked: Array.isArray(selection?.clicked) ? selection.clicked.map(String) : [],
+        reason: String(selection?.reason || ""),
+      })) : [],
     },
   };
 }
 
 function hydrateBrowserCapturePage(record) {
   const stored = record?.page || {};
-  const networkPayloads = Array.isArray(stored.networkPayloads) ? stored.networkPayloads.map(compactBrowserPayload) : [];
+  const networkPayloads = Array.isArray(stored.networkPayloads) ? stored.networkPayloads.map(compactBrowserPayload).map((payload) => {
+    const requestSkuId = skuIdFromNetworkUrl(payload.url);
+    const responseSkuId = skuIdFromNetworkBody(payload.body);
+    const skuId = requestSkuId && responseSkuId && requestSkuId === responseSkuId ? requestSkuId : "";
+    return { ...payload, requestSkuId, responseSkuId, skuId };
+  }) : [];
   const skuNetworkPayloads = Object.fromEntries(Array.from(new Set(networkPayloads.map((payload) => payload.skuId).filter(Boolean))).map((skuId) => [
     skuId,
     networkPayloads.filter((payload) => payload.skuId === skuId),
   ]));
+  const selectionResults = (Array.isArray(stored.selectionResults) ? stored.selectionResults : []).map((selection) => {
+    const skuId = String(selection?.skuId || "");
+    const responseObserved = selection?.selected === true
+      && selection?.responseReceivedAfterSelection === true
+      && (skuNetworkPayloads[skuId] || []).length > 0;
+    return { ...selection, skuId, responseObserved };
+  });
   return {
     html: String(stored.html || ""),
     visibleText: String(stored.visibleText || ""),
@@ -1814,7 +1688,7 @@ function hydrateBrowserCapturePage(record) {
     priceNetworkPayloads: networkPayloads.filter((payload) => payload.responseKind === "price"),
     skuNetworkPayloads,
     buyerShowInteractions: Array.isArray(stored.buyerShowInteractions) ? stored.buyerShowInteractions : [],
-    selectionResults: Array.isArray(stored.selectionResults) ? stored.selectionResults : [],
+    selectionResults,
   };
 }
 
@@ -1822,9 +1696,14 @@ async function persistAndReloadBrowserCapture(evidence) {
   const { readBrowserCaptureSource, saveBrowserCaptureSource } = await import("./localImportService.js");
   const saved = await saveBrowserCaptureSource(evidence);
   const record = await readBrowserCaptureSource(saved.captureId);
+  const page = hydrateBrowserCapturePage(record);
   return {
-    page: hydrateBrowserCapturePage(record),
-    promotionCapture: { networkPayloads: [], skuNetworkPayloads: {}, selectionResults: record.page?.selectionResults || [] },
+    page,
+    promotionCapture: {
+      networkPayloads: page.priceNetworkPayloads,
+      skuNetworkPayloads: page.skuNetworkPayloads,
+      selectionResults: page.selectionResults,
+    },
     captureId: saved.captureId,
     sourceFile: record.sourceFile,
     localFirst: record.localFirst,
@@ -1835,9 +1714,7 @@ export async function scrapeTmallBuyerShows(product, authSession) {
   if (authSession?.source !== "taobao-browser") {
     throw new Error("买家秀只允许使用已扫码授权的账号浏览器采集，已阻止后端直接请求淘宝接口。");
   }
-  let page = authSession?.source === "taobao-browser"
-    ? await getRenderedHtml(product.url, authSession, { captureBuyerShow: true, localCapture: true, preserveCache: true })
-    : await fetchHtml(product, authSession);
+  let page = await getRenderedHtml(product.url, authSession, { captureBuyerShow: true, localCapture: true, preserveCache: true });
   if (isTaobaoLoginDocument(page.finalUrl, page.html)) {
     if (isTaobaoLoginUrl(page.finalUrl)) throw new Error("账号登录已明确失效：买家秀页面跳转到淘宝登录页。");
     throw new Error("账号页面需要安全验证，本次买家秀抓取已停止，登录状态保留待复检。");
@@ -1845,23 +1722,20 @@ export async function scrapeTmallBuyerShows(product, authSession) {
   let html = page.html || "";
   const itemId = extractItemId(page.finalUrl, product.url, html);
   assertMatchingProductId(product.url, itemId, page.finalUrl);
-  let browserCapture = null;
-  if (authSession?.source === "taobao-browser") {
-    if (resolveCaptureAccessMode(authSession, page) !== "authenticated") {
-      throw new Error("账号浏览器未通过登录身份校验，本次买家秀结果已丢弃。");
-    }
-    browserCapture = await persistAndReloadBrowserCapture(buildBrowserCaptureEvidence({
-      product,
-      accountType: authSession.accountType || "normal",
-      itemId,
-      page,
-      promotionCapture: { networkPayloads: [], selectionResults: [] },
-      capturedAt: new Date().toISOString(),
-    }));
-    page = browserCapture.page;
-    html = page.html;
-    assertMatchingProductId(product.url, extractItemId(page.finalUrl, product.url, html), page.finalUrl);
+  if (resolveCaptureAccessMode(authSession, page) !== "authenticated") {
+    throw new Error("账号浏览器未通过登录身份校验，本次买家秀结果已丢弃。");
   }
+  const browserCapture = await persistAndReloadBrowserCapture(buildBrowserCaptureEvidence({
+    product,
+    accountType: authSession.accountType || "normal",
+    itemId,
+    page,
+    promotionCapture: { networkPayloads: [], selectionResults: [] },
+    capturedAt: new Date().toISOString(),
+  }));
+  page = browserCapture.page;
+  html = page.html;
+  assertMatchingProductId(product.url, extractItemId(page.finalUrl, product.url, html), page.finalUrl);
   const existingImages = [
     product.lastSnapshot?.mainImage800,
     product.lastSnapshot?.mainImage,
@@ -1872,22 +1746,17 @@ export async function scrapeTmallBuyerShows(product, authSession) {
   const accountSessionId = authSession?.id || "guest";
   const domItems = extractBuyerShowItems(html, page.buyerShowPayloads || []);
   const observed = buyerShowCaptureFromNetwork(page.buyerShowPayloads || [], { itemId, accountSessionId });
-  const direct = authSession?.source === "taobao-browser"
-    ? null
-    : await fetchTmallBuyerShows(itemId, sellerId, page.cookieHeader || authSession?.cookie || "", product.url, accountSessionId);
   const dom = domItems.length
     ? buyerShowCaptureResult({ status: "partial", source: "verified-dom", itemId, sellerId, accountSessionId, pageCount: 1, items: domItems })
     : buyerShowCaptureResult({ status: "failed", source: "verified-dom", failureCode: "REVIEW_UI_NOT_FOUND", itemId, sellerId, accountSessionId });
-  const capture = bestBuyerShowCapture([observed, direct, dom]);
+  const capture = bestBuyerShowCapture([observed, dom]);
   return {
     capture,
     items: capture.items || [],
     interactions: page.buyerShowInteractions || [],
-    ...(browserCapture ? {
-      browserEvidenceId: browserCapture.captureId,
-      browserEvidenceFile: browserCapture.sourceFile,
-      localFirst: browserCapture.localFirst,
-    } : {}),
+    browserEvidenceId: browserCapture.captureId,
+    browserEvidenceFile: browserCapture.sourceFile,
+    localFirst: browserCapture.localFirst,
   };
 }
 
@@ -1899,7 +1768,7 @@ export async function scrapeTmallProduct(product, authSession, { renderPage = ge
   const startedAt = new Date(startedAtMs).toISOString();
   let page = await fetchHtml(product, authSession, renderPage);
   let accessMode = resolveCaptureAccessMode(authSession, page);
-  if (authSession?.source === "taobao-browser" && accessMode !== "authenticated") {
+  if (accessMode !== "authenticated") {
     throw new Error("账号浏览器未通过登录身份校验，本次公开页面结果已丢弃；请在账号授权中检测登录后重试。");
   }
   const pageCaptureCompletedAt = Date.now();
@@ -1913,29 +1782,60 @@ export async function scrapeTmallProduct(product, authSession, { renderPage = ge
   }
 
   const accountType = authSession?.accountType || "normal";
+  // Hard boundary: browser output is persisted and read back before any
+  // SKU/price parsing. The first read supplies only selection metadata for
+  // the follow-up browser capture; prices are parsed from the final read.
+  let initial = await persistAndReloadBrowserCapture(buildBrowserCaptureEvidence({
+    product,
+    accountType,
+    itemId,
+    page,
+    promotionCapture: { networkPayloads: [], selectionResults: [] },
+    capturedAt: startedAt,
+  }));
+  if (!hasCurrentSkuPriceData(initial.page.html)) {
+    const refreshedPage = await fetchHtml(product, authSession, renderPage, { preserveCache: false });
+    const refreshedItemId = extractItemId(refreshedPage.finalUrl, product.url, refreshedPage.html);
+    assertMatchingProductId(product.url, refreshedItemId, refreshedPage.finalUrl);
+    initial = await persistAndReloadBrowserCapture(buildBrowserCaptureEvidence({
+      product,
+      accountType,
+      itemId: refreshedItemId,
+      page: refreshedPage,
+      promotionCapture: { networkPayloads: [], selectionResults: [] },
+      capturedAt: startedAt,
+    }));
+  }
+  page = initial.page;
+  let browserCapture = initial;
+  html = page.html;
+  accessMode = resolveCaptureAccessMode(authSession, page);
+  assertMatchingProductId(product.url, extractItemId(page.finalUrl, product.url, html), page.finalUrl);
+  if (accessMode !== "authenticated") throw new Error("本地采集文件未通过账号访问校验，已停止解析。");
   const promotionCaptureSkus = extractStructuredSku(html).skuPrices;
   const promotionCaptureStartedAt = Date.now();
   let mobilePromotionCapture = promotionCaptureSkus.length
     ? await fetchMobilePromotionPayloads(itemId, promotionCaptureSkus, authSession, renderPage)
     : { networkPayloads: [], skuNetworkPayloads: {}, selectionResults: [] };
   const promotionCaptureCompletedAt = Date.now();
-  let browserCapture = null;
-  if (authSession?.source === "taobao-browser") {
-    const reloaded = await persistAndReloadBrowserCapture(buildBrowserCaptureEvidence({
-      product,
-      accountType,
-      itemId,
-      page,
-      promotionCapture: mobilePromotionCapture,
-      capturedAt: startedAt,
-    }));
-    page = reloaded.page;
-    mobilePromotionCapture = reloaded.promotionCapture;
-    browserCapture = reloaded;
-    html = page.html;
-    accessMode = resolveCaptureAccessMode(authSession, page);
-    assertMatchingProductId(product.url, extractItemId(page.finalUrl, product.url, html), page.finalUrl);
-    if (accessMode !== "authenticated") throw new Error("本地采集文件未通过账号访问校验，已停止解析。");
+  const reloaded = await persistAndReloadBrowserCapture(buildBrowserCaptureEvidence({
+    product,
+    accountType,
+    itemId,
+    page,
+    promotionCapture: mobilePromotionCapture,
+    capturedAt: startedAt,
+  }));
+  page = reloaded.page;
+  mobilePromotionCapture = reloaded.promotionCapture;
+  browserCapture = reloaded;
+  html = page.html;
+  accessMode = resolveCaptureAccessMode(authSession, page);
+  assertMatchingProductId(product.url, extractItemId(page.finalUrl, product.url, html), page.finalUrl);
+  if (accessMode !== "authenticated") throw new Error("本地采集文件未通过账号访问校验，已停止解析。");
+
+  if (hasTmallPriceLoginGate([...(page.networkPayloads || []), ...(mobilePromotionCapture.networkPayloads || [])])) {
+    throw tmallPriceAuthRequiredError();
   }
 
   const jsonData = extractFromJson(parseJsonBlobs(html));
@@ -1959,16 +1859,6 @@ export async function scrapeTmallProduct(product, authSession, { renderPage = ge
   structuredSku.skuImages = structuredSku.skuImages.filter((image) => !excludedPromotionSkuImages.has(image));
   const visibleText = page.visibleText || cheerio.load(html)("body").text();
   const governmentProgramObserved = /政府补贴|国家补贴|国补/.test(visibleText);
-  const visibleDiscountItems = collectDiscountItemsFromText(visibleText);
-  structuredSku.skuPrices = applyVisibleDiscountItems(structuredSku.skuPrices, visibleDiscountItems);
-  const selectedSkuId = extractSelectedSkuId(page.finalUrl, html, structuredSku.skuPrices.map((sku) => sku.skuId));
-  structuredSku.skuPrices = applyVisibleSurprisePrice(
-    structuredSku.skuPrices,
-    collectVisibleSurprisePrices(visibleText),
-    selectedSkuId,
-  );
-  structuredSku.skuPrices = applyProductProgramItems(structuredSku.skuPrices, collectProductProgramItems(html));
-  structuredSku.skuPrices = structuredSku.skuPrices.map((sku) => calculateAccountPriceScenario(applyAppliedCoinDiscount(sku), accountType));
   structuredSku.skuPrices = structuredSku.skuPrices.map((sku) => {
     const skuPayloads = [
       ...(page.skuNetworkPayloads?.[sku.skuId] || []),
@@ -1984,34 +1874,13 @@ export async function scrapeTmallProduct(product, authSession, { renderPage = ge
     });
     const embeddedResolution = embeddedResolutions.get(String(sku.skuId));
     const authoritativeResolution = selectAuthoritativePriceResolution(resolution, embeddedResolution, { governmentProgramObserved });
-    if (authoritativeResolution?.matched) return applyPriceResolution(sku, authoritativeResolution);
-    const [resolved] = applyNetworkPromoData([sku], skuPayloads, { accountType: authSession?.accountType || "normal" });
-    return calculateAccountPriceScenario(resolved, accountType);
+    return applyPriceResolution(sku, authoritativeResolution);
   });
   const shopName = extractShopName(html, jsonData, domData, page.finalUrl);
   const shopLogo = extractShopLogo(html, jsonData, domData);
   const model = extractModel(html, jsonData, domData);
-  const prices = [...jsonData.prices, ...domData.priceMatches].filter((price) => price > 0);
-  const structuredPrices = structuredSku.skuPrices.map((sku) => sku.price).filter((price) => price > 0);
-  const allPrices = structuredPrices.length ? structuredPrices : prices;
-  const minPrice = allPrices.length ? Math.min(...allPrices) : null;
-  const maxPrice = allPrices.length ? Math.max(...allPrices) : null;
+  const observedUnverifiedPrices = [...jsonData.prices, ...domData.priceMatches].filter((price) => price > 0);
   const skuImages = unique([...structuredSku.skuImages, ...jsonData.skuImages]).filter((image) => !excludedPromotionSkuImages.has(image)).slice(0, 40);
-  const mobileDetailStartedAt = Date.now();
-  const mobileDetailData = authSession?.source === "taobao-browser"
-    ? null
-    : await fetchMobileDetailData(itemId, {
-        ...authSession,
-        cookie: page.cookieHeader || authSession?.cookie || "",
-      }, product.url);
-  const mobileDetailCompletedAt = Date.now();
-  if (mobileDetailData) {
-    structuredSku.skuPrices = structuredSku.skuPrices.map((sku) => {
-      if (sku.resolutionStatus === "verified") return sku;
-      const [resolved] = applyNetworkPromoData([sku], [JSON.stringify(mobileDetailData)], { accountType });
-      return calculateAccountPriceScenario(resolved, accountType);
-    });
-  }
   const knownPrimaryImages = [
     ...(product.knownPrimaryImages || []),
     product.lastSnapshot?.mainImage800,
@@ -2023,7 +1892,7 @@ export async function scrapeTmallProduct(product, authSession, { renderPage = ge
     jsonData,
     domData,
     skuImages,
-    mobileDetailData,
+    null,
     knownPrimaryImages,
     product.knownGalleryImages || [],
     product.knownVideoUrls || [],
@@ -2035,39 +1904,26 @@ export async function scrapeTmallProduct(product, authSession, { renderPage = ge
   const buyerShowStartedAt = Date.now();
   if (product.captureBuyerShows !== false) {
     const observedBuyerShows = buyerShowCaptureFromNetwork(page.buyerShowPayloads || [], { itemId, accountSessionId });
-    const directBuyerShows = authSession?.source === "taobao-browser"
-      ? null
-      : await fetchTmallBuyerShows(itemId, sellerId, page.cookieHeader || authSession?.cookie || "", product.url, accountSessionId);
     const domBuyerShows = media.buyerShows.length
       ? buyerShowCaptureResult({ status: "partial", source: "verified-dom", itemId, sellerId, accountSessionId, pageCount: 1, items: media.buyerShows })
       : buyerShowCaptureResult({ status: "failed", source: "verified-dom", failureCode: "REVIEW_UI_NOT_FOUND", itemId, sellerId, accountSessionId });
-    buyerShowCapture = bestBuyerShowCapture([observedBuyerShows, directBuyerShows, domBuyerShows]);
+    buyerShowCapture = bestBuyerShowCapture([observedBuyerShows, domBuyerShows]);
     buyerShowInteractions = page.buyerShowInteractions || [];
   }
   const buyerShowCompletedAt = Date.now();
   media.buyerShows = buyerShowCapture.items;
   const mainImages = media.mainImages;
-  const rawSkuPrices = structuredSku.skuPrices.length
-    ? structuredSku.skuPrices
-    : prices.slice(0, 40).map((price, index) => ({
-        skuId: `sku-${index + 1}`,
-        name: `SKU ${index + 1}`,
-        image: "",
-        price,
-        normalPrice: price,
-        coinPrice: null,
-        priceTitle: "普通价",
-        priceLayers: [{ label: "普通价", value: price, kind: "price", source: "fallback" }],
-      }));
-  const skuPrices = rawSkuPrices.map((sku) => {
-    if (sku.resolutionStatus === "verified") return { ...sku, ...resolveCoinBenefit(sku) };
-    const calculated = calculateAccountPriceScenario(applyAppliedCoinDiscount(sku), accountType);
-    return { ...calculated, ...resolveCoinBenefit(calculated) };
-  });
-  const snapshotPrice = skuPrices[0]?.price || structuredSku.displayPrice || minPrice;
-  if (!authSession && !Number.isFinite(snapshotPrice)) {
-    throw new Error("淘宝匿名公开页未返回可用价格；已保留上次快照，个性化价格需要账号登录。");
-  }
+  const rawSkuPrices = structuredSku.skuPrices;
+  const skuPrices = rawSkuPrices.map((sku) => sku.resolutionStatus === "verified" ? { ...sku, ...resolveCoinBenefit(sku) } : sku);
+  const observedSkuCount = skuPrices.length;
+  const verifiedSkuCount = skuPrices.filter((sku) => sku.resolutionStatus === "verified").length;
+  const verifiedPrices = skuPrices
+    .filter((sku) => sku.resolutionStatus === "verified")
+    .map((sku) => Number(sku.normalPrice))
+    .filter((price) => Number.isFinite(price) && price > 0);
+  const snapshotPrice = verifiedPrices[0] ?? null;
+  const minPrice = verifiedPrices.length ? Math.min(...verifiedPrices) : null;
+  const maxPrice = verifiedPrices.length ? Math.max(...verifiedPrices) : null;
 
   const title = cleanTitle(jsonData.title || domData.title || product.name || "未识别商品标题");
 
@@ -2075,7 +1931,7 @@ export async function scrapeTmallProduct(product, authSession, { renderPage = ge
     parserVersion: PRICE_PARSER_VERSION,
     resolutionStatus: skuPrices.length && skuPrices.every((sku) => sku.resolutionStatus === "verified")
       ? "verified"
-      : skuPrices.some((sku) => sku.resolutionStatus === "verified") ? "partial" : "legacy",
+      : skuPrices.some((sku) => sku.resolutionStatus === "verified") ? "partial" : "unavailable",
     capturedAt: startedAt,
     statusCode: page.statusCode,
     finalUrl: page.finalUrl,
@@ -2098,12 +1954,10 @@ export async function scrapeTmallProduct(product, authSession, { renderPage = ge
     skuImages,
     skuPrices,
     price: snapshotPrice,
-    priceRange: minPrice && maxPrice ? [minPrice, maxPrice] : null,
-    ...(browserCapture ? {
-      browserEvidenceId: browserCapture.captureId,
-      browserEvidenceFile: browserCapture.sourceFile,
-      localFirst: browserCapture.localFirst,
-    } : {}),
+    priceRange: minPrice !== null && maxPrice !== null ? [minPrice, maxPrice] : null,
+    browserEvidenceId: browserCapture.captureId,
+    browserEvidenceFile: browserCapture.sourceFile,
+    localFirst: browserCapture.localFirst,
     rawSignals: {
       htmlBytes: html.length,
       imageCount: mainImages.length,
@@ -2112,18 +1966,21 @@ export async function scrapeTmallProduct(product, authSession, { renderPage = ge
       buyerShowCount: media.buyerShows.length,
       buyerShowInteractions,
       skuImageCount: skuImages.length,
-      priceCount: allPrices.length,
+      priceCount: verifiedPrices.length,
+      observedUnverifiedPriceCount: observedUnverifiedPrices.length,
       highResImageCount: mainImages.length + media.detailImages.length,
       networkPriceResponseCount: page.networkPayloads?.length || 0,
       mobilePromotionResponseCount: mobilePromotionCapture.networkPayloads.length,
       verifiedSkuSelectionCount: mobilePromotionCapture.selectionResults.filter((item) => item.responseObserved).length,
       skuSelectionCount: mobilePromotionCapture.selectionResults.length,
       skuSelectionResults: mobilePromotionCapture.selectionResults,
-      verifiedPriceSkuCount: skuPrices.filter((sku) => sku.resolutionStatus === "verified").length,
+      observedSkuCount,
+      outputSkuCount: skuPrices.length,
+      verifiedPriceSkuCount: verifiedSkuCount,
       timingsMs: {
         pageCapture: pageCaptureCompletedAt - startedAtMs,
         promotionCapture: promotionCaptureCompletedAt - promotionCaptureStartedAt,
-        mobileDetail: mobileDetailCompletedAt - mobileDetailStartedAt,
+        mobileDetail: 0,
         buyerShow: buyerShowCompletedAt - buyerShowStartedAt,
         total: Date.now() - startedAtMs,
       },

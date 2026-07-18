@@ -13,6 +13,11 @@ after(async () => {
   await fs.rm(dataDir, { recursive: true, force: true });
 });
 
+test("Tmall scraper has no Node-side network escape hatch", async () => {
+  const source = await fs.readFile(new URL("./tmallScraper.js", import.meta.url), "utf8");
+  assert.doesNotMatch(source, /\bfetch\s*\(/, "淘宝/天猫数据只能由账号浏览器采集后落盘解析");
+});
+
 test("account browser capture saves loaded data, re-reads disk, and never fetches Taobao from Node", async () => {
   const itemId = "843315272600";
   const skuId = "6274971436000";
@@ -35,9 +40,6 @@ test("account browser capture saves loaded data, re-reads disk, and never fetche
   const payload = {
     url: `https://h5api.m.tmall.com/h5/mtop.taobao.pcdetail.data.adjust/1.0/?data=${encodeURIComponent(JSON.stringify({ itemId, skuId }))}&sign=browser-sign-secret`,
     mimeType: "application/json",
-    skuId,
-    requestSkuId: skuId,
-    responseSkuId: skuId,
     responseKind: "price",
     body: JSON.stringify({
       data: {
@@ -69,7 +71,7 @@ test("account browser capture saves loaded data, re-reads disk, and never fetche
       buyerShowPayloads: [],
       priceNetworkPayloads: renderCalls === 2 ? [payload] : [],
       skuNetworkPayloads: renderCalls === 2 ? { [skuId]: [payload] } : {},
-      selectionResults: renderCalls === 2 ? [{ skuId, selected: true, responseObserved: true, reason: "verified-body" }] : [],
+      selectionResults: renderCalls === 2 ? [{ skuId, selected: true, responseReceivedAfterSelection: true, reason: "response-received" }] : [],
       buyerShowInteractions: [],
     };
   };
@@ -107,7 +109,11 @@ test("account browser capture saves loaded data, re-reads disk, and never fetche
     assert.doesNotMatch(source, /browser-cookie-secret|session-secret-id|profile-secret|browser-sign-secret/);
     assert.match(source, /本地优先测试商品/);
     const stored = JSON.parse(source);
-    assert.equal(stored.page.networkPayloads[0].url, "https://h5api.m.tmall.com/h5/mtop.taobao.pcdetail.data.adjust/1.0/");
+    assert.equal(stored.page.networkPayloads[0].url, `https://h5api.m.tmall.com/h5/mtop.taobao.pcdetail.data.adjust/1.0/?itemId=${itemId}&skuId=${skuId}`);
+    assert.equal(Object.hasOwn(stored.page.networkPayloads[0], "requestSkuId"), false);
+    assert.equal(Object.hasOwn(stored.page.networkPayloads[0], "responseSkuId"), false);
+    assert.equal(Object.hasOwn(stored.page.networkPayloads[0], "skuId"), false);
+    assert.equal(Object.hasOwn(stored.page.selectionResults[0], "responseObserved"), false);
   } finally {
     globalThis.fetch = originalFetch;
   }

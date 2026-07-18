@@ -8,7 +8,7 @@ export const MODEL_CHANNELS = Object.freeze({
 export const MODEL_CHANNEL_IDS = Object.freeze(Object.keys(MODEL_CHANNELS));
 export const DEFAULT_MODEL_CHANNEL = "stable";
 export const DEFAULT_MODEL_BASE_URL = MODEL_CHANNELS[DEFAULT_MODEL_CHANNEL].baseUrl;
-export const DEFAULT_ANALYSIS_MODEL = "gpt-4.1-mini";
+export const DEFAULT_ANALYSIS_MODEL = "gpt-5.5";
 export const DEFAULT_IMAGE_MODEL = "gpt-image-2";
 
 const LOCAL_HOSTS = new Set(["localhost", "127.0.0.1", "[::1]"]);
@@ -44,13 +44,58 @@ function testStatus(value) {
   return ["success", "unverified", "failed"].includes(value) ? value : null;
 }
 
-function storedChannelState(state = {}, { env = process.env } = {}) {
+function testTarget(value) {
+  return ["image", "prompt"].includes(value) ? value : null;
+}
+
+function storedTargetTestState(state = {}) {
+  return {
+    lastTestedAt: typeof state?.lastTestedAt === "string" ? state.lastTestedAt : null,
+    lastTestStatus: testStatus(state?.lastTestStatus),
+  };
+}
+
+function storedTestStates(state = {}) {
+  const states = {
+    image: storedTargetTestState(state?.testStates?.image),
+    prompt: storedTargetTestState(state?.testStates?.prompt),
+  };
+  const legacyTarget = testTarget(state?.lastTestTarget);
+  const legacyStatus = testStatus(state?.lastTestStatus);
+  if (legacyTarget && legacyStatus && !states[legacyTarget].lastTestStatus) {
+    states[legacyTarget] = {
+      lastTestedAt: typeof state?.lastTestedAt === "string" ? state.lastTestedAt : null,
+      lastTestStatus: legacyStatus,
+    };
+  }
+  return states;
+}
+
+function clearTestStates(state) {
+  state.lastTestedAt = null;
+  state.lastTestStatus = null;
+  state.lastTestTarget = null;
+  state.testStates = {
+    image: { lastTestedAt: null, lastTestStatus: null },
+    prompt: { lastTestedAt: null, lastTestStatus: null },
+  };
+}
+
+function storedChannelState(state = {}, {
+  env = process.env,
+  fallbackModel = DEFAULT_ANALYSIS_MODEL,
+  fallbackImageModel = DEFAULT_IMAGE_MODEL,
+} = {}) {
   let apiKeyEncrypted = String(state?.apiKeyEncrypted || "");
   if (!apiKeyEncrypted && state?.apiKey) apiKeyEncrypted = encryptSecret(String(state.apiKey).trim(), { env });
   return {
     apiKeyEncrypted,
+    model: storedModelName(state?.model, fallbackModel),
+    imageModel: storedModelName(state?.imageModel, fallbackImageModel),
     lastTestedAt: typeof state?.lastTestedAt === "string" ? state.lastTestedAt : null,
     lastTestStatus: testStatus(state?.lastTestStatus),
+    lastTestTarget: testTarget(state?.lastTestTarget),
+    testStates: storedTestStates(state),
   };
 }
 
@@ -108,22 +153,31 @@ function storedLegacyConfig(config = {}, options = {}) {
     apiKeyEncrypted,
     lastTestedAt: typeof source.lastTestedAt === "string" ? source.lastTestedAt : null,
     lastTestStatus: testStatus(source.lastTestStatus),
+    lastTestTarget: testTarget(source.lastTestTarget),
   };
 }
 
 export function secureStoredModelConfig(config = {}, { env = process.env } = {}) {
   const legacyChannel = channelForLegacyBaseUrl(config.baseUrl);
   const legacyKey = encryptedLegacyKey(config, { env });
+  const legacyModel = storedModelName(config.model, DEFAULT_ANALYSIS_MODEL);
+  const legacyImageModel = storedModelName(config.imageModel, DEFAULT_IMAGE_MODEL);
   const customBaseUrl = storedCustomBaseUrl(config.customBaseUrl)
     || (legacyChannel === "custom" ? storedCustomBaseUrl(config.baseUrl) : "");
   const channelStates = Object.fromEntries(MODEL_CHANNEL_IDS.map((channel) => [
     channel,
-    storedChannelState(config?.channelStates?.[channel], { env }),
+    storedChannelState(config?.channelStates?.[channel], {
+      env,
+      fallbackModel: legacyModel,
+      fallbackImageModel: legacyImageModel,
+    }),
   ]));
   if (legacyChannel && legacyKey && !channelStates[legacyChannel].apiKeyEncrypted) {
     channelStates[legacyChannel].apiKeyEncrypted = legacyKey;
     channelStates[legacyChannel].lastTestedAt = typeof config.lastTestedAt === "string" ? config.lastTestedAt : null;
     channelStates[legacyChannel].lastTestStatus = testStatus(config.lastTestStatus);
+    channelStates[legacyChannel].lastTestTarget = testTarget(config.lastTestTarget);
+    channelStates[legacyChannel].testStates = storedTestStates(config);
   }
   let legacyConfig = storedLegacyConfig(config, { env });
   if (!legacyChannel && legacyKey && !legacyConfig) {
@@ -132,14 +186,16 @@ export function secureStoredModelConfig(config = {}, { env = process.env } = {})
       apiKeyEncrypted: legacyKey,
       lastTestedAt: typeof config.lastTestedAt === "string" ? config.lastTestedAt : null,
       lastTestStatus: testStatus(config.lastTestStatus),
+      lastTestTarget: testTarget(config.lastTestTarget),
     };
   }
+  const channel = storedModelChannel(config.channel, legacyChannel || DEFAULT_MODEL_CHANNEL);
   const next = {
-    channel: storedModelChannel(config.channel, legacyChannel || DEFAULT_MODEL_CHANNEL),
+    channel,
     customBaseUrl,
     channelStates,
-    model: storedModelName(config.model, DEFAULT_ANALYSIS_MODEL),
-    imageModel: storedModelName(config.imageModel, DEFAULT_IMAGE_MODEL),
+    model: channelStates[channel].model,
+    imageModel: channelStates[channel].imageModel,
   };
   if (legacyConfig) next.legacyConfig = legacyConfig;
   return next;
@@ -163,14 +219,15 @@ function resolvedChannelKey(stored, channel, env) {
 export function resolveModelConfig(config = {}, { env = process.env, channel } = {}) {
   const stored = secureStoredModelConfig(config, { env });
   const selectedChannel = normalizeModelChannel(channel, stored.channel);
+  const channelState = stored.channelStates[selectedChannel];
   const credentials = resolvedChannelKey(stored, selectedChannel, env);
   const customBaseUrl = stored.customBaseUrl || String(env.OPENAI_BASE_URL || "").trim();
   if (selectedChannel === "custom" && !customBaseUrl) throw new Error("自定义模型通道缺少 API 地址。");
   return {
     channel: selectedChannel,
     baseUrl: selectedChannel === "custom" ? normalizeModelBaseUrl(customBaseUrl) : MODEL_CHANNELS[selectedChannel].baseUrl,
-    model: normalizeModelName(stored.model || env.OPENAI_MODEL, DEFAULT_ANALYSIS_MODEL),
-    imageModel: normalizeModelName(stored.imageModel || env.OPENAI_IMAGE_MODEL, DEFAULT_IMAGE_MODEL),
+    model: normalizeModelName(channelState.model || env.OPENAI_MODEL, DEFAULT_ANALYSIS_MODEL),
+    imageModel: normalizeModelName(channelState.imageModel || env.OPENAI_IMAGE_MODEL, DEFAULT_IMAGE_MODEL),
     ...credentials,
   };
 }
@@ -181,11 +238,15 @@ export function publicModelConfig(config = {}, { env = process.env } = {}) {
     const channelConfig = resolvedChannelKey(stored, channel, env);
     const state = stored.channelStates[channel];
     return [channel, {
+      model: state.model,
+      imageModel: state.imageModel,
       apiKeyMasked: maskSecret(channelConfig.apiKey),
       hasApiKey: Boolean(channelConfig.apiKey),
       apiKeySource: channelConfig.apiKeySource,
       lastTestedAt: state.lastTestedAt,
       lastTestStatus: state.lastTestStatus,
+      lastTestTarget: state.lastTestTarget,
+      testStates: state.testStates,
     }];
   }));
   const activeState = channelStates[stored.channel];
@@ -193,8 +254,8 @@ export function publicModelConfig(config = {}, { env = process.env } = {}) {
     channel: stored.channel,
     customBaseUrl: stored.customBaseUrl,
     channelStates,
-    model: normalizeModelName(stored.model || env.OPENAI_MODEL, DEFAULT_ANALYSIS_MODEL),
-    imageModel: normalizeModelName(stored.imageModel || env.OPENAI_IMAGE_MODEL, DEFAULT_IMAGE_MODEL),
+    model: activeState.model,
+    imageModel: activeState.imageModel,
     ...activeState,
   };
 }
@@ -218,51 +279,55 @@ export function updateModelConfig(current = {}, patch = {}, { env = process.env 
     const customBaseUrl = normalizeModelBaseUrl(customBaseUrlProvided ? patch.customBaseUrl : patch.baseUrl);
     if (customBaseUrl !== next.customBaseUrl) {
       next.customBaseUrl = customBaseUrl;
-      next.channelStates.custom.lastTestedAt = null;
-      next.channelStates.custom.lastTestStatus = null;
+      clearTestStates(next.channelStates.custom);
     }
   }
-  let sharedModelChanged = false;
+  let channelModelChanged = false;
   if (patch.model !== undefined) {
     const model = normalizeModelName(patch.model);
-    sharedModelChanged ||= model !== next.model;
-    next.model = model;
+    channelModelChanged ||= model !== next.channelStates[targetChannel].model;
+    next.channelStates[targetChannel].model = model;
   }
   if (patch.imageModel !== undefined) {
     const imageModel = normalizeModelName(patch.imageModel);
-    sharedModelChanged ||= imageModel !== next.imageModel;
-    next.imageModel = imageModel;
+    channelModelChanged ||= imageModel !== next.channelStates[targetChannel].imageModel;
+    next.channelStates[targetChannel].imageModel = imageModel;
   }
   const apiKey = String(patch.apiKey || "").trim();
   if (apiKey) {
     next.channelStates[targetChannel].apiKeyEncrypted = encryptSecret(apiKey, { env });
-    next.channelStates[targetChannel].lastTestedAt = null;
-    next.channelStates[targetChannel].lastTestStatus = null;
+    clearTestStates(next.channelStates[targetChannel]);
   } else if (patch.clearApiKey) {
     next.channelStates[targetChannel].apiKeyEncrypted = "";
-    next.channelStates[targetChannel].lastTestedAt = null;
-    next.channelStates[targetChannel].lastTestStatus = null;
+    clearTestStates(next.channelStates[targetChannel]);
   }
-  if (sharedModelChanged) {
-    for (const channel of MODEL_CHANNEL_IDS) {
-      next.channelStates[channel].lastTestedAt = null;
-      next.channelStates[channel].lastTestStatus = null;
-    }
-  }
+  if (channelModelChanged) clearTestStates(next.channelStates[targetChannel]);
   if (next.channel === "custom") {
     const customBaseUrl = next.customBaseUrl || String(env.OPENAI_BASE_URL || "").trim();
     if (!customBaseUrl) throw new Error("自定义模型通道缺少 API 地址。");
     normalizeModelBaseUrl(customBaseUrl);
   }
+  next.model = next.channelStates[next.channel].model;
+  next.imageModel = next.channelStates[next.channel].imageModel;
   return next;
 }
 
-export function recordModelTestResult(current = {}, { channel, ok, status = ok ? "success" : "failed", testedAt = new Date().toISOString() } = {}, options = {}) {
+export function recordModelTestResult(current = {}, { channel, target, ok, status = ok ? "success" : "failed", testedAt = new Date().toISOString() } = {}, options = {}) {
   const next = secureStoredModelConfig(current, options);
   const targetChannel = normalizeModelChannel(channel, next.channel);
   next.channelStates = Object.fromEntries(MODEL_CHANNEL_IDS.map((id) => [id, { ...next.channelStates[id] }]));
+  const normalizedTarget = testTarget(target);
+  const normalizedStatus = testStatus(status) || "failed";
   next.channelStates[targetChannel].lastTestedAt = testedAt;
-  next.channelStates[targetChannel].lastTestStatus = testStatus(status) || "failed";
+  next.channelStates[targetChannel].lastTestStatus = normalizedStatus;
+  next.channelStates[targetChannel].lastTestTarget = normalizedTarget;
+  if (normalizedTarget) {
+    next.channelStates[targetChannel].testStates = storedTestStates(next.channelStates[targetChannel]);
+    next.channelStates[targetChannel].testStates[normalizedTarget] = {
+      lastTestedAt: testedAt,
+      lastTestStatus: normalizedStatus,
+    };
+  }
   return next;
 }
 
@@ -283,7 +348,7 @@ function errorDetail(raw) {
     const parsed = JSON.parse(raw);
     return parsed?.error?.message || parsed?.message || parsed?.error || raw;
   } catch {
-    return raw;
+    return /^\s*</.test(String(raw || "")) ? "" : String(raw || "").slice(0, 500);
   }
 }
 
@@ -342,6 +407,174 @@ export async function requestModelApiJson(url, {
   } catch {
     throw new ModelApiError(`${label}返回了无法解析的 JSON。`, { code: "MODEL_API_INVALID_RESPONSE", status: 502 });
   }
+}
+
+const IMAGE_MODEL_MARKERS = [
+  "dall-e",
+  "dalle",
+  "flux",
+  "gpt-image",
+  "ideogram",
+  "image",
+  "imagen",
+  "nano-banana",
+  "recraft",
+  "sdxl",
+  "seedream",
+  "stable-diffusion",
+];
+const NON_TEXT_MODEL_MARKERS = [
+  ...IMAGE_MODEL_MARKERS,
+  "audio",
+  "embedding",
+  "moderation",
+  "rerank",
+  "sora",
+  "speech",
+  "transcribe",
+  "tts",
+  "video",
+  "whisper",
+];
+
+function modelId(item) {
+  const id = typeof item === "string" ? item.trim() : String(item?.id || "").trim();
+  if (!id || id.length > 200) return "";
+  return Array.from(id, (character) => character.charCodeAt(0)).some((code) => code <= 31 || code === 127) ? "" : id;
+}
+
+function modelCapabilityTokens(item) {
+  const tokens = [item?.type, item?.model_type, item?.task, item?.category]
+    .filter((value) => typeof value === "string");
+  if (Array.isArray(item?.capabilities)) tokens.push(...item.capabilities.filter((value) => typeof value === "string"));
+  if (item?.capabilities && typeof item.capabilities === "object" && !Array.isArray(item.capabilities)) {
+    tokens.push(...Object.entries(item.capabilities).filter(([, enabled]) => enabled === true).map(([name]) => name));
+  }
+  return tokens.join(" ").toLowerCase().replace(/_/g, "-");
+}
+
+function containsMarker(value, markers) {
+  const normalized = value.toLowerCase();
+  return markers.some((marker) => normalized.includes(marker));
+}
+
+function isImageGenerationModel(item, id) {
+  const capabilities = modelCapabilityTokens(item);
+  return containsMarker(id, IMAGE_MODEL_MARKERS)
+    || /(?:image-generation|text-to-image|images-generation)/.test(capabilities);
+}
+
+export function classifyAvailableModels(items = []) {
+  const promptModels = new Set();
+  const imageModels = new Set();
+  for (const item of Array.isArray(items) ? items : []) {
+    const id = modelId(item);
+    if (!id) continue;
+    if (isImageGenerationModel(item, id)) {
+      imageModels.add(id);
+      continue;
+    }
+    const capabilities = modelCapabilityTokens(item);
+    if (!containsMarker(id, NON_TEXT_MODEL_MARKERS)
+      && !/(?:audio|embedding|moderation|rerank|speech|transcri|text-to-video|tts|video)/.test(capabilities)) {
+      promptModels.add(id);
+    }
+  }
+  const sortModels = (values) => [...values].sort((left, right) => left.localeCompare(right, "en"));
+  return { promptModels: sortModels(promptModels), imageModels: sortModels(imageModels) };
+}
+
+export async function discoverAvailableModels(config = {}, {
+  env = process.env,
+  fetchImpl = globalThis.fetch,
+  now = () => new Date().toISOString(),
+  signal,
+  timeoutMs = 15_000,
+} = {}) {
+  const resolved = resolveModelConfig(config, { env });
+  const data = await requestModelApiJson(`${resolved.baseUrl}/models`, {
+    apiKey: resolved.apiKey,
+    fetchImpl,
+    label: "可用模型查询",
+    signal,
+    timeoutMs,
+  });
+  if (!Array.isArray(data?.data)) {
+    throw new ModelApiError("可用模型查询返回结构无效。", { code: "MODEL_CATALOG_INVALID", status: 502 });
+  }
+  return {
+    channel: resolved.channel,
+    ...classifyAvailableModels(data.data),
+    fetchedAt: now(),
+  };
+}
+
+function modelResponseText(data) {
+  if (typeof data?.output_text === "string" && data.output_text.trim()) return data.output_text.trim();
+  return Array.isArray(data?.output)
+    ? data.output.flatMap((item) => Array.isArray(item?.content) ? item.content : [])
+      .map((item) => typeof item?.text === "string" ? item.text : "")
+      .filter(Boolean)
+      .join("\n")
+      .trim()
+    : "";
+}
+
+export async function testPromptModel(config = {}, {
+  env = process.env,
+  fetchImpl = globalThis.fetch,
+  now = () => new Date().toISOString(),
+  signal,
+  timeoutMs = 15_000,
+} = {}) {
+  const resolved = resolveModelConfig(config, { env });
+  const data = await requestModelApiJson(`${resolved.baseUrl}/responses`, {
+    apiKey: resolved.apiKey,
+    fetchImpl,
+    label: "提示词模型连接测试",
+    signal,
+    timeoutMs,
+    body: {
+      model: resolved.model,
+      input: "只返回测试结果。",
+      text: {
+        format: {
+          type: "json_schema",
+          name: "connection_test",
+          strict: true,
+          schema: {
+            type: "object",
+            properties: { ok: { type: "boolean", enum: [true] } },
+            required: ["ok"],
+            additionalProperties: false,
+          },
+        },
+      },
+    },
+  });
+  let result;
+  try {
+    result = JSON.parse(modelResponseText(data));
+  } catch {
+    throw new ModelApiError("提示词模型连接测试返回了无效 JSON。", {
+      code: "MODEL_API_INVALID_RESPONSE",
+      status: 502,
+    });
+  }
+  if (!result || typeof result !== "object" || Array.isArray(result)
+    || result.ok !== true || Object.keys(result).length !== 1) {
+    throw new ModelApiError("提示词模型连接测试返回结构无效。", {
+      code: "MODEL_API_INVALID_RESPONSE",
+      status: 502,
+    });
+  }
+  return {
+    ok: true,
+    status: "success",
+    testedAt: now(),
+    model: resolved.model,
+    message: "提示词模型连接成功。",
+  };
 }
 
 export async function testImageModel(config = {}, {

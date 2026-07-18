@@ -3,6 +3,7 @@ import cors from "cors";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { execFileSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import fs from "node:fs";
 import { z } from "zod";
 import JSZip from "jszip";
@@ -12,24 +13,35 @@ import { loadEnv } from "./utils/env.js";
 import { dbRuntimeInfo, newId, readDb, updateDb } from "./storage/db.js";
 import { analyzeData } from "./services/analysisService.js";
 import { buildTaobaoOAuthUrl } from "./services/authService.js";
-import { clearFinishedCaptureJobs, getCaptureQueueStatus, preserveBuyerShowHistory, rescheduleMonitor, runMonitorOnce, runProductOnce, scheduleProduct, sessionsForProduct, setSkuMonitorPrice, snapshotHasVerifiedNormalPrice, startScheduler, stopScheduler, withAccountCaptureLock } from "./services/monitorService.js";
+import { clearFailedCaptureJobs, clearFinishedCaptureJobs, clearStaleCaptureQueueJobs, deleteCaptureQueueJob, getCaptureQueueStatus, recoverCaptureQueue, rescheduleMonitor, resumeAuthRequiredCaptureJobs, resumeCaptureJob, runBuyerShowOnce, runCaptureBatchOnce, runProductOnce, scheduleProduct, sessionsForProduct, setSkuMonitorPrice, snapshotHasVerifiedNormalPrice, startScheduler, stopCaptureQueue, stopScheduler, withAccountCaptureLock } from "./services/monitorService.js";
+import { monitorChannelSupported } from "./services/monitorRuleService.js";
 import { createNotificationLog, effectivePriceForSku, publicFeishuConfig, sendFeishuNotification, updateFeishuConfig } from "./services/feishuService.js";
 import { appendPriceDocument, cliStatus, createPriceDocument, readAuthQr, startCliLogin, startCliSetup } from "./services/larkCliService.js";
-import { browserRuntimeInfo, checkTaobaoSession, closeAccountBrowser, findAvailableBrowserPort, getTaobaoAuthState, isTaobaoLoginUrl, keepAccountBrowserWarm, minimizeAccountBrowser, openProductInAccountChrome, openTaobaoLogin } from "./services/browserService.js";
-import { scrapeTmallBuyerShows, scrapeTmallProduct, SCRAPER_VERSION } from "./services/tmallScraper.js";
+import { browserRuntimeInfo, checkTaobaoSession, closeAccountBrowser, findAvailableBrowserPort, getTaobaoAuthState, isTaobaoLoginUrl, keepAccountBrowserWarm, minimizeAccountBrowser, openProductInAccountChrome, openTaobaoLogin, openTmallLogin, resetTmallSession } from "./services/browserService.js";
+import { scrapeTmallProduct, SCRAPER_VERSION } from "./services/tmallScraper.js";
 import { normalizeProductUrl } from "./utils/productUrl.js";
 import { checkForUpdate } from "./services/updateService.js";
 import {
   deleteGeneratedImage,
-  generateImages,
   imageGenerationLimits,
   listGeneratedImages,
   readGeneratedImageFile,
-  saveGeneratedImages,
   updateGeneratedImage,
 } from "./services/imageGenerationService.js";
+import {
+  cancelImageJob,
+  enqueueImageJob,
+  getImageJob,
+  listImageJobs,
+  parseImageGenerationRequest,
+  retryImageJob,
+  startImageJobQueue,
+  stopImageJobQueue,
+  waitForImageJob,
+} from "./services/imageJobService.js";
 import { clearPhotoshopWorkfile, openGeneratedImageInPhotoshop, syncPhotoshopWorkfile } from "./services/photoshopService.js";
-import { MODEL_CHANNEL_IDS, ModelApiError, publicModelConfig, recordModelTestResult, resolveModelConfig, testImageModel, updateModelConfig } from "./services/modelConfigService.js";
+import { discoverAvailableModels, MODEL_CHANNEL_IDS, ModelApiError, publicModelConfig, recordModelTestResult, resolveModelConfig, testImageModel, testPromptModel, updateModelConfig } from "./services/modelConfigService.js";
+import { analyzeProductImages, generatePromptSet, generatePromptSetLocally, interpretQuickPrompt, interpretQuickPromptLocally, normalizePromptStudioState, productFactsSchema, promptLibraryTemplateIdSchema, styleSchema, validatePromptStudioInput, validateQuickPromptInput } from "./services/promptStudioService.js";
 import {
   clearLocalEvidenceFiles,
   createLocalImport,
@@ -41,6 +53,17 @@ import {
   validateLocalEvidenceDirectory,
 } from "./services/localImportService.js";
 import { isAllowedLocalRequest, localCorsOptions } from "./utils/localOrigin.js";
+import { cleanupEvidenceRetention } from "./services/evidenceRetentionService.js";
+import { resumeNotificationOutbox, startNotificationOutboxWorker, stopNotificationOutboxWorker } from "./services/notificationOutboxService.js";
+import {
+  createTmallPriceCooldownError,
+  hydrateTmallPriceCircuits,
+  isTmallPriceGateError,
+  markTmallPriceGate,
+  refreshTmallPriceCircuit,
+  tmallPriceCircuitOpen,
+  TMALL_PRICE_STATUS,
+} from "./services/tmallPriceCircuitService.js";
 
 loadEnv();
 
@@ -73,11 +96,55 @@ function runtimeInfo() {
 
 export const app = express();
 const pendingScans = new Map();
+const pendingQuickPromptRequests = new Map();
 const pendingBrowserPorts = new Set();
+const QUICK_PROMPT_STAGE_TIMEOUT_MS = 25_000;
+const QUICK_PROMPT_TOTAL_TIMEOUT_MS = 45_000;
 let authCheckActive = false;
 let imageGenerationActive = false;
 let staticMiddleware = null;
 let schedulerStarted = false;
+let evidenceCleanupTimer = null;
+
+async function rememberPendingScan(pending) {
+  pendingScans.set(pending.profileKey, pending);
+  try {
+    await updateDb((db) => {
+      db.pendingAuthScans = [
+        ...(Array.isArray(db.pendingAuthScans) ? db.pendingAuthScans : []).filter((item) => item.profileKey !== pending.profileKey),
+        pending,
+      ];
+      return db;
+    });
+  } catch (error) {
+    pendingScans.delete(pending.profileKey);
+    throw error;
+  }
+}
+
+async function forgetPendingScan(profileKey) {
+  pendingScans.delete(profileKey);
+  await updateDb((db) => {
+    db.pendingAuthScans = (Array.isArray(db.pendingAuthScans) ? db.pendingAuthScans : []).filter((item) => item.profileKey !== profileKey);
+    return db;
+  });
+}
+
+function startEvidenceCleanup() {
+  const run = () => cleanupEvidenceRetention({ dryRun: false })
+    .then((result) => {
+      if (result.deleted || result.errors.length) console.log("[evidence-retention]", result);
+    })
+    .catch((error) => console.error("[evidence-retention]", error));
+  void run();
+  evidenceCleanupTimer ||= setInterval(run, 24 * 60 * 60 * 1_000);
+  evidenceCleanupTimer.unref?.();
+}
+
+function stopEvidenceCleanup() {
+  if (evidenceCleanupTimer) clearInterval(evidenceCleanupTimer);
+  evidenceCleanupTimer = null;
+}
 const localImportCommits = new Map();
 const rawDataCaptures = new Map();
 
@@ -102,20 +169,16 @@ const imageUploadFields = imageUpload.fields([
   { name: "referenceImages", maxCount: imageGenerationLimits.maxReferenceFiles },
   { name: "maskImage", maxCount: 1 },
 ]);
+const promptStudioUploadFields = imageUpload.fields([
+  { name: "productImages", maxCount: 3 },
+  { name: "styleImages", maxCount: 1 },
+]);
 
-function reserveImageGeneration(req, res, next) {
-  if (imageGenerationActive) {
-    res.status(409).json({ message: "已有图片正在生成，请等待完成后再提交下一次任务。" });
-    return;
-  }
-  imageGenerationActive = true;
+function parseImageGenerationUpload(req, res, next) {
   let parsing = true;
   let uploadAborted = false;
   const releaseAbortedUpload = () => {
-    if (parsing) {
-      uploadAborted = true;
-      imageGenerationActive = false;
-    }
+    if (parsing) uploadAborted = true;
   };
   req.once("aborted", releaseAbortedUpload);
   imageUploadFields(req, res, (error) => {
@@ -128,16 +191,80 @@ function reserveImageGeneration(req, res, next) {
       uploadError.status = 400;
       uploadError.code = "IMAGE_MULTIPART_INVALID";
     }
-    if (uploadError) imageGenerationActive = false;
     next(uploadError);
   });
 }
 
+function parsePromptStudioUpload(req, res, next) {
+  promptStudioUploadFields(req, res, (error) => {
+    if (error && !(error instanceof multer.MulterError) && !error.status) {
+      error.status = 400;
+      error.code = "PROMPT_STUDIO_UPLOAD_INVALID";
+    }
+    next(error);
+  });
+}
+
+const promptProductProfileSchema = productFactsSchema.extend({ name: z.string().trim().min(1).max(120) }).strict();
+const promptStylePresetSchema = styleSchema.extend({ name: z.string().trim().min(1).max(100) }).strict();
+const promptProductProfilePatchSchema = promptProductProfileSchema.partial().refine((value) => Object.keys(value).length > 0, "请选择要更新的产品档案字段。");
+const promptStylePresetPatchSchema = promptStylePresetSchema.partial().refine((value) => Object.keys(value).length > 0, "请选择要更新的风格方案字段。");
+const promptLibraryFavoritePatchSchema = z.object({ favorite: z.boolean() }).strict();
+
+function promptStudioMultipartRequest(req) {
+  const raw = req.body?.request;
+  if (typeof raw !== "string") throw Object.assign(new Error("缺少提示词请求内容。"), { status: 400, code: "PROMPT_STUDIO_REQUEST_MISSING" });
+  try {
+    return JSON.parse(raw);
+  } catch {
+    throw Object.assign(new Error("提示词请求不是有效 JSON。"), { status: 400, code: "PROMPT_STUDIO_REQUEST_INVALID" });
+  }
+}
+
+function reserveImageGeneration(req, res, next) {
+  if (imageGenerationActive) {
+    res.status(409).json({ message: "已有图片正在生成，请等待完成后再提交下一次任务。" });
+    return;
+  }
+  imageGenerationActive = true;
+  parseImageGenerationUpload(req, res, (error) => {
+    if (error) imageGenerationActive = false;
+    next(error);
+  });
+}
+
 function publicAuthSession(session) {
-  const result = { ...session, cookie: session.cookie ? "configured" : "" };
+  const result = {
+    ...session,
+    cookie: session.cookie ? "configured" : "",
+    // `loginStatus` is the Taobao identity check. Price capability is kept
+    // separate and starts unknown until a real, local-evidence price capture.
+    tmallPriceStatus: session.tmallPriceStatus || TMALL_PRICE_STATUS.UNKNOWN,
+  };
   delete result.cooldownUntil;
   if (result.healthStatus === "cooldown") result.healthStatus = "degraded";
   return result;
+}
+
+function tmallPriceStatePatch(session = {}) {
+  return {
+    tmallPriceStatus: session.tmallPriceStatus || TMALL_PRICE_STATUS.UNKNOWN,
+    tmallPriceCheckedAt: session.tmallPriceCheckedAt || null,
+    tmallPriceCooldownUntil: session.tmallPriceCooldownUntil || null,
+    tmallPriceDeviceCooldownUntil: session.tmallPriceDeviceCooldownUntil || null,
+    tmallPriceLastFailureAt: session.tmallPriceLastFailureAt || null,
+    tmallPriceFailureReason: session.tmallPriceFailureReason || null,
+    tmallPriceFailureCount: Number(session.tmallPriceFailureCount || 0),
+  };
+}
+
+async function persistTmallPriceState(session) {
+  await updateDb((db) => {
+    db.authSessions = db.authSessions.map((item) => item.id === session.id
+      ? { ...item, ...tmallPriceStatePatch(session) }
+      : item);
+    return db;
+  });
 }
 
 app.use((req, res, next) => {
@@ -156,12 +283,28 @@ app.get("/api/runtime/update", async (_req, res) => {
   }
 });
 
-app.get("/api/capture-queue", (_req, res) => {
-  res.json(getCaptureQueueStatus());
+app.get("/api/capture-queue", async (_req, res) => {
+  res.json(await getCaptureQueueStatus());
 });
 
-app.delete("/api/capture-queue/completed", (_req, res) => {
-  res.json({ removed: clearFinishedCaptureJobs() });
+app.delete("/api/capture-queue/completed", async (_req, res) => {
+  res.json({ removed: await clearFinishedCaptureJobs() });
+});
+
+app.delete("/api/capture-queue/failed", async (_req, res) => {
+  res.json({ removed: await clearFailedCaptureJobs() });
+});
+
+app.delete("/api/capture-queue/:id", async (req, res) => {
+  const removed = await deleteCaptureQueueJob(req.params.id);
+  if (!removed) return res.status(404).json({ message: "抓取任务不存在或已删除。" });
+  res.status(204).end();
+});
+
+app.post("/api/capture-queue/:id/resume", async (req, res) => {
+  const job = await resumeCaptureJob(req.params.id);
+  if (!job) return res.status(404).json({ message: "没有找到可恢复的待授权任务。" });
+  res.json(job);
 });
 
 const productSchema = z.object({
@@ -318,7 +461,7 @@ app.get("/api/overview", async (_req, res) => {
     feishu: publicFeishuConfig(db.feishu),
     notificationLogs: db.notificationLogs.filter((log) => log.status !== "suppressed").slice(-80).reverse(),
     monitor: db.monitor,
-    captureQueue: getCaptureQueueStatus(),
+    captureQueue: await getCaptureQueueStatus(),
     runtime: runtimeInfo(),
   });
 });
@@ -541,7 +684,22 @@ export async function captureSanitizedDataPreview(input, { scraper = scrapeTmall
     captureBuyerShows: false,
     captureMediaAssets: false,
   };
-  const captured = await withAccountCaptureLock(session, () => scraper(captureCandidate, session));
+  hydrateTmallPriceCircuits([session]);
+  refreshTmallPriceCircuit(session);
+  let captured;
+  try {
+    captured = await withAccountCaptureLock(session, () => {
+      if (tmallPriceCircuitOpen(session)) throw createTmallPriceCooldownError(session);
+      return scraper(captureCandidate, session);
+    });
+  } catch (error) {
+    if (isTmallPriceGateError(error)) {
+      markTmallPriceGate(session);
+      error.status ||= 409;
+      await persistTmallPriceState(session);
+    }
+    throw error;
+  }
   if (captured.localFirst?.sourceSaved !== true || captured.localFirst?.parsedFromDisk !== true || !captured.browserEvidenceFile) {
     throw localImportError("LOCAL_FIRST_CAPTURE_INCOMPLETE", "浏览器数据没有完成脱敏落盘和重新读盘，无法生成查看数据。", 422);
   }
@@ -671,7 +829,18 @@ app.post("/api/products/batch", async (req, res) => {
     return current;
   });
   let queueResult = null;
-  if (created.length) queueResult = await runMonitorOnce({ source: "manual-batch", productIds: created.map((product) => product.id), includeDisabled: true });
+  let followupRuns = [];
+  if (created.length) {
+    const createdIds = created.map((product) => product.id);
+    queueResult = await runCaptureBatchOnce({ source: "manual-batch", productIds: createdIds, includeDisabled: true, captureKind: "price" });
+    const successfulIds = (queueResult.run?.items || []).filter((item) => item.status !== "failed").map((item) => item.productId);
+    if (successfulIds.length) {
+      const followups = [];
+      if (parsed.captureMediaAssets) followups.push(runCaptureBatchOnce({ source: "manual-batch-materials", productIds: successfulIds, includeDisabled: true, captureKind: "materials" }));
+      if (parsed.captureBuyerShows) followups.push(runCaptureBatchOnce({ source: "manual-batch-buyer-show", productIds: successfulIds, includeDisabled: true, captureKind: "buyer-show" }));
+      followupRuns = (await Promise.all(followups)).map((result) => result.run);
+    }
+  }
   await rescheduleMonitor();
   const results = queueResult?.results || [];
   const success = results.filter((result) => result.snapshot).length;
@@ -682,8 +851,9 @@ app.post("/api/products/batch", async (req, res) => {
     success,
     failed: results.length - success,
     run: queueResult?.run || null,
+    followupRuns,
     items: queueResult?.run?.items || [],
-    message: `提交 ${uniqueUrls.length} 条，新建 ${created.length} 条，抓取成功 ${success} 条，失败 ${results.length - success} 条，重复跳过 ${uniqueUrls.length - created.length} 条。`,
+    message: `提交 ${uniqueUrls.length} 条，新建 ${created.length} 条，价格抓取成功 ${success} 条，失败 ${results.length - success} 条，重复跳过 ${uniqueUrls.length - created.length} 条。${followupRuns.length ? ` 已分别完成 ${followupRuns.length} 类独立素材任务。` : ""}`,
   });
 });
 
@@ -698,8 +868,11 @@ app.post("/api/products/batch-delete", async (req, res) => {
     db.products = db.products.filter((product) => !selectedIds.has(product.id));
     db.snapshots = db.snapshots.filter((snapshot) => !selectedIds.has(snapshot.productId));
     db.notificationLogs = db.notificationLogs.filter((log) => !selectedIds.has(log.productId));
+    db.notificationOutbox = (db.notificationOutbox || []).filter((job) => !selectedIds.has(job.payload?.product?.id));
+    for (const productId of selectedIds) delete db.alertStates?.[productId];
     return db;
   });
+  await clearStaleCaptureQueueJobs();
   await rescheduleMonitor();
   res.json({ requested: selectedIds.size, deleted });
 });
@@ -718,6 +891,17 @@ app.patch("/api/products/:id", async (req, res) => {
     monitorStartAt: z.string().datetime().nullable().optional(),
     monitorPrice: z.number().positive().nullable().optional(),
     skuMonitorPrices: z.record(z.string().min(1), z.number().positive()).optional(),
+    skuMonitorRules: z.record(z.string().min(1), z.object({
+      lowest: z.number().positive().optional(),
+      normal: z.number().positive().optional(),
+      billion: z.number().positive().optional(),
+      seckill: z.number().positive().optional(),
+      government: z.number().positive().optional(),
+      surprise: z.number().positive().optional(),
+      gift: z.number().positive().optional(),
+      vip88: z.number().positive().optional(),
+      coin: z.number().positive().optional(),
+    })).optional(),
   });
   const patch = schema.parse(req.body);
   if (patch.url) patch.url = normalizeProductUrl(patch.url);
@@ -728,6 +912,14 @@ app.patch("/api/products/:id", async (req, res) => {
       if (product.id !== req.params.id) return product;
       if (product.captureMode === "local-only" && patch.enabled === true) {
         throw localImportError("LOCAL_ONLY_MONITOR_DISABLED", "该商品使用本地数据模式，不能启用浏览器定时抓取。请通过“本地数据导入”更新价格。", 409);
+      }
+      const accountType = patch.accountType || product.accountType || "normal";
+      const monitorRules = patch.skuMonitorRules || product.skuMonitorRules || {};
+      const unsupportedChannel = Object.values(monitorRules)
+        .flatMap((rules) => Object.keys(rules || {}))
+        .find((channel) => !monitorChannelSupported(accountType, channel));
+      if ((patch.skuMonitorRules || patch.accountType) && unsupportedChannel) {
+        throw Object.assign(new Error(`主账号类型 ${accountType} 不支持 ${unsupportedChannel} 监控口径，请先清除该规则。`), { status: 409, code: "MONITOR_CHANNEL_NOT_SUPPORTED" });
       }
       scheduleChanged = patch.enabled !== undefined || patch.monitorScheduleMode !== undefined || patch.monitorIntervalMinutes !== undefined || patch.monitorStartAt !== undefined;
       updated = { ...product, ...patch, updatedAt: new Date().toISOString() };
@@ -745,12 +937,19 @@ app.patch("/api/products/:id", async (req, res) => {
 });
 
 app.patch("/api/products/:id/sku-monitor-price", async (req, res) => {
-  const { skuId, value } = z.object({ skuId: z.string().min(1), value: z.number().positive().nullable() }).parse(req.body);
+  const { skuId, value, channel } = z.object({
+    skuId: z.string().min(1),
+    value: z.number().positive().nullable(),
+    channel: z.enum(["lowest", "normal", "billion", "seckill", "government", "surprise", "gift", "vip88", "coin"]).optional().default("lowest"),
+  }).parse(req.body);
   let updated = null;
   await updateDb((db) => {
     db.products = db.products.map((product) => {
       if (product.id !== req.params.id) return product;
-      updated = { ...setSkuMonitorPrice(product, skuId, value), updatedAt: new Date().toISOString() };
+      if (value !== null && !monitorChannelSupported(product.accountType || "normal", channel)) {
+        throw Object.assign(new Error("该价格口径不属于商品主账号，不能设为自动监控条件。请切回主账号视角。"), { status: 409, code: "MONITOR_CHANNEL_NOT_SUPPORTED" });
+      }
+      updated = { ...setSkuMonitorPrice(product, skuId, value, channel), updatedAt: new Date().toISOString() };
       return updated;
     });
     return db;
@@ -778,6 +977,10 @@ app.patch("/api/feishu/settings", async (req, res) => {
     config = db.feishu;
     return db;
   });
+  void resumeNotificationOutbox({
+    thresholdAlerts: config.enabled,
+    documentSync: config.documentEnabled,
+  }).catch((error) => console.error("[notification-outbox-resume]", error));
   res.json(publicFeishuConfig(config));
 });
 
@@ -817,6 +1020,8 @@ app.post("/api/feishu/document/create", async (_req, res) => {
     current.feishu.lastDocumentSyncAt = new Date().toISOString();
     return current;
   });
+  void resumeNotificationOutbox({ documentSync: true })
+    .catch((error) => console.error("[notification-outbox-resume]", error));
   res.status(201).json(document);
 });
 
@@ -890,73 +1095,27 @@ app.delete("/api/products/:id", async (req, res) => {
     db.products = db.products.filter((product) => product.id !== req.params.id);
     db.snapshots = db.snapshots.filter((snapshot) => snapshot.productId !== req.params.id);
     db.notificationLogs = db.notificationLogs.filter((log) => log.productId !== req.params.id);
+    db.notificationOutbox = (db.notificationOutbox || []).filter((job) => job.payload?.product?.id !== req.params.id);
+    delete db.alertStates?.[req.params.id];
     return db;
   });
+  await clearStaleCaptureQueueJobs();
   await rescheduleMonitor();
   res.status(204).end();
 });
 
 app.post("/api/products/:id/capture", async (req, res) => {
-  res.json(await runProductOnce(req.params.id, { source: "manual-product" }));
+  const { captureKind } = z.object({ captureKind: z.enum(["price", "buyer-show", "materials"]).optional().default("price") }).parse(req.body || {});
+  const source = captureKind === "materials" ? "manual-materials" : captureKind === "buyer-show" ? "manual-buyer-show" : "manual-product";
+  res.json(await runProductOnce(req.params.id, { source, captureKind }));
+});
+
+app.post("/api/products/:id/capture-all-accounts", async (req, res) => {
+  res.json(await runProductOnce(req.params.id, { source: "manual-account-views", accountMode: "all", captureKind: "price" }));
 });
 
 app.post("/api/products/:id/buyer-shows/retry", async (req, res) => {
-  const db = await readDb();
-  const product = db.products.find((item) => item.id === req.params.id);
-  if (!product) return res.status(404).json({ message: "商品不存在。" });
-  if (product.captureMode === "local-only") return res.status(409).json({ message: "该商品使用本地数据模式，已阻止买家秀网页抓取。" });
-  if (!product.lastSnapshot) return res.status(409).json({ message: "商品还没有价格快照，请先完成首次抓取。" });
-
-  const activeSessions = db.authSessions.filter((session) => session.source === "taobao-browser" && (session.enabled ?? session.active ?? true) && session.loginStatus !== "expired");
-  const accountType = product.accountType || "normal";
-  const sessionCandidates = sessionsForProduct(activeSessions, accountType);
-  if (!sessionCandidates.length) return res.status(409).json({ message: "没有可用的淘宝登录账号，请先到账号授权页面登录。" });
-
-  const captures = [];
-  const interactions = [];
-  let result;
-  for (let attempt = 0; attempt < 2; attempt += 1) {
-    result = await scrapeTmallBuyerShows(product, sessionCandidates[attempt % sessionCandidates.length]);
-    captures.push(result.capture);
-    interactions.push(...result.interactions.map((interaction) => ({ ...interaction, retryAttempt: attempt + 1 })));
-    if (result.capture.status !== "failed") break;
-    await new Promise((resolve) => setTimeout(resolve, 800));
-  }
-  result.capture.attempts = captures.flatMap((capture) => capture.attempts || []);
-  result.interactions = interactions;
-  const nextSnapshot = preserveBuyerShowHistory({
-    ...structuredClone(product.lastSnapshot),
-    buyerShowCapture: result.capture,
-    buyerShows: result.items,
-    ...(result.browserEvidenceFile ? {
-      buyerShowEvidenceId: result.browserEvidenceId,
-      buyerShowEvidenceFile: result.browserEvidenceFile,
-      buyerShowLocalFirst: result.localFirst,
-    } : {}),
-    rawSignals: {
-      ...(product.lastSnapshot.rawSignals || {}),
-      buyerShowCount: result.items.length,
-      buyerShowInteractions: result.interactions,
-      buyerShowEvidenceSourceSaved: result.localFirst?.sourceSaved === true,
-      buyerShowEvidenceParsedFromDisk: result.localFirst?.parsedFromDisk === true,
-    },
-  }, product.lastSnapshot);
-  nextSnapshot.rawSignals.buyerShowCount = nextSnapshot.buyerShows?.length || 0;
-  let updatedProduct;
-  await updateDb((current) => {
-    const productIndex = current.products.findIndex((item) => item.id === product.id);
-    if (productIndex >= 0) {
-      updatedProduct = { ...current.products[productIndex], lastSnapshot: nextSnapshot, updatedAt: new Date().toISOString() };
-      current.products[productIndex] = updatedProduct;
-    }
-    for (let index = current.snapshots.length - 1; index >= 0; index -= 1) {
-      if (current.snapshots[index].productId !== product.id) continue;
-      current.snapshots[index] = { ...current.snapshots[index], ...nextSnapshot };
-      break;
-    }
-    return current;
-  });
-  res.json({ ok: result.capture.status !== "failed", product: updatedProduct, capture: nextSnapshot.buyerShowCapture });
+  res.json(await runBuyerShowOnce(req.params.id, { source: "manual-buyer-show" }));
 });
 
 app.post("/api/products/:id/open", async (req, res) => {
@@ -971,7 +1130,7 @@ app.post("/api/products/:id/open", async (req, res) => {
   const activeSessions = db.authSessions.filter((session) => session.source === "taobao-browser" && (session.enabled ?? session.active ?? true) && session.loginStatus !== "expired" && session.browserProfileKey && session.browserPort);
   const authSession = activeSessions.find((session) => session.id === requestedSessionId)
     || activeSessions.find((session) => session.id === product.lastSnapshot?.primaryAccountSessionId)
-    || sessionsForProduct(activeSessions, accountType)[0];
+    || sessionsForProduct(activeSessions, accountType, 0, "all", product.primaryAccountSessionId)[0];
   if (!authSession) {
     const accountLabel = accountType === "gift" ? "礼金" : accountType === "vip88" ? "88VIP" : "普通";
     res.status(409).json({ message: `没有可用的${accountLabel}账号登录态，也没有其他可回退的扫码账号，请先在账号授权页面登录。` });
@@ -988,8 +1147,11 @@ app.get("/api/products/:id/snapshots", async (req, res) => {
 });
 
 app.post("/api/products/batch-capture", async (req, res) => {
-  const { ids } = z.object({ ids: z.array(z.string().min(1)).min(1).max(20) }).parse(req.body);
-  const result = await runMonitorOnce({ source: "manual-batch", productIds: [...new Set(ids)], includeDisabled: true });
+  const { ids, captureKind } = z.object({
+    ids: z.array(z.string().min(1)).min(1).max(20),
+    captureKind: z.enum(["price", "buyer-show", "materials"]).optional().default("price"),
+  }).parse(req.body);
+  const result = await runCaptureBatchOnce({ source: captureKind === "price" ? "manual-batch" : `manual-batch-${captureKind}`, productIds: [...new Set(ids)], includeDisabled: true, captureKind });
   res.json({ ok: true, run: result.run });
 });
 
@@ -1024,6 +1186,354 @@ app.patch("/api/monitor/settings", async (req, res) => {
   const db = await readDb();
   monitor = db.monitor;
   res.json(monitor);
+});
+
+app.get("/api/prompt-studio", async (_req, res) => {
+  const db = await readDb();
+  const state = normalizePromptStudioState(db.promptStudio);
+  res.json({ productProfiles: state.productProfiles, stylePresets: state.stylePresets, history: state.records, libraryFavorites: state.libraryFavorites });
+});
+
+app.patch("/api/prompt-studio/library-favorites/:templateId", async (req, res) => {
+  const templateId = promptLibraryTemplateIdSchema.parse(req.params.templateId);
+  const { favorite } = promptLibraryFavoritePatchSchema.parse(req.body || {});
+  let libraryFavorites = [];
+  await updateDb((db) => {
+    const state = normalizePromptStudioState(db.promptStudio);
+    const nextFavorites = favorite
+      ? [templateId, ...state.libraryFavorites.filter((id) => id !== templateId)]
+      : state.libraryFavorites.filter((id) => id !== templateId);
+    db.promptStudio = normalizePromptStudioState({ ...state, libraryFavorites: nextFavorites });
+    libraryFavorites = db.promptStudio.libraryFavorites;
+    return db;
+  });
+  res.json({ libraryFavorites });
+});
+
+app.post("/api/prompt-studio/product-profiles", async (req, res) => {
+  const parsed = promptProductProfileSchema.parse(req.body || {});
+  const profile = { id: newId("prompt_product"), ...parsed, updatedAt: new Date().toISOString() };
+  await updateDb((db) => {
+    const state = normalizePromptStudioState(db.promptStudio);
+    db.promptStudio = normalizePromptStudioState({ ...state, productProfiles: [profile, ...state.productProfiles] });
+    return db;
+  });
+  res.status(201).json(profile);
+});
+
+app.patch("/api/prompt-studio/product-profiles/:id", async (req, res) => {
+  const parsed = promptProductProfilePatchSchema.parse(req.body || {});
+  let profile = null;
+  await updateDb((db) => {
+    const state = normalizePromptStudioState(db.promptStudio);
+    if (!state.productProfiles.some((item) => item.id === req.params.id)) {
+      throw Object.assign(new Error("产品档案不存在或已删除。"), { status: 404, code: "PROMPT_PRODUCT_PROFILE_NOT_FOUND" });
+    }
+    const updatedAt = new Date().toISOString();
+    db.promptStudio = normalizePromptStudioState({
+      ...state,
+      productProfiles: state.productProfiles.map((item) => {
+        if (item.id !== req.params.id) return item;
+        profile = { ...item, ...parsed, updatedAt };
+        return profile;
+      }),
+    });
+    return db;
+  });
+  res.json(profile);
+});
+
+app.delete("/api/prompt-studio/product-profiles/:id", async (req, res) => {
+  await updateDb((db) => {
+    const state = normalizePromptStudioState(db.promptStudio);
+    if (!state.productProfiles.some((item) => item.id === req.params.id)) {
+      throw Object.assign(new Error("产品档案不存在或已删除。"), { status: 404, code: "PROMPT_PRODUCT_PROFILE_NOT_FOUND" });
+    }
+    db.promptStudio = normalizePromptStudioState({ ...state, productProfiles: state.productProfiles.filter((item) => item.id !== req.params.id) });
+    return db;
+  });
+  res.status(204).end();
+});
+
+app.post("/api/prompt-studio/style-presets", async (req, res) => {
+  const parsed = promptStylePresetSchema.parse(req.body || {});
+  const preset = { id: newId("prompt_style"), ...parsed, updatedAt: new Date().toISOString() };
+  await updateDb((db) => {
+    const state = normalizePromptStudioState(db.promptStudio);
+    db.promptStudio = normalizePromptStudioState({ ...state, stylePresets: [preset, ...state.stylePresets] });
+    return db;
+  });
+  res.status(201).json(preset);
+});
+
+app.patch("/api/prompt-studio/style-presets/:id", async (req, res) => {
+  const parsed = promptStylePresetPatchSchema.parse(req.body || {});
+  let preset = null;
+  await updateDb((db) => {
+    const state = normalizePromptStudioState(db.promptStudio);
+    if (!state.stylePresets.some((item) => item.id === req.params.id)) {
+      throw Object.assign(new Error("风格方案不存在或已删除。"), { status: 404, code: "PROMPT_STYLE_PRESET_NOT_FOUND" });
+    }
+    const updatedAt = new Date().toISOString();
+    db.promptStudio = normalizePromptStudioState({
+      ...state,
+      stylePresets: state.stylePresets.map((item) => {
+        if (item.id !== req.params.id) return item;
+        preset = { ...item, ...parsed, updatedAt };
+        return preset;
+      }),
+    });
+    return db;
+  });
+  res.json(preset);
+});
+
+app.delete("/api/prompt-studio/style-presets/:id", async (req, res) => {
+  await updateDb((db) => {
+    const state = normalizePromptStudioState(db.promptStudio);
+    if (!state.stylePresets.some((item) => item.id === req.params.id)) {
+      throw Object.assign(new Error("风格方案不存在或已删除。"), { status: 404, code: "PROMPT_STYLE_PRESET_NOT_FOUND" });
+    }
+    db.promptStudio = normalizePromptStudioState({ ...state, stylePresets: state.stylePresets.filter((item) => item.id !== req.params.id) });
+    return db;
+  });
+  res.status(204).end();
+});
+
+app.post("/api/prompt-studio/analyze-product", parsePromptStudioUpload, async (req, res) => {
+  const input = promptStudioMultipartRequest(req);
+  const productImages = req.files?.productImages || [];
+  if (!productImages.length) throw Object.assign(new Error("请至少上传一张产品参考图。"), { status: 400, code: "PROMPT_PRODUCT_IMAGE_MISSING" });
+  const db = await readDb();
+  res.json(await analyzeProductImages(db.modelConfig, input, productImages));
+});
+
+function createPromptHistoryItem(input, result, selectedVariantKey = "safe") {
+  const createdAt = result.createdAt || new Date().toISOString();
+  const rawName = input.copy?.title || input.userRequest || "未命名提示词";
+  return {
+    id: newId("prompt"),
+    name: String(rawName).trim().slice(0, 80) || "未命名提示词",
+    category: input.category,
+    request: input,
+    variants: result.variants,
+    riskChecks: result.riskChecks,
+    selectedVariantKey,
+    isFavorite: false,
+    createdAt,
+    model: result.model,
+  };
+}
+
+async function savePromptHistory(input, result, selectedVariantKey = "safe") {
+  const historyItem = createPromptHistoryItem(input, result, selectedVariantKey);
+  await updateDb((current) => {
+    const state = normalizePromptStudioState(current.promptStudio);
+    current.promptStudio = normalizePromptStudioState({ ...state, records: [historyItem, ...state.records] });
+    return current;
+  });
+  return { createdAt: historyItem.createdAt, historyItem };
+}
+
+function quickPromptFingerprint(input, productImages) {
+  const { clientRequestId: _clientRequestId, ...request } = input;
+  const hash = createHash("sha256").update(JSON.stringify(request));
+  for (const file of productImages) {
+    hash.update("\0").update(String(file.mimetype || "")).update("\0").update(String(file.size || 0)).update("\0");
+    hash.update(file.buffer);
+  }
+  return hash.digest("hex");
+}
+
+function quickPromptConflict() {
+  return Object.assign(new Error("这个提示词请求 ID 已用于另一组内容，请重新提交。"), {
+    status: 409,
+    code: "PROMPT_REQUEST_ID_CONFLICT",
+  });
+}
+
+function quickPromptFallbackWarning(error) {
+  if (!(error instanceof ModelApiError)) return "";
+  if (error.status === 524) return "提示词通道上游响应超时（524），已改用本地规则生成可编辑版本；没有切换通道，也没有再次提交这次超时请求，请检查后继续生图。";
+  if (error.code === "MODEL_API_TIMEOUT") return `提示词整理等待超过 ${Math.round(QUICK_PROMPT_STAGE_TIMEOUT_MS / 1_000)} 秒，已停止等待并改用本地规则生成可编辑版本；请检查后继续生图。`;
+  if (error.code === "MODEL_API_NETWORK_ERROR") return "提示词通道连接异常，已在同一通道有限重试后改用本地规则生成可编辑版本；请检查后继续生图。";
+  if ([502, 503, 504].includes(error.status)) return `提示词通道暂时不可用（${error.status}），已在同一通道有限重试后改用本地规则生成可编辑版本；请检查后继续生图。`;
+  return "";
+}
+
+function quickPromptInterpretationError(error) {
+  if (!(error instanceof ModelApiError)) return error;
+  const cause = error.status === 524
+    ? "提示词通道上游响应超时（524）"
+    : error.code === "MODEL_API_TIMEOUT"
+      ? `提示词理解等待超过 ${Math.round(QUICK_PROMPT_STAGE_TIMEOUT_MS / 1_000)} 秒，已停止等待`
+      : error.code === "MODEL_API_NETWORK_ERROR"
+        ? "提示词通道连接异常"
+        : [502, 503, 504].includes(error.status)
+          ? `提示词通道暂时不可用（${error.status}）`
+          : "";
+  if (!cause) return error;
+  return new ModelApiError(`${cause}；参考图模式无法安全猜测产品事实，因此没有切换通道或伪造结果。输入和参考图均已保留，请稍后重试。`, {
+    code: "PROMPT_UPSTREAM_TEMPORARY",
+    status: 503,
+  });
+}
+
+async function buildQuickPromptResponse(quickInput, productImages) {
+  const db = await readDb();
+  const configuredModel = resolveModelConfig(db.modelConfig).model;
+  const requestKey = quickInput.clientRequestId || newId("prompt_upstream");
+  const signal = AbortSignal.timeout(QUICK_PROMPT_TOTAL_TIMEOUT_MS);
+  let interpreted;
+  if (!productImages.length && quickInput.creationMode !== "product") {
+    interpreted = interpretQuickPromptLocally(quickInput);
+  } else {
+    try {
+      interpreted = await interpretQuickPrompt(db.modelConfig, quickInput, {
+        productImages,
+        signal,
+        timeoutMs: QUICK_PROMPT_STAGE_TIMEOUT_MS,
+        idempotencyKey: `${requestKey}.interpret`,
+      });
+    } catch (error) {
+      throw quickPromptInterpretationError(error);
+    }
+  }
+  let result;
+  const warnings = [...interpreted.warnings];
+  try {
+    result = await generatePromptSet(db.modelConfig, interpreted.input, {
+      productImages,
+      signal,
+      timeoutMs: QUICK_PROMPT_STAGE_TIMEOUT_MS,
+      idempotencyKey: `${requestKey}.generate`,
+    });
+  } catch (error) {
+    const fallbackWarning = quickPromptFallbackWarning(error);
+    if (!fallbackWarning) throw error;
+    result = generatePromptSetLocally(interpreted.input, {
+      configuredModel,
+      productImageCount: productImages.length,
+    });
+    warnings.push(fallbackWarning);
+  }
+  const selectedVariantKey = interpreted.recommendedVariantKey || "safe";
+  const historyItem = quickInput.saveHistory
+    ? createPromptHistoryItem(interpreted.input, result, selectedVariantKey)
+    : null;
+  const response = {
+    ...result,
+    ...(historyItem ? { createdAt: historyItem.createdAt, id: historyItem.id, historyItem } : {}),
+    request: interpreted.input,
+    interpretedRequest: interpreted.input,
+    warnings,
+    recommendedVariantKey: selectedVariantKey,
+  };
+  return { historyItem, response };
+}
+
+async function persistQuickPromptResponse({ id, fingerprint, response, historyItem }) {
+  await updateDb((current) => {
+    const state = normalizePromptStudioState(current.promptStudio);
+    const existing = id ? state.quickRequests.find((entry) => entry.id === id) : null;
+    if (existing && existing.fingerprint !== fingerprint) throw quickPromptConflict();
+    if (existing) return current;
+    current.promptStudio = normalizePromptStudioState({
+      ...state,
+      records: historyItem ? [historyItem, ...state.records] : state.records,
+      quickRequests: id ? [{ id, fingerprint, response, createdAt: new Date().toISOString() }, ...state.quickRequests] : state.quickRequests,
+    });
+    return current;
+  });
+}
+
+async function runQuickPromptRequest(quickInput, productImages) {
+  const id = quickInput.clientRequestId;
+  if (!id) {
+    const produced = await buildQuickPromptResponse(quickInput, productImages);
+    if (produced.historyItem) await persistQuickPromptResponse({ fingerprint: "", ...produced });
+    return produced.response;
+  }
+
+  const fingerprint = quickPromptFingerprint(quickInput, productImages);
+  const running = pendingQuickPromptRequests.get(id);
+  if (running) {
+    if (running.fingerprint !== fingerprint) throw quickPromptConflict();
+    return running.promise;
+  }
+
+  const promise = (async () => {
+    const state = normalizePromptStudioState((await readDb()).promptStudio);
+    const cached = state.quickRequests.find((entry) => entry.id === id);
+    if (cached) {
+      if (cached.fingerprint !== fingerprint) throw quickPromptConflict();
+      return cached.response;
+    }
+    const produced = await buildQuickPromptResponse(quickInput, productImages);
+    await persistQuickPromptResponse({ id, fingerprint, ...produced });
+    return produced.response;
+  })();
+  pendingQuickPromptRequests.set(id, { fingerprint, promise });
+  try {
+    return await promise;
+  } finally {
+    if (pendingQuickPromptRequests.get(id)?.promise === promise) pendingQuickPromptRequests.delete(id);
+  }
+}
+
+app.post("/api/prompt-studio/quick-generate", parsePromptStudioUpload, async (req, res) => {
+  const quickInput = validateQuickPromptInput(promptStudioMultipartRequest(req));
+  const productImages = req.files?.productImages || [];
+  res.json(await runQuickPromptRequest(quickInput, productImages));
+});
+
+app.post("/api/prompt-studio/generate", parsePromptStudioUpload, async (req, res) => {
+  const input = validatePromptStudioInput(promptStudioMultipartRequest(req));
+  const db = await readDb();
+  const result = await generatePromptSet(db.modelConfig, input, {
+    productImages: req.files?.productImages || [],
+    styleImages: req.files?.styleImages || [],
+  });
+  const selectedVariantKey = result.recommendedVariantKey || "safe";
+  const saved = await savePromptHistory(input, result, selectedVariantKey);
+  res.json({ ...result, ...saved, id: saved.historyItem.id, historyItem: saved.historyItem });
+});
+
+app.patch("/api/prompt-studio/history/:id", async (req, res) => {
+  const parsed = z.object({
+    name: z.string().trim().min(1).max(120).optional(),
+    isFavorite: z.boolean().optional(),
+    selectedVariantKey: z.enum(["safe", "commercial", "creative"]).optional(),
+  }).strict().refine((value) => Object.keys(value).length > 0, "请选择要更新的提示词字段。").parse(req.body || {});
+  let record = null;
+  await updateDb((db) => {
+    const state = normalizePromptStudioState(db.promptStudio);
+    if (!state.records.some((item) => item.id === req.params.id)) {
+      throw Object.assign(new Error("提示词历史不存在或已删除。"), { status: 404, code: "PROMPT_HISTORY_NOT_FOUND" });
+    }
+    db.promptStudio = normalizePromptStudioState({
+      ...state,
+      records: state.records.map((item) => {
+        if (item.id !== req.params.id) return item;
+        record = { ...item, ...parsed };
+        return record;
+      }),
+    });
+    return db;
+  });
+  res.json(record);
+});
+
+app.delete("/api/prompt-studio/history/:id", async (req, res) => {
+  await updateDb((db) => {
+    const state = normalizePromptStudioState(db.promptStudio);
+    if (!state.records.some((item) => item.id === req.params.id)) {
+      throw Object.assign(new Error("提示词历史不存在或已删除。"), { status: 404, code: "PROMPT_HISTORY_NOT_FOUND" });
+    }
+    db.promptStudio = normalizePromptStudioState({ ...state, records: state.records.filter((item) => item.id !== req.params.id) });
+    return db;
+  });
+  res.status(204).end();
 });
 
 app.post("/api/analysis/run", async (_req, res) => {
@@ -1061,12 +1571,12 @@ app.patch("/api/model-config", async (req, res) => {
   res.json(publicModelConfig(config));
 });
 
-app.post("/api/model-config/test", async (req, res) => {
+app.post("/api/model-config/models", async (req, res) => {
   const schema = z.object({
     channel: z.enum(MODEL_CHANNEL_IDS).optional(),
     customBaseUrl: z.string().trim().min(1).max(500).optional(),
-    baseUrl: z.string().trim().min(1).max(500).optional(),
     apiKey: z.string().max(500).optional(),
+    model: z.string().trim().min(1).max(200).optional(),
     imageModel: z.string().trim().min(1).max(200).optional(),
   }).strict();
   const parsed = schema.parse(req.body || {});
@@ -1077,24 +1587,48 @@ app.post("/api/model-config/test", async (req, res) => {
   } catch (error) {
     throw new ModelApiError(error.message || "模型配置无效。", { code: "MODEL_CONFIG_INVALID", status: 400 });
   }
+  res.json(await discoverAvailableModels(draft));
+});
+
+app.post("/api/model-config/test", async (req, res) => {
+  const schema = z.object({
+    target: z.enum(["image", "prompt"]).optional().default("image"),
+    channel: z.enum(MODEL_CHANNEL_IDS).optional(),
+    customBaseUrl: z.string().trim().min(1).max(500).optional(),
+    baseUrl: z.string().trim().min(1).max(500).optional(),
+    apiKey: z.string().max(500).optional(),
+    model: z.string().trim().min(1).max(200).optional(),
+    imageModel: z.string().trim().min(1).max(200).optional(),
+  }).strict();
+  const parsed = schema.parse(req.body || {});
+  const { target, ...configPatch } = parsed;
+  const db = await readDb();
+  let draft;
+  try {
+    draft = updateModelConfig(db.modelConfig, configPatch);
+  } catch (error) {
+    throw new ModelApiError(error.message || "模型配置无效。", { code: "MODEL_CONFIG_INVALID", status: 400 });
+  }
   const started = Date.now();
   try {
-    const result = await testImageModel(draft);
+    const result = target === "prompt" ? await testPromptModel(draft) : await testImageModel(draft);
     const tested = resolveModelConfig(draft);
     let testingStoredConfig = false;
     try {
       const stored = resolveModelConfig(db.modelConfig, { channel: tested.channel });
-      testingStoredConfig = !String(parsed.apiKey || "").trim() && stored.baseUrl === tested.baseUrl && stored.imageModel === tested.imageModel;
+      const sameModel = target === "prompt" ? stored.model === tested.model : stored.imageModel === tested.imageModel;
+      testingStoredConfig = !String(configPatch.apiKey || "").trim() && stored.baseUrl === tested.baseUrl && sameModel;
     } catch {
       testingStoredConfig = false;
     }
     if (testingStoredConfig) await updateDb((current) => {
-      current.modelConfig = recordModelTestResult(current.modelConfig, { channel: tested.channel, status: result.status, testedAt: result.testedAt });
+      current.modelConfig = recordModelTestResult(current.modelConfig, { channel: tested.channel, target, status: result.status, testedAt: result.testedAt });
       return current;
     });
     res.json({
       ok: result.ok,
       status: result.status,
+      target,
       model: result.model,
       channel: tested.channel,
       latencyMs: Date.now() - started,
@@ -1106,12 +1640,13 @@ app.post("/api/model-config/test", async (req, res) => {
     let testingStoredConfig = false;
     try {
       const stored = resolveModelConfig(db.modelConfig, { channel: tested.channel });
-      testingStoredConfig = !String(parsed.apiKey || "").trim() && stored.baseUrl === tested.baseUrl && stored.imageModel === tested.imageModel;
+      const sameModel = target === "prompt" ? stored.model === tested.model : stored.imageModel === tested.imageModel;
+      testingStoredConfig = !String(configPatch.apiKey || "").trim() && stored.baseUrl === tested.baseUrl && sameModel;
     } catch {
       testingStoredConfig = false;
     }
     if (testingStoredConfig) await updateDb((current) => {
-      current.modelConfig = recordModelTestResult(current.modelConfig, { channel: tested.channel, status: "failed" });
+      current.modelConfig = recordModelTestResult(current.modelConfig, { channel: tested.channel, target, status: "failed" });
       return current;
     });
     throw error;
@@ -1157,59 +1692,42 @@ app.post("/api/images/:id/photoshop/sync", async (req, res) => {
 });
 
 app.post("/api/images/generate", reserveImageGeneration, async (req, res) => {
-  const started = Date.now();
+  const releaseDisconnectedLegacyRequest = () => { imageGenerationActive = false; };
+  req.once("aborted", releaseDisconnectedLegacyRequest);
   try {
-    const schema = z.object({
-      prompt: z.string().trim().min(1, "请输入正向提示词。").max(4_000),
-      negativePrompt: z.string().trim().max(2_000).optional(),
-      ratio: z.enum(["1:1", "3:4", "4:3", "16:9"]),
-      quality: z.enum(["low", "medium", "high"]),
-      format: z.enum(["png", "jpeg", "webp"]),
-      background: z.enum(["auto", "opaque", "transparent"]),
-      compression: z.number().int().min(0).max(100).optional(),
-      count: z.number().int().min(1).max(4),
-      resolution: z.enum(["1k", "2k", "4k"]).default("1k"),
-      sourceImageId: z.string().trim().max(80).optional(),
-      editMode: z.enum(["mask", "annotation"]).optional(),
-    });
-    let requestBody = req.body;
-    if (req.is("multipart/form-data")) {
-      try {
-        requestBody = JSON.parse(String(req.body?.request || ""));
-      } catch {
-        throw Object.assign(new Error("参考图生图请求缺少有效的 request JSON 字段。"), { status: 400, code: "IMAGE_MULTIPART_REQUEST_INVALID" });
-      }
-    }
-    const parsed = schema.parse(requestBody);
+    const parsed = parseImageGenerationRequest(req.body, { multipart: Boolean(req.is("multipart/form-data")) });
     const referenceImages = Array.isArray(req.files?.referenceImages) ? req.files.referenceImages : [];
     const maskImage = Array.isArray(req.files?.maskImage) ? req.files.maskImage[0] : null;
-    const db = await readDb();
-    const generated = await generateImages(db.modelConfig, parsed, {
-      referenceImages,
-      maskImage,
-    });
-    const createdAt = new Date().toISOString();
-    const images = await saveGeneratedImages(generated.images, {
-      ...parsed,
-      model: generated.model,
-      createdAt,
-      referenceImageCount: generated.appliedOptions.referenceImageCount,
-      maskApplied: generated.appliedOptions.maskApplied,
-    });
-    if (!res.destroyed) {
-      res.json({
-        images,
-        model: generated.model,
-        size: generated.size,
-        durationMs: Date.now() - started,
-        createdAt,
-        warnings: generated.warnings,
-        appliedOptions: generated.appliedOptions,
-      });
-    }
+    const job = await enqueueImageJob(parsed, { referenceImages, maskImage });
+    const result = await waitForImageJob(job.id, { onExecutionSettled: releaseDisconnectedLegacyRequest });
+    if (!res.destroyed) res.json(result);
   } finally {
+    req.off("aborted", releaseDisconnectedLegacyRequest);
     imageGenerationActive = false;
   }
+});
+
+app.post("/api/image-jobs", parseImageGenerationUpload, async (req, res) => {
+  const parsed = parseImageGenerationRequest(req.body, { multipart: Boolean(req.is("multipart/form-data")) });
+  const referenceImages = Array.isArray(req.files?.referenceImages) ? req.files.referenceImages : [];
+  const maskImage = Array.isArray(req.files?.maskImage) ? req.files.maskImage[0] : null;
+  res.status(202).json(await enqueueImageJob(parsed, { referenceImages, maskImage }));
+});
+
+app.get("/api/image-jobs", async (_req, res) => {
+  res.json(await listImageJobs());
+});
+
+app.get("/api/image-jobs/:id", async (req, res) => {
+  res.json(await getImageJob(req.params.id));
+});
+
+app.post("/api/image-jobs/:id/retry", async (req, res) => {
+  res.status(202).json(await retryImageJob(req.params.id));
+});
+
+app.delete("/api/image-jobs/:id", async (req, res) => {
+  res.json(await cancelImageJob(req.params.id));
 });
 
 app.get("/api/auth/taobao/oauth-url", (_req, res) => {
@@ -1226,13 +1744,14 @@ app.post("/api/auth/taobao/scan/start", async (req, res) => {
   const db = await readDb();
   const browserPort = await findAvailableBrowserPort([
     ...db.authSessions.map((session) => session.browserPort),
+    ...(Array.isArray(db.pendingAuthScans) ? db.pendingAuthScans.map((scan) => scan.browserPort) : []),
     ...Array.from(pendingScans.values(), (scan) => scan.browserPort),
     ...pendingBrowserPorts,
   ].filter(Boolean));
   pendingBrowserPorts.add(browserPort);
   try {
     const login = await openTaobaoLogin({ profileKey, port: browserPort });
-    pendingScans.set(profileKey, { ...parsed, profileKey, browserPort, loginTargetId: login.targetId, createdAt: Date.now() });
+    await rememberPendingScan({ ...parsed, profileKey, browserPort, loginTargetId: login.targetId, createdAt: Date.now() });
     res.json(login);
   } catch (error) {
     await closeAccountBrowser({ profileKey, port: browserPort }).catch(() => undefined);
@@ -1249,8 +1768,9 @@ app.post("/api/auth/sessions/:id/reauthorize", async (req, res) => {
   if (session.source !== "taobao-browser" || !session.browserProfileKey || !session.browserPort) {
     return res.status(400).json({ message: "手动 Cookie 账号请在左侧重新粘贴 Cookie；只有扫码账号支持重新授权。" });
   }
-  const login = await openTaobaoLogin({ profileKey: session.browserProfileKey, port: session.browserPort });
-  pendingScans.set(session.browserProfileKey, {
+  await resetTmallSession({ profileKey: session.browserProfileKey, port: session.browserPort });
+  const login = await openTmallLogin({ profileKey: session.browserProfileKey, port: session.browserPort });
+  await rememberPendingScan({
     sessionId: session.id,
     name: session.name,
     accountType: session.accountType || "normal",
@@ -1263,21 +1783,30 @@ app.post("/api/auth/sessions/:id/reauthorize", async (req, res) => {
 });
 
 async function syncPendingScan(profileKey) {
-  const pending = pendingScans.get(profileKey);
-  const existing = (await readDb()).authSessions.find((session) => session.browserProfileKey === profileKey);
+  const data = await readDb();
+  const pending = pendingScans.get(profileKey)
+    || (Array.isArray(data.pendingAuthScans) ? data.pendingAuthScans.find((scan) => scan.profileKey === profileKey) : null);
+  const existing = data.authSessions.find((session) => session.browserProfileKey === profileKey);
   if (!pending) return existing ? { status: "synced", session: existing } : { status: "expired" };
+  if (existing && !pending.sessionId) {
+    await forgetPendingScan(profileKey);
+    return { status: "synced", session: existing };
+  }
+  pendingScans.set(profileKey, pending);
   const authState = await getTaobaoAuthState({ profileKey: pending.profileKey, port: pending.browserPort });
   if (authState.browserClosed) {
-    pendingScans.delete(profileKey);
+    await forgetPendingScan(profileKey);
     return { status: "cancelled" };
   }
   const loginTarget = authState.targets?.find((target) => target.id === pending.loginTargetId);
-  if (!loginTarget) {
-    pendingScans.delete(profileKey);
-    return { status: "cancelled" };
+  if (loginTarget && isTaobaoLoginUrl(loginTarget.url)) return { status: "waiting" };
+  if (!authState.loggedIn || !authState.cookie) {
+    if (!loginTarget) {
+      await forgetPendingScan(profileKey);
+      return { status: "cancelled" };
+    }
+    return { status: "waiting" };
   }
-  if (isTaobaoLoginUrl(loginTarget.url)) return { status: "waiting" };
-  if (!authState.loggedIn || !authState.cookie) return { status: "waiting" };
 
   let session;
   await updateDb((db) => {
@@ -1290,6 +1819,16 @@ async function syncPendingScan(profileKey) {
           active: true,
           enabled: true,
           loginStatus: "valid",
+          // Reauthorizing clears the Tmall session. Do not claim price access
+          // until a real product response has been captured and parsed from
+          // the sanitized local evidence file.
+          tmallPriceStatus: TMALL_PRICE_STATUS.UNKNOWN,
+          tmallPriceCheckedAt: null,
+          tmallPriceCooldownUntil: null,
+          tmallPriceDeviceCooldownUntil: null,
+          tmallPriceLastFailureAt: null,
+          tmallPriceFailureReason: null,
+          tmallPriceFailureCount: 0,
           lastCheckedAt: new Date().toISOString(),
           healthStatus: "healthy",
           consecutiveFailures: 0,
@@ -1309,16 +1848,25 @@ async function syncPendingScan(profileKey) {
         active: true,
         enabled: true,
         loginStatus: "valid",
+        tmallPriceStatus: TMALL_PRICE_STATUS.UNKNOWN,
+        tmallPriceCheckedAt: null,
+        tmallPriceCooldownUntil: null,
+        tmallPriceDeviceCooldownUntil: null,
+        tmallPriceLastFailureAt: null,
+        tmallPriceFailureReason: null,
+        tmallPriceFailureCount: 0,
         lastCheckedAt: new Date().toISOString(),
         healthStatus: "healthy",
         createdAt: new Date().toISOString(),
       };
       db.authSessions.unshift(session);
     }
+    db.pendingAuthScans = (Array.isArray(db.pendingAuthScans) ? db.pendingAuthScans : []).filter((item) => item.profileKey !== profileKey);
     return db;
   });
   pendingScans.delete(profileKey);
   await minimizeAccountBrowser({ profileKey: pending.profileKey, port: pending.browserPort }).catch((error) => console.error("[browser-minimize]", error.message));
+  await resumeAuthRequiredCaptureJobs();
   return { status: "synced", session };
 }
 
@@ -1330,6 +1878,9 @@ async function checkAuthSession(session) {
   const checkedAt = new Date().toISOString();
   const status = state.status || (state.loggedIn && state.cookie ? "valid" : "degraded");
   const loginStatus = status === "valid" ? "valid" : status === "expired" ? "expired" : session.loginStatus || "valid";
+  const tmallPriceStatus = status === "expired"
+    ? TMALL_PRICE_STATUS.UNKNOWN
+    : session.tmallPriceStatus || TMALL_PRICE_STATUS.UNKNOWN;
   let updated;
   await updateDb((db) => {
     db.authSessions = db.authSessions.map((item) => {
@@ -1338,20 +1889,30 @@ async function checkAuthSession(session) {
         ...item,
         cookie: status === "valid" ? state.cookie : item.cookie,
         loginStatus,
+        tmallPriceStatus,
+        ...(status === "expired" ? {
+          tmallPriceCheckedAt: null,
+          tmallPriceCooldownUntil: null,
+          tmallPriceDeviceCooldownUntil: null,
+        } : {}),
         lastCheckedAt: checkedAt,
-        healthStatus: status === "valid" ? "healthy" : "degraded",
-        consecutiveFailures: status === "valid" ? 0 : item.consecutiveFailures,
+        healthStatus: status === "valid" && tmallPriceStatus !== TMALL_PRICE_STATUS.COOLDOWN ? "healthy" : "degraded",
+        consecutiveFailures: status === "valid" && tmallPriceStatus === TMALL_PRICE_STATUS.VALID ? 0 : item.consecutiveFailures,
       };
       return updated;
     });
     return db;
   });
   const message = status === "valid"
-    ? "账号登录有效。"
+    ? tmallPriceStatus === TMALL_PRICE_STATUS.VALID
+      ? "淘宝登录有效；天猫价格能力已通过真实商品价格响应验证。"
+      : tmallPriceStatus === TMALL_PRICE_STATUS.COOLDOWN
+        ? "淘宝登录有效；天猫价格能力仍在冷却，登录检测不会将其误判为恢复。"
+        : "淘宝登录有效；天猫价格能力尚未验证，需通过真实商品价格响应确认。"
     : status === "expired"
       ? "登录已明确失效，请重新授权。"
       : "账号浏览器仍保留，检测页面暂时异常；本次仅标记为待复检，不会清除登录状态。";
-  return { id: session.id, status, loginStatus, checkedAt, message, session: publicAuthSession(updated) };
+  return { id: session.id, status, loginStatus, tmallPriceStatus, checkedAt, message, session: publicAuthSession(updated) };
 }
 
 app.post("/api/auth/sessions/check-all", async (_req, res) => {
@@ -1407,9 +1968,11 @@ app.post("/api/auth/taobao/scan/status", async (req, res) => {
 app.post("/api/auth/taobao/scan/cancel", async (req, res) => {
   const schema = z.object({ profileKey: z.string().min(1) });
   const parsed = schema.parse(req.body);
-  const pending = pendingScans.get(parsed.profileKey);
+  const data = await readDb();
+  const pending = pendingScans.get(parsed.profileKey)
+    || (Array.isArray(data.pendingAuthScans) ? data.pendingAuthScans.find((scan) => scan.profileKey === parsed.profileKey) : null);
   if (pending) {
-    pendingScans.delete(parsed.profileKey);
+    await forgetPendingScan(parsed.profileKey);
     if (pending.sessionId) await minimizeAccountBrowser({ profileKey: pending.profileKey, port: pending.browserPort }).catch((error) => console.error("[browser-minimize]", error.message));
     else await closeAccountBrowser({ profileKey: pending.profileKey, port: pending.browserPort });
   }
@@ -1452,6 +2015,7 @@ app.post("/api/auth/sessions", async (req, res) => {
     db.authSessions.unshift(session);
     return db;
   });
+  await resumeAuthRequiredCaptureJobs();
   res.status(201).json(publicAuthSession(session));
 });
 
@@ -1486,6 +2050,7 @@ app.post("/api/auth/sessions/:id/activate", async (req, res) => {
     if (activated.enabled) await keepAccountBrowserWarm(activated);
     else await minimizeAccountBrowser({ profileKey: activated.browserProfileKey, port: activated.browserPort }).catch((error) => console.error("[browser-minimize]", error.message));
   }
+  if (activated.enabled) await resumeAuthRequiredCaptureJobs();
   res.json(publicAuthSession(activated));
 });
 
@@ -1510,6 +2075,8 @@ app.get("/api/export/snapshots.csv", async (_req, res) => {
           name: sku.name,
           price: sku.price,
           normalPrice: sku.normalPrice,
+          billionPrice: sku.billionPrice,
+          seckillPrice: sku.seckillPrice,
           coinPrice: sku.coinPrice,
           layers: sku.priceLayers || [],
         })),
@@ -1775,14 +2342,29 @@ export async function startServer({ host = "127.0.0.1", port = Number(process.en
     staticMiddleware.directory = directory;
   }
   if (!schedulerStarted) {
+    await recoverCaptureQueue();
     startScheduler();
     schedulerStarted = true;
   }
-
-  const server = await new Promise((resolve, reject) => {
-    const instance = app.listen(port, host, () => resolve(instance));
-    instance.once("error", reject);
-  });
+  let server;
+  try {
+    server = await new Promise((resolve, reject) => {
+      const instance = app.listen(port, host, () => resolve(instance));
+      instance.once("error", reject);
+    });
+    await startImageJobQueue();
+    startNotificationOutboxWorker();
+    startEvidenceCleanup();
+  } catch (error) {
+    if (server?.listening) await new Promise((resolve) => server.close(() => resolve()));
+    await stopImageJobQueue().catch((stopError) => console.error("[image-job-stop]", stopError));
+    await stopNotificationOutboxWorker();
+    stopEvidenceCleanup();
+    stopCaptureQueue();
+    stopScheduler();
+    schedulerStarted = false;
+    throw error;
+  }
   const address = server.address();
   const actualPort = typeof address === "object" && address ? address.port : port;
   console.log(`电商竞品监控服务已启动：http://${host}:${actualPort}`);
@@ -1815,10 +2397,22 @@ export async function startServer({ host = "127.0.0.1", port = Number(process.en
 }
 
 export async function stopServer(server) {
+  stopCaptureQueue();
   stopScheduler();
+  await stopNotificationOutboxWorker();
+  stopEvidenceCleanup();
   schedulerStarted = false;
-  if (!server?.listening) return;
-  await new Promise((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
+  const closeServer = server?.listening
+    ? new Promise((resolve, reject) => server.close((error) => error ? reject(error) : resolve()))
+    : Promise.resolve();
+  let queueError = null;
+  try {
+    await stopImageJobQueue();
+  } catch (error) {
+    queueError = error;
+  }
+  await closeServer;
+  if (queueError) throw queueError;
 }
 
 const entryPath = process.argv[1] ? path.resolve(process.argv[1]) : "";

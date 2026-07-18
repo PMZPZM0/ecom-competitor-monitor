@@ -6,13 +6,14 @@ import { api } from '../../lib/api'
 import { downloadFile } from '../../lib/download'
 import { currency, timeAgo } from '../../lib/utils'
 import { normalizeProductUrlIfPossible } from '../../lib/productUrl'
-import type { Overview, Product, Snapshot } from '../../types/domain'
+import type { MonitorChannel, Overview, Product, ProductCaptureOptions, Snapshot } from '../../types/domain'
 import { BuyerShowDialog, ImageThumb, VideoLink, type Preview } from './productDisplay'
 import { DiscountDetailDialog } from './DiscountDetailDialog'
 import { PriceVerificationDialog } from './PriceVerificationDialog'
 import { scheduleInputParts } from './productSchedule'
 import {
   accountBenefitForSku,
+  accountPriceViewForSku,
   coinPriceForSku,
   coinBenefitForSku,
   displayPriceLabel,
@@ -37,6 +38,17 @@ import {
 
 const SkuPriceTrend = lazy(() => import('./SkuPriceTrend').then((module) => ({ default: module.SkuPriceTrend })))
 const EMPTY_ACCOUNT_CAPTURES: NonNullable<Snapshot['accountCaptures']> = []
+const monitorChannelOptions: Array<{ value: MonitorChannel; label: string; accounts: Array<NonNullable<Product['accountType']>> }> = [
+  { value: 'lowest', label: '最低已验证价', accounts: ['normal', 'gift', 'vip88'] },
+  { value: 'normal', label: '普通价', accounts: ['normal', 'gift', 'vip88'] },
+  { value: 'billion', label: '百亿补贴价', accounts: ['normal', 'gift', 'vip88'] },
+  { value: 'seckill', label: '淘宝秒杀价', accounts: ['normal', 'gift', 'vip88'] },
+  { value: 'government', label: '国补价', accounts: ['normal', 'gift', 'vip88'] },
+  { value: 'surprise', label: '惊喜立减价', accounts: ['normal', 'gift', 'vip88'] },
+  { value: 'gift', label: '礼金价', accounts: ['gift', 'vip88'] },
+  { value: 'vip88', label: '88VIP价', accounts: ['vip88'] },
+  { value: 'coin', label: '淘金币价', accounts: ['normal', 'gift', 'vip88'] },
+]
 
 type Props = {
   product: Product
@@ -44,8 +56,8 @@ type Props = {
   onToggle: (product: Product) => Promise<void>
   onSchedule: (product: Product, mode: NonNullable<Product['monitorScheduleMode']>, intervalMinutes: number, monitorStartAt: string | null) => Promise<void>
   onMediaPreference: (product: Product, captureMediaAssets: boolean) => Promise<void>
-  onSaveSkuMonitorPrice: (product: Product, skuId: string, value: number | null) => Promise<void>
-  onCapture: (product: Product) => Promise<Product | void>
+  onSaveSkuMonitorPrice: (product: Product, skuId: string, value: number | null, channel?: MonitorChannel) => Promise<void>
+  onCapture: (product: Product, options?: ProductCaptureOptions) => Promise<Product | void>
   onRetryBuyerShows: (product: Product) => Promise<Product>
   onLocalImport: (product?: Product) => void
   onDelete: (product: Product) => Promise<void>
@@ -64,6 +76,8 @@ function primaryPriceClass(label: string) {
   if (label === '礼金价') return { label: 'text-orange-600', value: 'text-orange-700' }
   if (label === '淘金币价') return { label: 'text-amber-600', value: 'text-amber-700' }
   if (label === '88VIP价') return { label: 'text-violet-600', value: 'text-violet-700' }
+  if (label === '百亿补贴价') return { label: 'text-indigo-600', value: 'text-indigo-700' }
+  if (label === '淘宝秒杀价') return { label: 'text-fuchsia-600', value: 'text-fuchsia-700' }
   return { label: 'text-sky-600', value: 'text-sky-700' }
 }
 
@@ -96,15 +110,20 @@ function CaptureStatus({ product }: { product: Product }) {
   )
 }
 
-function SkuPricePanel({ product, snapshots, showTrend, accountSessionId, accountType, accountName, onPreview, onSaveSkuMonitorPrice, allowMediaDownload }: { product: Product; snapshots: Snapshot[]; showTrend: boolean; accountSessionId: string; accountType: NonNullable<Product['accountType']>; accountName: string; onPreview: (preview: Preview) => void; onSaveSkuMonitorPrice: (skuId: string, value: number | null) => Promise<void>; allowMediaDownload: boolean }) {
+function SkuPricePanel({ product, snapshots, showTrend, accountSessionId, accountType, accountName, primaryAccountType, isPrimaryAccountView, onPreview, onSaveSkuMonitorPrice, allowMediaDownload }: { product: Product; snapshots: Snapshot[]; showTrend: boolean; accountSessionId: string; accountType: NonNullable<Product['accountType']>; accountName: string; primaryAccountType: NonNullable<Product['accountType']>; isPrimaryAccountView: boolean; onPreview: (preview: Preview) => void; onSaveSkuMonitorPrice: (skuId: string, value: number | null, channel: MonitorChannel) => Promise<void>; allowMediaDownload: boolean }) {
   const [copiedSkuId, setCopiedSkuId] = useState('')
   const [copiedSkuNameId, setCopiedSkuNameId] = useState('')
   const [detailSku, setDetailSku] = useState<SkuPrice | null>(null)
   const [monitorPriceDrafts, setMonitorPriceDrafts] = useState<Record<string, string>>({})
   const [monitorPriceStatuses, setMonitorPriceStatuses] = useState<Record<string, 'saving' | 'saved' | 'error'>>({})
+  const [monitorChannels, setMonitorChannels] = useState<Record<string, MonitorChannel>>({})
   const snapshot = product.lastSnapshot
   const anonymous = snapshot?.accessMode === 'anonymous'
-  const skuPrices = (snapshot?.skuPrices || []).map((sku) => skuForAccountView(sku, accountSessionId, accountType))
+  const skuPrices = (snapshot?.skuPrices || []).flatMap((sku) => (
+    accountSessionId && !accountPriceViewForSku(sku, accountSessionId, accountType)
+      ? []
+      : [skuForAccountView(sku, accountSessionId, accountType)]
+  ))
 
   async function copySkuId(skuId: string) {
     await navigator.clipboard.writeText(skuId)
@@ -118,43 +137,53 @@ function SkuPricePanel({ product, snapshots, showTrend, accountSessionId, accoun
     window.setTimeout(() => setCopiedSkuNameId(''), 1200)
   }
 
-  async function saveSkuMonitorPrice(skuId: string) {
-    const draft = monitorPriceDrafts[skuId] ?? (product.skuMonitorPrices?.[skuId]?.toString() || '')
+  function monitorDraftKey(skuId: string, channel: MonitorChannel) {
+    return `${skuId}:${channel}`
+  }
+
+  function monitorRuleValue(skuId: string, channel: MonitorChannel) {
+    return product.skuMonitorRules?.[skuId]?.[channel] ?? (channel === 'lowest' ? product.skuMonitorPrices?.[skuId] : undefined)
+  }
+
+  async function saveSkuMonitorPrice(skuId: string, channel: MonitorChannel) {
+    const key = monitorDraftKey(skuId, channel)
+    const draft = monitorPriceDrafts[key] ?? (monitorRuleValue(skuId, channel)?.toString() || '')
     const value = draft.trim() ? Number(draft) : null
     if (value !== null && (!Number.isFinite(value) || value <= 0)) {
       window.alert('监控价必须大于 0，或清空关闭该 SKU 预警。')
       return
     }
-    const currentValue = product.skuMonitorPrices?.[skuId] ?? null
+    const currentValue = monitorRuleValue(skuId, channel) ?? null
     if (value === currentValue) {
       setMonitorPriceDrafts((current) => {
         const next = { ...current }
-        delete next[skuId]
+        delete next[key]
         return next
       })
       return
     }
-    setMonitorPriceStatuses((current) => ({ ...current, [skuId]: 'saving' }))
+    setMonitorPriceStatuses((current) => ({ ...current, [key]: 'saving' }))
     try {
-      await onSaveSkuMonitorPrice(skuId, value)
+      await onSaveSkuMonitorPrice(skuId, value, channel)
       setMonitorPriceDrafts((current) => {
         const next = { ...current }
-        delete next[skuId]
+        delete next[key]
         return next
       })
-      setMonitorPriceStatuses((current) => ({ ...current, [skuId]: 'saved' }))
+      setMonitorPriceStatuses((current) => ({ ...current, [key]: 'saved' }))
     } catch (error) {
-      setMonitorPriceStatuses((current) => ({ ...current, [skuId]: 'error' }))
+      setMonitorPriceStatuses((current) => ({ ...current, [key]: 'error' }))
       window.alert(error instanceof Error ? error.message : '监控价保存失败，请重试。')
     }
   }
 
-  function updateMonitorPriceDraft(skuId: string, value: string) {
-    setMonitorPriceDrafts((current) => ({ ...current, [skuId]: value }))
+  function updateMonitorPriceDraft(skuId: string, channel: MonitorChannel, value: string) {
+    const key = monitorDraftKey(skuId, channel)
+    setMonitorPriceDrafts((current) => ({ ...current, [key]: value }))
     setMonitorPriceStatuses((current) => {
-      if (!current[skuId]) return current
+      if (!current[key]) return current
       const next = { ...current }
-      delete next[skuId]
+      delete next[key]
       return next
     })
   }
@@ -163,9 +192,10 @@ function SkuPricePanel({ product, snapshots, showTrend, accountSessionId, accoun
     <div className="min-w-0 self-start">
       {showTrend && (
         <Suspense fallback={<div className="mb-3 h-80 animate-pulse rounded-md bg-slate-100" />}>
-          <SkuPriceTrend snapshots={snapshots} product={product} accountSessionId={accountSessionId} accountType={accountType} accountName={accountName} />
+          <SkuPriceTrend snapshots={snapshots} product={product} accountSessionId={accountSessionId} accountType={accountType} accountName={accountName} showMonitorThresholds={isPrimaryAccountView} />
         </Suspense>
       )}
+      {!isPrimaryAccountView && <div className="mb-3 rounded-lg border border-sky-100 bg-sky-50 px-3 py-2 text-xs leading-5 text-sky-800">当前为 {accountName} 的历史查看视角，不修改监控规则。切回带“监控”标记的账号视角后可设置监控价。</div>}
       <div className="grid gap-3" style={{ gridTemplateColumns: 'repeat(auto-fit, minmax(min(100%, 440px), 1fr))' }}>
         {skuPrices.map((sku) => {
           const allLayers = priceLayersForSku(sku)
@@ -188,13 +218,22 @@ function SkuPricePanel({ product, snapshots, showTrend, accountSessionId, accoun
             ...priceLayers.map((layer) => ({ label: displayPriceLabel(layer.label, accountType), value: layer.value, kind: layer.kind })),
           ].filter((price) => {
             if (price.kind === 'discount') return false
-            if (price.label === '普通价' || price.label === '淘宝秒杀价' || price.label === '淘金币价') return false
+            if (price.label === primaryLabel || price.label === '淘金币价') return false
+            if (price.label === '普通价' && (primaryLabel === '淘宝秒杀价' || primaryLabel === '百亿补贴价')) return false
+            if (price.label === '国补价' && !verifiedPriceChannel(sku, 'government')) return false
+            if (price.label === '惊喜立减价' && !verifiedPriceChannel(sku, 'surprise')) return false
+            if (price.label === '礼金价' && !verifiedPriceChannel(sku, 'gift')) return false
+            if (price.label === '88VIP价' && !verifiedPriceChannel(sku, 'vip88')) return false
             const key = `${price.label}:${price.value.toFixed(2)}`
             if (seenPrices.has(key)) return false
             seenPrices.add(key)
             return true
           }) : []
-          const monitorPriceStatus = monitorPriceStatuses[sku.skuId]
+          const monitorChannel = monitorChannels[sku.skuId] || 'lowest'
+          const monitorKey = monitorDraftKey(sku.skuId, monitorChannel)
+          const monitorPriceStatus = monitorPriceStatuses[monitorKey]
+          const availableMonitorChannels = monitorChannelOptions.filter((option) => option.accounts.includes(primaryAccountType))
+          const stalePrices = Object.entries(sku.stalePrices || {}).filter((entry): entry is [Exclude<MonitorChannel, 'lowest'>, NonNullable<typeof entry[1]>] => Boolean(entry[1]))
           return (
           <div key={sku.skuId} className="rounded-xl border border-slate-200/70 bg-white p-3 shadow-[0_4px_14px_rgba(15,23,42,0.05)] transition-[border-color,box-shadow,transform] duration-200 hover:-translate-y-px hover:border-sky-200 hover:shadow-[0_8px_20px_rgba(15,23,42,0.08)]">
             <div className="grid grid-cols-[58px_minmax(0,1fr)] gap-2.5">
@@ -270,12 +309,17 @@ function SkuPricePanel({ product, snapshots, showTrend, accountSessionId, accoun
                 </div>
               ))}
             </div>
-            <div className="mt-2 flex h-9 items-center gap-1.5 rounded bg-amber-50 px-2">
+            {stalePrices.length > 0 && <div className="mt-2 flex min-w-0 items-center gap-1.5 rounded bg-slate-100 px-2 py-1.5 text-[11px] text-slate-600" title="这些价格仅用于历史查看，不参与监控或飞书提醒"><Archive className="h-3.5 w-3.5 shrink-0" /><span className="shrink-0 font-medium">上次已验证</span><span className="min-w-0 truncate">{stalePrices.map(([channel, stale]) => `${monitorChannelOptions.find((option) => option.value === channel)?.label || channel} ${currency(stale.value)}`).join(' · ')}</span></div>}
+            {isPrimaryAccountView && <div className="mt-2 flex min-h-10 items-center gap-1.5 rounded-md border border-amber-200/80 bg-amber-50 px-2 shadow-[inset_0_1px_0_rgba(255,255,255,0.7)]">
               <BellRing className="h-3.5 w-3.5 shrink-0 text-amber-600" />
-              <span className="shrink-0 text-xs font-medium text-amber-700">监控价</span>
-              <input type="number" min="0.01" step="0.01" value={monitorPriceDrafts[sku.skuId] ?? (product.skuMonitorPrices?.[sku.skuId]?.toString() || '')} onChange={(event) => updateMonitorPriceDraft(sku.skuId, event.target.value)} onBlur={() => void saveSkuMonitorPrice(sku.skuId)} onKeyDown={(event) => { if (event.key === 'Enter') { event.preventDefault(); event.currentTarget.blur() } }} disabled={monitorPriceStatus === 'saving'} placeholder="未设置" className="h-6 min-w-0 flex-1 bg-transparent text-xs text-amber-900 outline-none placeholder:text-amber-500 disabled:opacity-60" title="低于此价格时提醒飞书；离开输入框自动保存，清空后关闭该 SKU 预警" />
+              <select value={monitorChannel} onChange={(event) => setMonitorChannels((current) => ({ ...current, [sku.skuId]: event.target.value as MonitorChannel }))} className="h-7 w-[112px] shrink-0 border-0 bg-transparent pr-1 text-xs font-medium text-amber-800 outline-none focus:ring-2 focus:ring-amber-300" aria-label={`${sku.name}监控价格口径`}>
+                {availableMonitorChannels.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}
+              </select>
+              <span className="h-5 w-px shrink-0 bg-amber-200" />
+              <span className="shrink-0 text-xs text-amber-600">¥</span>
+              <input type="number" min="0.01" step="0.01" value={monitorPriceDrafts[monitorKey] ?? (monitorRuleValue(sku.skuId, monitorChannel)?.toString() || '')} onChange={(event) => updateMonitorPriceDraft(sku.skuId, monitorChannel, event.target.value)} onBlur={() => void saveSkuMonitorPrice(sku.skuId, monitorChannel)} onKeyDown={(event) => { if (event.key === 'Enter') { event.preventDefault(); event.currentTarget.blur() } }} disabled={monitorPriceStatus === 'saving'} placeholder="未设置" className="h-7 min-w-0 flex-1 bg-transparent text-sm font-medium text-amber-950 outline-none placeholder:text-xs placeholder:font-normal placeholder:text-amber-500 disabled:opacity-60" title="只使用本次已验证的所选价格口径判断；离开输入框自动保存，清空后关闭该项预警" />
               <span className={`flex w-14 shrink-0 items-center justify-end gap-1 text-[11px] ${monitorPriceStatus === 'error' ? 'text-red-600' : 'text-amber-700'}`} aria-live="polite">{monitorPriceStatus === 'saving' ? <><LoaderCircle className="h-3.5 w-3.5 animate-spin" />保存中</> : monitorPriceStatus === 'saved' ? <><CircleCheck className="h-3.5 w-3.5" />已保存</> : monitorPriceStatus === 'error' ? <><CircleAlert className="h-3.5 w-3.5" />失败</> : null}</span>
-            </div>
+            </div>}
           </div>
           )
         })}
@@ -333,6 +377,7 @@ export function ProductMonitorCard({ product, monitor, onToggle, onSchedule, onM
   const primaryAccountType = primaryAccountCapture?.accountType || product.lastSnapshot?.primaryAccountType || product.accountType || 'normal'
   const selectedAccountType = selectedAccountCapture?.accountType || primaryAccountType
   const selectedAccountName = selectedAccountCapture?.accountName || (selectedAccountType === 'vip88' ? '88VIP账号' : selectedAccountType === 'gift' ? '礼金账号' : '普通账号')
+  const isPrimaryAccountView = !selectedAccountCapture || !primaryAccountCapture || selectedAccountCapture.sessionId === primaryAccountCapture.sessionId
   const { primary, gallery: capturedGallery } = productImages(product)
   const gallery = captureMediaAssets ? capturedGallery : []
   const videos = captureMediaAssets ? productVideos(product) : []
@@ -426,27 +471,49 @@ export function ProductMonitorCard({ product, monitor, onToggle, onSchedule, onM
   }
 
   async function captureNow() {
-    const captureScope = `价格、800 主图和 SKU 图${captureMediaAssets ? '、750 主图、详情图和视频' : ''}`
-    showOperation({ key: 'capture', tone: 'progress', message: `正在抓取${captureScope}${product.captureBuyerShows === false ? '' : '、买家秀'}，请保持软件运行。` })
+    const captureScope = '价格、800 主图和 SKU 图'
+    showOperation({ key: 'capture', tone: 'progress', message: `正在抓取${captureScope}；买家秀和完整素材使用各自独立任务。` })
     try {
       const captured = await onCapture(product)
+      if (!captured || captured.lastStatus === 'error' || !captured.lastSnapshot) {
+        showOperation({
+          key: 'capture',
+          tone: 'error',
+          message: `本次抓取未保存：${captured?.lastError || '没有返回可验证的价格快照。请检查账号授权和商品页面后重试。'}`,
+        }, 9000)
+        return
+      }
       const capturedSnapshot = captured?.lastSnapshot
-      const buyerCapture = capturedSnapshot?.buyerShowCapture
-      const cachedCount = capturedSnapshot?.buyerShowCachedItems?.length || 0
       const evidenceMessage = capturedSnapshot?.localImportError
         ? ` 本地价格证据保存失败：${capturedSnapshot.localImportError}`
         : capturedSnapshot?.localImportFile ? ' 本地价格证据已自动保存。' : ''
-      const message = (buyerCapture?.status === 'skipped'
-        ? `${captureScope}已更新；已按商品设置跳过买家秀。`
-        : buyerCapture?.status === 'failed'
-        ? cachedCount > 0
-          ? `${captureScope}已更新；买家秀本次失败，继续展示 ${cachedCount} 条历史成功数据。`
-          : `${captureScope}已更新；买家秀本次未获取（${buyerCapture.failureCode || '未知原因'}）。`
-        : `抓取完成，${captureScope}和 ${capturedSnapshot?.buyerShows?.length || 0} 条买家秀已更新。`) + evidenceMessage
-      const hasError = buyerCapture?.status === 'failed' || Boolean(capturedSnapshot?.localImportError)
+      const message = `${captureScope}已更新。${evidenceMessage}`
+      const hasError = Boolean(capturedSnapshot?.localImportError)
       showOperation({ key: 'capture', tone: hasError ? 'error' : 'success', message }, hasError ? 9000 : 5000)
     } catch (error) {
       showOperation({ key: 'capture', tone: 'error', message: error instanceof Error ? error.message : '抓取失败，请检查账号状态。' }, 9000)
+    }
+  }
+
+  async function captureMaterials() {
+    showOperation({ key: 'materials-capture', tone: 'progress', message: '正在单独抓取 750 主图、详情图和视频素材...' })
+    try {
+      const captured = await onCapture(product, { captureKind: 'materials' })
+      if (!captured?.lastSnapshot || captured.lastStatus === 'error') throw new Error(captured?.lastError || '完整素材抓取失败。')
+      showOperation({ key: 'materials-capture', tone: 'success', message: `完整素材已更新：${captured.lastSnapshot.gallery750Images?.length || 0} 张主图、${captured.lastSnapshot.detailImages?.length || 0} 张详情图、${captured.lastSnapshot.videoUrls?.length || 0} 个视频。` }, 6000)
+    } catch (error) {
+      showOperation({ key: 'materials-capture', tone: 'error', message: error instanceof Error ? error.message : '完整素材抓取失败。' }, 9000)
+    }
+  }
+
+  async function refreshAccountViews() {
+    showOperation({ key: 'account-views', tone: 'progress', message: '正在按账号类型刷新价格视角；主账号失败时不会由其他账号接管。' })
+    try {
+      const captured = await onCapture(product, { accountMode: 'all', captureKind: 'price' })
+      if (!captured?.lastSnapshot || captured.lastStatus === 'error') throw new Error(captured?.lastError || '账号价格视角刷新失败。')
+      showOperation({ key: 'account-views', tone: 'success', message: `已刷新 ${captured.lastSnapshot.accountCaptures?.length || 1} 个账号价格视角。` }, 6000)
+    } catch (error) {
+      showOperation({ key: 'account-views', tone: 'error', message: error instanceof Error ? error.message : '账号价格视角刷新失败。' }, 9000)
     }
   }
 
@@ -479,7 +546,7 @@ export function ProductMonitorCard({ product, monitor, onToggle, onSchedule, onM
       showOperation({
         key: 'media-preference',
         tone: 'success',
-        message: enabled ? '完整素材已开启；下次抓取会获取 750 主图、详情图和视频。' : '完整素材已关闭；后续只抓价格、800 主图和 SKU 图。',
+        message: enabled ? '完整素材已开启；可使用旁边的刷新按钮单独抓取 750 主图、详情图和视频。' : '完整素材已关闭；价格抓取仍保留 800 主图和 SKU 图。',
       }, 6000)
     } catch (error) {
       showOperation({ key: 'media-preference', tone: 'error', message: error instanceof Error ? error.message : '完整素材设置保存失败。' }, 9000)
@@ -533,8 +600,8 @@ export function ProductMonitorCard({ product, monitor, onToggle, onSchedule, onM
     }
   }
 
-  async function saveSkuMonitorPrice(skuId: string, value: number | null) {
-    await persistSkuMonitorPrice(product, skuId, value)
+  async function saveSkuMonitorPrice(skuId: string, value: number | null, channel: MonitorChannel) {
+    await persistSkuMonitorPrice(product, skuId, value, channel)
   }
 
   async function syncFeishu() {
@@ -612,6 +679,7 @@ export function ProductMonitorCard({ product, monitor, onToggle, onSchedule, onM
                       )
                     }) : <span className="px-2 py-1 text-[11px] text-slate-400">等待成功抓取</span>}
                 </div>
+                {!localOnly && <button type="button" onClick={refreshAccountViews} disabled={busy || operation?.tone === 'progress'} className="inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-lg border border-slate-200 bg-white text-slate-500 transition hover:border-sky-200 hover:text-sky-700 disabled:opacity-50" title="刷新全部已授权账号的价格视角；日常定时仍只抓主账号" aria-label="刷新全部账号价格视角"><RotateCw className={`h-3.5 w-3.5 ${operation?.key === 'account-views' && operation.tone === 'progress' ? 'animate-spin' : ''}`} /></button>}
               </div>
             </div>
             <div className="mt-2 flex min-w-0 flex-wrap items-center gap-x-3 gap-y-1">
@@ -626,12 +694,13 @@ export function ProductMonitorCard({ product, monitor, onToggle, onSchedule, onM
               {!compactContext && <span><span className="text-slate-400">型号</span><span className="ml-1.5 font-medium text-slate-700">{model}</span></span>}
               <span className="h-3.5 w-px bg-slate-200" aria-hidden="true" />
               <Button type="button" variant="secondary" size="sm" className="rounded-lg" onClick={() => setBuyerShowOpen(true)} disabled={!buyerShows.length} title={buyerShows.length ? `预览 ${buyerShows.length} 条有效买家秀` : '当前快照暂无有效买家秀，请重新抓取商品'}><Images className="h-4 w-4" />买家秀{buyerShows.length ? ` ${buyerShows.length}` : ''}</Button>
-              {!localOnly && buyerShowCapture?.status === 'failed' && <Button type="button" variant="secondary" size="sm" className="w-8 rounded-lg px-0" onClick={retryBuyerShows} disabled={retryingBuyerShows || operation?.tone === 'progress'} title="仅重试买家秀" aria-label="仅重试买家秀"><RotateCw className={`h-4 w-4 ${retryingBuyerShows ? 'animate-spin' : ''}`} /></Button>}
+              {!localOnly && <Button type="button" variant="secondary" size="sm" className="w-8 rounded-lg px-0" onClick={retryBuyerShows} disabled={retryingBuyerShows || operation?.tone === 'progress'} title={buyerShowCapture?.status === 'failed' ? '仅重试买家秀' : '单独抓取买家秀'} aria-label={buyerShowCapture?.status === 'failed' ? '仅重试买家秀' : '单独抓取买家秀'}><RotateCw className={`h-4 w-4 ${retryingBuyerShows ? 'animate-spin' : ''}`} /></Button>}
               {buyerShows.length > 0 && <Button type="button" variant="secondary" size="sm" className="w-8 rounded-lg px-0" onClick={() => runDownload('buyer-shows', '正在整理买家秀图片、视频和文案并生成 ZIP...', downloadBuyerShowsHref(product.id), `${title}_买家秀.zip`)} disabled={operation?.tone === 'progress'} title="下载买家秀 ZIP" aria-label="下载买家秀 ZIP">{operation?.key === 'buyer-shows' && operation.tone === 'progress' ? <LoaderCircle className="h-4 w-4 animate-spin" /> : <Download className="h-4 w-4" />}</Button>}
               {!localOnly && <label className={`inline-flex h-8 cursor-pointer items-center gap-1.5 rounded-lg border px-2.5 text-xs font-medium transition ${captureMediaAssets ? 'border-blue-200 bg-blue-50 text-blue-700' : 'border-slate-200 bg-white text-slate-600 hover:bg-slate-50'}`} title="关闭时只抓价格、800 主图和 SKU 图，且不提供商品素材下载">
                 <input type="checkbox" checked={captureMediaAssets} onChange={(event) => changeMediaPreference(event.target.checked)} disabled={savingMediaPreference || operation?.tone === 'progress'} className="h-3.5 w-3.5 accent-blue-600" />
                 <Archive className="h-3.5 w-3.5" />完整素材
               </label>}
+              {captureMediaAssets && <Button type="button" variant="secondary" size="sm" className="w-8 rounded-lg px-0" onClick={captureMaterials} disabled={busy || operation?.tone === 'progress'} title="单独抓取完整素材" aria-label="单独抓取完整素材">{operation?.key === 'materials-capture' && operation.tone === 'progress' ? <LoaderCircle className="h-4 w-4 animate-spin" /> : <RotateCw className="h-4 w-4" />}</Button>}
               {captureMediaAssets && <Button type="button" variant="secondary" size="sm" className="w-8 rounded-lg px-0" onClick={() => runDownload('media', '正在整理主图、SKU 图、详情图和视频并生成素材包...', downloadMediaBundleHref(product.id), `${title}_素材包.zip`)} disabled={operation?.tone === 'progress'} title="下载完整素材包" aria-label="下载完整素材包">{operation?.key === 'media' && operation.tone === 'progress' ? <LoaderCircle className="h-4 w-4 animate-spin" /> : <Download className="h-4 w-4" />}</Button>}
             </div>
           </div>
@@ -694,7 +763,7 @@ export function ProductMonitorCard({ product, monitor, onToggle, onSchedule, onM
           <CaptureStatus product={product} />
         </section>
 
-        <SkuPricePanel product={product} snapshots={snapshots} showTrend={trendVisible} accountSessionId={selectedAccountCapture?.sessionId || ''} accountType={selectedAccountType} accountName={selectedAccountName} onPreview={onPreview} onSaveSkuMonitorPrice={saveSkuMonitorPrice} allowMediaDownload={captureMediaAssets} />
+        <SkuPricePanel product={product} snapshots={snapshots} showTrend={trendVisible} accountSessionId={selectedAccountCapture?.sessionId || ''} accountType={selectedAccountType} accountName={selectedAccountName} primaryAccountType={primaryAccountType} isPrimaryAccountView={isPrimaryAccountView} onPreview={onPreview} onSaveSkuMonitorPrice={saveSkuMonitorPrice} allowMediaDownload={captureMediaAssets} />
       </div>
 
       {buyerShowOpen && <BuyerShowDialog title={title} items={buyerShows} statusText={buyerShowStatusText} onClose={() => setBuyerShowOpen(false)} retryBusy={retryingBuyerShows} onRetry={localOnly ? undefined : retryBuyerShows} downloadBusy={operation?.tone === 'progress' && operation.key.startsWith('buyer-show') && operation.key !== 'buyer-show-retry'} downloadMessage={operation?.key.startsWith('buyer-show') ? operation.message : ''} onDownload={() => runDownload('buyer-shows', '正在整理全部买家秀并生成 ZIP...', downloadBuyerShowsHref(product.id), `${title}_买家秀.zip`)} onDownloadItem={(item) => runDownload(`buyer-show-item:${item.id}`, '正在整理这条买家秀并生成 ZIP...', downloadBuyerShowItemHref(product.id, item.id), `${title}_买家秀.zip`)} />}

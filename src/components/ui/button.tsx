@@ -10,7 +10,7 @@ export function Button({ className, variant = 'primary', size = 'md', ...props }
   return (
     <button
       className={cn(
-        'inline-flex items-center justify-center gap-2 whitespace-nowrap rounded-md border font-medium transition disabled:cursor-not-allowed disabled:opacity-55',
+        'inline-flex items-center justify-center gap-2 whitespace-nowrap rounded-md border font-medium transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 focus-visible:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-55',
         size === 'sm' ? 'h-8 px-3 text-xs' : 'h-10 px-4 text-sm',
         variant === 'primary' && 'border-blue-600 bg-blue-600 text-white hover:bg-blue-700',
         variant === 'secondary' && 'border-slate-200 bg-white text-slate-700 hover:border-blue-200 hover:bg-blue-50 hover:text-blue-800',

@@ -10,11 +10,62 @@ import {
   isBuyerShowResponseUrl,
   isTaobaoLoginDocument,
   isTaobaoLoginUrl,
+  isTmallSilentLoginResponse,
+  isTmallSessionCookie,
+  shouldCaptureNetworkResponse,
   shouldPreserveCaptureCache,
   skuIdFromNetworkBody,
   skuIdFromNetworkUrl,
   taobaoCookieStateForUrls,
+  tmallSsoSyncUrlsFromSilentLogin,
 } from "./browserService.js";
+
+test("Tmall SSO bridge accepts only the trusted same-session endpoints", () => {
+  const body = `callback({"content":{"data":{"asyncUrls":[
+    "https://pass.tmall.com/add?token=secret",
+    "https://pass.tmall.hk/add?token=secret",
+    "https://pass.fliggy.com/add?token=secret",
+    "https://pass.tmall.com.evil.example/add?token=secret",
+    "http://pass.tmall.com/add?token=secret"
+  ]}}})`;
+  assert.deepEqual(tmallSsoSyncUrlsFromSilentLogin(body).map((value) => new URL(value).hostname), [
+    "pass.tmall.com",
+    "pass.tmall.hk",
+  ]);
+  assert.deepEqual(tmallSsoSyncUrlsFromSilentLogin("not-json"), []);
+});
+
+test("Tmall silent-login JSONP scripts are captured for same-browser SSO", () => {
+  assert.equal(shouldCaptureNetworkResponse({
+    url: "https://login.taobao.com/newlogin/silentHasLogin.do?callback=x",
+    mimeType: "application/javascript",
+    status: 200,
+  }, "Script"), true);
+  assert.equal(shouldCaptureNetworkResponse({
+    url: "https://example.com/unrelated.js",
+    mimeType: "application/javascript",
+    status: 200,
+  }, "Script"), false);
+  assert.equal(shouldCaptureNetworkResponse({
+    url: "https://login.taobao.com/newlogin/silentHasLogin.do?callback=x",
+    mimeType: "application/javascript",
+    status: 403,
+  }, "Script"), false);
+});
+
+test("Tmall silent-login bridges stay out of persisted capture payloads", () => {
+  assert.equal(isTmallSilentLoginResponse("https://login.taobao.com/newlogin/silentHasLogin.do"), true);
+  assert.equal(isTmallSilentLoginResponse("https://h5api.m.tmall.com/h5/mtop.taobao.pcdetail.data.adjust/1.0/"), false);
+});
+
+test("Tmall reauthorization clears the complete Tmall session without touching Taobao", () => {
+  assert.equal(isTmallSessionCookie({ name: "login", domain: ".tmall.com" }), true);
+  assert.equal(isTmallSessionCookie({ name: "_m_h5_tk", domain: "h5api.m.tmall.com" }), true);
+  assert.equal(isTmallSessionCookie({ name: "wk_unb", domain: ".tmall.hk" }), true);
+  assert.equal(isTmallSessionCookie({ name: "cookie17", domain: ".taobao.com" }), false);
+  assert.equal(isTmallSessionCookie({ name: "skupanel-skuoptions-layout-mode", domain: "detail.tmall.com" }), true);
+  assert.equal(isTmallSessionCookie({ name: "login", domain: ".evil-tmall.com" }), false);
+});
 
 test("buyer-show response classifier ignores unrelated generic feeds", () => {
   assert.equal(isBuyerShowResponseUrl("https://h5api.m.tmall.com/h5/mtop.taobao.rate.detaillist.get/6.0/"), true);
@@ -51,6 +102,7 @@ test("isTaobaoLoginUrl recognizes Taobao login redirects", () => {
 test("local browser capture preserves the user's normal cache", () => {
   assert.equal(shouldPreserveCaptureCache({ localCapture: true }), true);
   assert.equal(shouldPreserveCaptureCache({ preserveCache: true }), true);
+  assert.equal(shouldPreserveCaptureCache({ localCapture: true, preserveCache: false }), false);
   assert.equal(shouldPreserveCaptureCache({}), false);
 });
 

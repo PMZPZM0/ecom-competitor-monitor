@@ -1,46 +1,59 @@
-import { useEffect, useRef, useState } from 'react'
-import { BarChart3, BookOpen, CircleAlert, CircleCheck, CloudDownload, Database, FolderTree, ListChecks, ListTodo, LoaderCircle, PauseCircle, PlayCircle, RefreshCw, Search, Settings, Sparkles, Type, WandSparkles, X } from 'lucide-react'
+import { lazy, Suspense, useEffect, useRef, useState } from 'react'
+import { BookOpen, CircleAlert, CircleCheck, Database, LoaderCircle, PackageSearch, Search, Settings, Type, WandSparkles, X } from 'lucide-react'
 import { api } from './lib/api'
 import { Button } from './components/ui/button'
-import { Badge } from './components/ui/badge'
-import { ProductForm } from './features/products/ProductForm'
 import { LocalImportDialog } from './features/products/LocalImportDialog'
 import { AuthPanel } from './features/auth/AuthPanel'
-import { MetricCards } from './features/dashboard/MetricCards'
-import { ProductTable } from './features/products/ProductTable'
-import { MonitorClassification } from './features/classification/MonitorClassification'
-import { AnalysisPanel } from './features/analysis/AnalysisPanel'
 import { ModelConfigPanel } from './features/analysis/ModelConfigPanel'
-import { SnapshotFeed } from './features/monitoring/SnapshotFeed'
 import { DataRecords } from './features/monitoring/DataRecords'
 import { FeishuAuthorization, FeishuSettings } from './features/monitoring/FeishuSettings'
-import { BatchCaptureCard } from './features/monitoring/BatchCaptureCard'
 import { RunLog } from './features/monitoring/RunLog'
-import { MonitorQueue } from './features/monitoring/MonitorQueue'
-import { CaptureQueue } from './features/monitoring/CaptureQueue'
+import { ProductMonitoringWorkspace } from './features/monitoring/ProductMonitoringWorkspace'
 import { HelpCenter } from './features/help/HelpCenter'
 import { UpdateDialog } from './features/updates/UpdateDialog'
-import { ImageWorkbench } from './features/image-generation/ImageWorkbench'
-import type { AuthSession, LocalImportCommitResult, ModelConfigPatch, ModelConfigTestResult, Overview, Product, RunRecord, UpdateInfo } from './types/domain'
+import { ImageWorkbench, type ImageWorkbenchDraftTransfer } from './features/image-generation/ImageWorkbench'
+import { SettingsCenter, type SettingsSection } from './features/settings/SettingsCenter'
+import type { PromptHistoryItem, PromptProductProfile, PromptStylePreset, PromptSyncPayload } from './features/prompt-studio/types'
+import type { AuthSession, LocalImportCommitResult, ModelConfigPatch, ModelConfigTestPayload, ModelConfigTestResult, MonitorChannel, Overview, Product, ProductCaptureOptions, RunRecord, UpdateInfo } from './types/domain'
 
+const guidePage = { id: 'guide', label: '使用说明书', icon: BookOpen, title: '使用说明书', subtitle: '第一次使用请从这里开始，按顺序完成账号授权、商品抓取和自动监控。' } as const
 const primaryNavItems = [
-  { id: 'guide', label: '使用说明书', icon: BookOpen, title: '使用说明书', subtitle: '第一次使用请从这里开始，按顺序完成账号授权、商品抓取和自动监控。' },
-  { id: 'overview', label: '监控总览', icon: BarChart3, title: '竞品价格与 SKU 图监控', subtitle: '第二步：添加并核对商品，设置监控价、抓取计划和启用状态。' },
-  { id: 'capture-queue', label: '抓取队列', icon: ListTodo, title: '抓取任务队列', subtitle: '查看当前排队和运行进度，完成项自动移出，页面刷新不会取消任务。' },
-  { id: 'categories', label: '监控分类', icon: FolderTree, title: '店铺与型号自动分类', subtitle: '按店铺和型号整理商品，再进行筛选、批量抓取或批量管理。' },
-  { id: 'queue', label: '监控队列', icon: ListChecks, title: '监控与本地更新队列', subtitle: '第三步：查看在线商品的执行计划，并为本地数据商品导入新文件。' },
-  { id: 'records', label: '数据记录', icon: Database, title: '数据记录与监控设置', subtitle: '查看历史快照、导出 CSV，并调整后台监控间隔。' },
-  { id: 'image-workbench', label: 'AI 生图', icon: WandSparkles, title: 'AI 生图', subtitle: '输入提示词并设置生成参数。' },
-  { id: 'analysis', label: 'AI分析（功能开发中）', icon: Sparkles, title: 'AI 数据分析', subtitle: '基于历史抓取数据生成价格、SKU 和图片变化洞察。' },
+  { id: 'monitoring', label: '商品监控', icon: PackageSearch, title: '商品监控', subtitle: '添加、筛选和核对商品，并在任务中心管理监控计划与抓取进度。' },
+  { id: 'image-workbench', label: 'AI 创作', icon: WandSparkles, title: 'AI 创作', subtitle: '输入需求，可先让 AI 帮写并修改确认，再提交到生图队列。' },
+  { id: 'records', label: '数据记录', icon: Database, title: '数据记录', subtitle: '查看运行日志、价格历史、本地证据并重试失败商品。' },
 ] as const
+const pageItems = [guidePage, ...primaryNavItems] as const
 
-const authNavItem = { id: 'auth', label: '账号授权', icon: Settings, title: '淘宝与飞书账号授权', subtitle: '第一步：授权采价账号，再按需连接飞书文档和机器人通知。' } as const
-const navItems = [...primaryNavItems, authNavItem] as const
+const PromptWorkbench = lazy(() => import('./features/prompt-studio/PromptWorkbench').then((module) => ({ default: module.PromptWorkbench })))
 
-type PageId = (typeof navItems)[number]['id']
+type PageId = (typeof pageItems)[number]['id']
 type FontSize = 'small' | 'standard' | 'large'
 type AccountType = 'normal' | 'gift' | 'vip88'
+type AiCreationView = 'compose' | 'professional'
 const UPDATE_NOTIFIED_VERSION_KEY = 'ecommerce-monitor-update-notified-version'
+const ACTIVE_PAGE_KEY = 'tmall-monitor-active-page'
+const AI_CREATION_VIEW_KEY = 'ecommerce-monitor-ai-creation-view'
+
+type PromptProductProfileInput = Omit<PromptProductProfile, 'id' | 'updatedAt'> & { id?: string }
+type PromptStylePresetInput = Omit<PromptStylePreset, 'id' | 'updatedAt'> & { id?: string }
+
+async function savePromptProductProfile(profile: PromptProductProfileInput) {
+  const { id, ...payload } = profile
+  return id ? api.updatePromptProductProfile(id, payload) : api.createPromptProductProfile(payload)
+}
+
+async function savePromptStylePreset(preset: PromptStylePresetInput) {
+  const { id, ...payload } = preset
+  return id ? api.updatePromptStylePreset(id, payload) : api.createPromptStylePreset(payload)
+}
+
+function togglePromptHistoryFavorite(id: string, favorite: boolean): Promise<PromptHistoryItem> {
+  return api.updatePromptHistory(id, { isFavorite: favorite })
+}
+
+function renamePromptHistory(id: string, name: string): Promise<PromptHistoryItem> {
+  return api.updatePromptHistory(id, { name })
+}
 
 function requireOnlineCapture(product: Product) {
   if (product.captureMode === 'local-only') throw new Error('该商品使用本地数据模式，不会访问淘宝页面。请点击“导入新文件”更新价格。')
@@ -49,15 +62,23 @@ function requireOnlineCapture(product: Product) {
 function App() {
   const [overview, setOverview] = useState<Overview | null>(null)
   const [activePage, setActivePage] = useState<PageId>(() => {
-    const saved = window.localStorage.getItem('tmall-monitor-active-page')
-    return navItems.some((item) => item.id === saved) ? saved as PageId : 'guide'
+    const saved = window.localStorage.getItem(ACTIVE_PAGE_KEY)
+    if (saved === 'prompt-studio') return 'image-workbench'
+    if (['overview', 'categories', 'queue', 'capture-queue', 'auth'].includes(saved || '')) return 'monitoring'
+    if (saved === 'analysis') return 'guide'
+    return pageItems.some((item) => item.id === saved) ? saved as PageId : 'guide'
+  })
+  const [aiCreationView, setAiCreationView] = useState<AiCreationView>(() => {
+    if (window.localStorage.getItem(ACTIVE_PAGE_KEY) === 'prompt-studio') return 'professional'
+    return window.localStorage.getItem(AI_CREATION_VIEW_KEY) === 'professional' ? 'professional' : 'compose'
   })
   const [busy, setBusy] = useState(false)
   const [busyProductId, setBusyProductId] = useState('')
   const [monitorToggleBusy, setMonitorToggleBusy] = useState(false)
-  const [analysisBusy, setAnalysisBusy] = useState(false)
   const [error, setError] = useState('')
   const [notice, setNotice] = useState('')
+  const [settingsOpen, setSettingsOpen] = useState(() => window.localStorage.getItem(ACTIVE_PAGE_KEY) === 'auth')
+  const [settingsSection, setSettingsSection] = useState<SettingsSection>('accounts')
   const [authGuideAccountType, setAuthGuideAccountType] = useState<AccountType | null>(null)
   const [fontSize, setFontSize] = useState<FontSize>(() => (window.localStorage.getItem('ecommerce-monitor-font-size') as FontSize) || 'standard')
   const [updateOpen, setUpdateOpen] = useState(false)
@@ -66,7 +87,10 @@ function App() {
   const [updateError, setUpdateError] = useState('')
   const [localImportOpen, setLocalImportOpen] = useState(false)
   const [localImportTarget, setLocalImportTarget] = useState<Product | null>(null)
+  const [incomingImageDraft, setIncomingImageDraft] = useState<ImageWorkbenchDraftTransfer | null>(null)
+  const [professionalPromptMounted, setProfessionalPromptMounted] = useState(aiCreationView === 'professional')
   const updateCheckActive = useRef(false)
+  const activePageRef = useRef<PageId>(activePage)
 
   async function refresh() {
     setOverview(await api.overview())
@@ -74,7 +98,7 @@ function App() {
 
   useEffect(() => {
     const refreshWhenVisible = () => {
-      if (document.visibilityState === 'visible') refresh().catch(() => undefined)
+      if (document.visibilityState === 'visible' && activePageRef.current !== 'image-workbench') refresh().catch(() => undefined)
     }
     refresh().catch((err) => setError(err.message))
     const timer = window.setInterval(refreshWhenVisible, 60_000)
@@ -98,8 +122,14 @@ function App() {
   }, [])
 
   useEffect(() => {
-    window.localStorage.setItem('tmall-monitor-active-page', activePage)
+    activePageRef.current = activePage
+    window.localStorage.setItem(ACTIVE_PAGE_KEY, activePage)
   }, [activePage])
+
+  useEffect(() => {
+    window.localStorage.setItem(AI_CREATION_VIEW_KEY, aiCreationView)
+    if (aiCreationView === 'professional') setProfessionalPromptMounted(true)
+  }, [aiCreationView])
 
   useEffect(() => {
     document.documentElement.dataset.fontSize = fontSize
@@ -136,8 +166,8 @@ function App() {
     }
   }
 
-  function hasCaptureAccount() {
-    return overview?.authSessions.some((session) => session.source === 'taobao-browser' && (session.enabled ?? session.active) && session.loginStatus !== 'expired') === true
+  function hasCaptureAccount(accountType?: AccountType) {
+    return overview?.authSessions.some((session) => session.source === 'taobao-browser' && (session.enabled ?? session.active) && session.loginStatus !== 'expired' && (!accountType || (session.accountType || 'normal') === accountType)) === true
   }
 
   function showAuthGuide(accountType: AccountType) {
@@ -147,7 +177,7 @@ function App() {
   }
 
   async function handleAdd(payload: { name?: string; url: string; group?: string; accountType: 'normal' | 'gift' | 'vip88'; captureBuyerShows: boolean; captureMediaAssets: boolean }) {
-    if (!hasCaptureAccount()) {
+    if (!hasCaptureAccount(payload.accountType)) {
       showAuthGuide(payload.accountType)
       throw new Error('尚未授权可用的淘宝扫码账号。')
     }
@@ -157,7 +187,11 @@ function App() {
       const product = await api.addProduct(payload)
       setBusyProductId(product.id)
       const result = await api.captureProduct(product.id)
-      setNotice(result.run.message)
+      const followups = await Promise.all([
+        ...(payload.captureMediaAssets ? [api.captureProduct(product.id, 'materials')] : []),
+        ...(payload.captureBuyerShows ? [api.captureProduct(product.id, 'buyer-show')] : []),
+      ])
+      setNotice([result.run.message, ...followups.map((item) => item.run.message)].join(' '))
       await refresh()
       return result.product
     } catch (err) {
@@ -170,7 +204,7 @@ function App() {
   }
 
   async function addProductsBatch(payload: { urls: string[]; group: string; accountType: 'normal' | 'gift' | 'vip88'; captureBuyerShows: boolean; captureMediaAssets: boolean }) {
-    if (!hasCaptureAccount()) {
+    if (!hasCaptureAccount(payload.accountType)) {
       showAuthGuide(payload.accountType)
       throw new Error('尚未授权可用的淘宝扫码账号。')
     }
@@ -212,22 +246,6 @@ function App() {
     }
   }
 
-  async function runAnalysis() {
-    setAnalysisBusy(true)
-    setError('')
-    setNotice('正在生成分析报告...')
-    try {
-      await api.runAnalysis()
-      setNotice('分析报告已生成。')
-      await refresh()
-    } catch (err) {
-      setNotice('')
-      setError(err instanceof Error ? err.message : '分析失败')
-    } finally {
-      setAnalysisBusy(false)
-    }
-  }
-
   async function toggleProduct(product: Product) {
     requireOnlineCapture(product)
     await api.updateProduct(product.id, { enabled: !product.enabled })
@@ -245,21 +263,23 @@ function App() {
     await refresh()
   }
 
-  async function saveSkuMonitorPrice(product: Product, skuId: string, value: number | null) {
-    await api.updateSkuMonitorPrice(product.id, skuId, value)
+  async function saveSkuMonitorPrice(product: Product, skuId: string, value: number | null, channel: MonitorChannel = 'lowest') {
+    await api.updateSkuMonitorPrice(product.id, skuId, value, channel)
     await refresh()
   }
 
-  async function captureProduct(product: Product) {
+  async function captureProduct(product: Product, options: ProductCaptureOptions = {}) {
     requireOnlineCapture(product)
     const accountType = product.accountType || 'normal'
-    if (!hasCaptureAccount()) {
+    if (!hasCaptureAccount(accountType)) {
       showAuthGuide(accountType)
       throw new Error('请先授权并启用可用的淘宝扫码账号。')
     }
     setBusyProductId(product.id)
     try {
-      const result = await api.captureProduct(product.id)
+      const result = options.accountMode === 'all'
+        ? await api.captureAllAccountViews(product.id)
+        : await api.captureProduct(product.id, options.captureKind || 'price')
       await refresh()
       return result.product
     } finally {
@@ -311,9 +331,10 @@ function App() {
     const onlineProducts = products.filter((product) => product.captureMode !== 'local-only')
     const skippedLocalCount = products.length - onlineProducts.length
     if (!onlineProducts.length) throw new Error('所选商品均为本地数据模式，请分别导入新文件更新价格。')
-    if (!hasCaptureAccount()) {
-      showAuthGuide(onlineProducts[0].accountType || 'normal')
-      throw new Error('请先授权并启用可用的淘宝扫码账号。')
+    const missingAccountProduct = onlineProducts.find((product) => !hasCaptureAccount(product.accountType || 'normal'))
+    if (missingAccountProduct) {
+      showAuthGuide(missingAccountProduct.accountType || 'normal')
+      throw new Error(`缺少可用的${missingAccountProduct.accountType === 'gift' ? '礼金' : missingAccountProduct.accountType === 'vip88' ? '88VIP' : '普通'}账号；日常抓价不会换用其他账号类型。`)
     }
     setBusy(true)
     if (showFeedback) {
@@ -402,7 +423,25 @@ function App() {
     setLocalImportOpen(true)
   }
 
-  async function testModelConfig(payload: Pick<ModelConfigPatch, 'channel' | 'customBaseUrl' | 'imageModel' | 'apiKey'>): Promise<ModelConfigTestResult> {
+  function syncPromptToImageWorkbench(payload: PromptSyncPayload) {
+    setIncomingImageDraft({
+      id: globalThis.crypto?.randomUUID?.() || `prompt-${Date.now()}`,
+      prompt: payload.prompt,
+      negativePrompt: payload.negativePrompt,
+      ratio: payload.ratio,
+      resolution: payload.resolution,
+      quality: payload.quality,
+      format: payload.format,
+      background: payload.background,
+      referenceImages: payload.referenceFiles,
+    })
+    setError('')
+    setNotice('提示词、参数和参考图已同步到 AI 创作，请确认后再加入生图队列。')
+    setAiCreationView('compose')
+    setActivePage('image-workbench')
+  }
+
+  async function testModelConfig(payload: ModelConfigTestPayload): Promise<ModelConfigTestResult> {
     const result = await api.testModelConfig(payload)
     await refresh()
     return result
@@ -427,34 +466,18 @@ function App() {
     }
   }
 
+  function openSettings(section: SettingsSection = 'accounts') {
+    setSettingsSection(section)
+    setSettingsOpen(true)
+  }
+
   if (!overview) {
     return <div className="flex min-h-screen items-center justify-center bg-[#f6f8fa] text-slate-500">正在加载本地监控工作台...</div>
   }
 
   const data = overview
   const runs = data.runs || []
-  const currentPage = navItems.find((item) => item.id === activePage) ?? navItems[0]
-
-  const productTable = (
-    <ProductTable
-      products={data.products}
-      totalProducts={data.products.length}
-      onToggle={toggleProduct}
-      onSchedule={saveProductSchedule}
-      onMediaPreference={saveProductMediaPreference}
-      onSaveSkuMonitorPrice={saveSkuMonitorPrice}
-      onCapture={captureProduct}
-      onRetryBuyerShows={retryBuyerShows}
-      onLocalImport={openLocalImport}
-      onDelete={deleteProduct}
-      busyProductId={busyProductId}
-      monitor={data.monitor}
-    />
-  )
-
-  const productForm = <ProductForm sessions={data.authSessions} onAdd={handleAdd} onRequireAuth={showAuthGuide} />
-
-  const classificationPanel = <MonitorClassification products={data.products} monitor={data.monitor} onToggle={toggleProduct} onSchedule={saveProductSchedule} onMediaPreference={saveProductMediaPreference} onSaveSkuMonitorPrice={saveSkuMonitorPrice} onCapture={captureProduct} onRetryBuyerShows={retryBuyerShows} onLocalImport={openLocalImport} onCaptureBatch={captureProductsBatch} onDelete={deleteProduct} onDeleteBatch={deleteProductsBatch} batchBusy={busy} busyProductId={busyProductId} />
+  const currentPage = pageItems.find((item) => item.id === activePage) ?? guidePage
 
   const authPanel = (
     <AuthPanel
@@ -465,36 +488,39 @@ function App() {
     />
   )
 
-  const analysisPanel = <AnalysisPanel analyses={data.analyses} onRun={runAnalysis} busy={analysisBusy} />
-  const modelConfigPanel = <ModelConfigPanel config={data.modelConfig} onSave={saveModelConfig} onTest={testModelConfig} />
-  const imageWorkbench = <ImageWorkbench config={data.modelConfig} onSaveConfig={saveModelConfig} onTestConfig={testModelConfig} />
+  const modelConfigPanel = <ModelConfigPanel purpose="creation" config={data.modelConfig} onSave={saveModelConfig} onDiscover={api.modelCatalog} onTest={testModelConfig} />
+  const promptWorkbench = <Suspense fallback={<div className="flex min-h-[420px] items-center justify-center gap-2 rounded-md border border-slate-200 bg-white text-sm text-slate-500"><LoaderCircle className="h-5 w-5 animate-spin" />正在加载专业提示词工作台</div>}><PromptWorkbench presentation="professional" config={data.modelConfig} onLoadWorkspace={api.promptStudio} onAnalyzeProduct={api.analyzePromptProduct} onGenerate={api.generatePromptSet} onQuickGenerate={api.quickGeneratePrompt} onOpenModelSettings={() => openSettings('models')} onSaveProductProfile={savePromptProductProfile} onDeleteProductProfile={api.deletePromptProductProfile} onSaveStylePreset={savePromptStylePreset} onDeleteStylePreset={api.deletePromptStylePreset} onToggleLibraryFavorite={api.togglePromptLibraryFavorite} onToggleFavoriteHistory={togglePromptHistoryFavorite} onRenameHistory={renamePromptHistory} onDeleteHistory={api.deletePromptHistory} onSyncToImageWorkbench={syncPromptToImageWorkbench} onExitProfessional={() => setAiCreationView('compose')} /></Suspense>
+  const imageWorkbench = <ImageWorkbench active={activePage === 'image-workbench' && aiCreationView === 'compose'} config={data.modelConfig} onOpenModelSettings={() => openSettings('models')} incomingDraft={incomingImageDraft} onEnhancePrompt={api.quickGeneratePrompt} onOpenProfessionalPrompt={() => { setProfessionalPromptMounted(true); setAiCreationView('professional') }} />
 
   function renderPage() {
-    if (activePage === 'auth') {
-      return <div className="space-y-5">{authPanel}<FeishuAuthorization feishu={data.feishu} products={data.products} onSave={saveFeishuSettings} /><FeishuSettings feishu={data.feishu} logs={data.notificationLogs} products={data.products} onSave={saveFeishuSettings} onTest={testFeishu} /></div>
-    }
-
-    if (activePage === 'categories') {
-      return classificationPanel
-    }
-
-    if (activePage === 'queue') {
-      return <MonitorQueue products={data.products} monitor={data.monitor} busyProductId={busyProductId} batchBusy={busy} onCapture={captureProduct} onCaptureBatch={(products) => captureProductsBatch(products, false)} onPauseBatch={pauseProductsBatch} onSchedule={saveProductSchedule} onToggle={toggleProduct} onLocalImport={openLocalImport} />
-    }
-
-    if (activePage === 'capture-queue') {
-      return <CaptureQueue initialStatus={data.captureQueue} />
-    }
-
-    if (activePage === 'analysis') {
+    if (activePage === 'monitoring') {
       return (
-        <div className="grid grid-cols-[420px_1fr] gap-5">
-          <div className="space-y-5">
-            {analysisPanel}
-            {modelConfigPanel}
-          </div>
-          <SnapshotFeed snapshots={data.snapshots} />
-        </div>
+        <ProductMonitoringWorkspace
+          overview={data}
+          sessions={data.authSessions}
+          products={data.products}
+          monitor={data.monitor}
+          onAdd={handleAdd}
+          onAddBatch={addProductsBatch}
+          onRequireAuth={showAuthGuide}
+          onToggle={toggleProduct}
+          onSchedule={saveProductSchedule}
+          onMediaPreference={saveProductMediaPreference}
+          onSaveSkuMonitorPrice={saveSkuMonitorPrice}
+          onCapture={captureProduct}
+          onRetryBuyerShows={retryBuyerShows}
+          onLocalImport={openLocalImport}
+          onDelete={deleteProduct}
+          onDeleteBatch={deleteProductsBatch}
+          onCaptureBatch={captureProductsBatch}
+          onPauseBatch={pauseProductsBatch}
+          onToggleMonitorRunning={() => toggleMonitorRunning()}
+          onRefresh={refresh}
+          onOpenSettings={() => openSettings('accounts')}
+          batchBusy={busy}
+          busyProductId={busyProductId}
+          monitorToggleBusy={monitorToggleBusy}
+        />
       )
     }
 
@@ -508,21 +534,17 @@ function App() {
     }
 
     if (activePage === 'guide') {
-      return <HelpCenter onNavigate={setActivePage} />
+      return <HelpCenter onNavigate={(page) => {
+        if (page === 'settings') {
+          openSettings('accounts')
+          return
+        }
+        if (page === 'image-workbench') setAiCreationView('compose')
+        setActivePage(page)
+      }} />
     }
 
-    return (
-      <>
-        <MetricCards overview={data} />
-        <div className="space-y-5">
-          <div className="grid grid-cols-2 items-stretch gap-4 max-[1180px]:grid-cols-1">
-            {productForm}
-            <BatchCaptureCard sessions={data.authSessions} busy={busy} onRun={addProductsBatch} onRequireAuth={showAuthGuide} />
-          </div>
-          {productTable}
-        </div>
-      </>
-    )
+    return null
   }
 
   return (
@@ -537,11 +559,14 @@ function App() {
             <div className="text-xs text-slate-400">本地工作台</div>
           </div>
         </div>
-        <nav className="flex-1 space-y-1 p-3">
+        <nav className="app-nav flex-1 space-y-1 p-3">
           {primaryNavItems.map((item) => (
             <button
               key={item.label}
-              onClick={() => setActivePage(item.id)}
+              onClick={() => {
+                if (item.id === 'image-workbench') setAiCreationView('compose')
+                setActivePage(item.id)
+              }}
               aria-label={item.label}
               className={`flex h-10 w-full items-center gap-3 rounded-md px-3 text-sm ${
                 activePage === item.id ? 'bg-blue-50 text-blue-700' : 'text-slate-600 hover:bg-slate-50'
@@ -553,54 +578,29 @@ function App() {
             </button>
           ))}
         </nav>
-        <div className="space-y-2 border-t border-slate-200 p-3">
-          <button
-            type="button"
-            onClick={() => setActivePage(authNavItem.id)}
-            aria-label={authNavItem.label}
-            className={`flex h-10 w-full items-center gap-3 rounded-md border px-3 text-sm font-medium shadow-sm ${
-              activePage === authNavItem.id ? 'border-blue-600 bg-blue-600 text-white' : 'border-blue-200 bg-blue-50 text-blue-700 hover:bg-blue-100'
-            }`}
-          >
-            <authNavItem.icon className="h-4 w-4" />
-            <span className="nav-label">{authNavItem.label}</span>
-          </button>
-          <button type="button" aria-label={updateInfo?.updateAvailable ? `发现新版本 v${updateInfo.latestVersion}` : `检查更新，当前版本 v${data.runtime.version}`} onClick={() => { setUpdateOpen(true); if (!updateInfo && !updateChecking) checkUpdates(false).catch(() => undefined) }} className={`flex min-h-11 w-full items-center gap-3 rounded-md border px-3 py-2 text-left text-sm ${updateInfo?.updateAvailable ? 'border-emerald-200 bg-emerald-50 text-emerald-800' : 'border-slate-200 bg-slate-50 text-slate-600 hover:bg-blue-50 hover:text-blue-700'}`}>
-            <span className="relative shrink-0"><CloudDownload className="h-4 w-4" />{updateInfo?.updateAvailable && <span className="absolute -right-1 -top-1 h-2 w-2 rounded-full bg-emerald-500" />}</span>
-            <span className="nav-label min-w-0"><span className="block truncate font-medium">{updateInfo?.updateAvailable ? `发现新版本 v${updateInfo.latestVersion}` : '检查软件更新'}</span><span className="mt-0.5 block text-xs opacity-70">当前 v{data.runtime.version}</span></span>
-          </button>
-        </div>
+        <div className="app-sidebar-footer border-t border-slate-200 px-5 py-4 text-xs text-slate-400">本机运行 · v{data.runtime.version}</div>
       </aside>
 
       <main className="app-main ml-64 min-h-screen">
         <header className="sticky top-0 z-10 flex min-h-16 flex-wrap items-center justify-between gap-3 border-b border-slate-200 bg-white/95 px-3 py-2 backdrop-blur sm:px-6">
-          <div>
-            <h1 className="text-xl font-semibold text-slate-950">{currentPage.title}</h1>
-            <p className="text-sm text-slate-500">{currentPage.subtitle}</p>
+          <div className="min-w-0 flex-1">
+            <h1 className="truncate text-xl font-semibold text-slate-950">{currentPage.title}</h1>
+            <p className="truncate text-sm text-slate-500">{activePage === 'image-workbench' && aiCreationView === 'professional' ? '逐项控制产品事实、风格、文案和修改边界，再同步回 AI 创作。' : currentPage.subtitle}</p>
           </div>
-          <div className="flex w-full flex-wrap items-center justify-start gap-2 sm:w-auto sm:justify-end">
+          <div className="flex w-full max-w-full flex-wrap items-center justify-start gap-2 sm:w-auto sm:justify-end">
             <label className="flex h-9 items-center gap-2 rounded-md border border-slate-200 bg-white px-2 text-xs text-slate-500" title="调整界面文字大小"><Type className="h-4 w-4" /><select value={fontSize} onChange={(event) => setFontSize(event.target.value as FontSize)} className="bg-transparent text-xs text-slate-700 outline-none" aria-label="界面文字大小"><option value="small">小字</option><option value="standard">标准</option><option value="large">大字</option></select></label>
-          {(activePage === 'overview' || activePage === 'queue' || activePage === 'categories') && <>
-            <Badge>
-              {data.monitor.running
-                ? `全局自动监控：运行中${data.monitor.nextRunAt ? ` · 下次 ${new Date(data.monitor.nextRunAt).toLocaleTimeString()}` : ' · 等待计划'}`
-                : '全局自动监控：已暂停'}
-            </Badge>
-            <Button variant="secondary" onClick={refresh}>
-              <RefreshCw className="h-4 w-4" />
-              刷新
+            <Button type="button" variant={activePage === 'guide' ? 'primary' : 'secondary'} onClick={() => setActivePage('guide')}><BookOpen className="h-4 w-4" />使用说明书</Button>
+            <Button type="button" variant="secondary" onClick={() => openSettings('accounts')} className="relative">
+              <Settings className="h-4 w-4" /><span className="hidden sm:inline">设置中心</span>
+              {updateInfo?.updateAvailable && <span className="absolute -right-1 -top-1 h-2.5 w-2.5 rounded-full border-2 border-white bg-emerald-500" aria-label={`发现新版本 v${updateInfo.latestVersion}`} />}
             </Button>
-            <Button variant="secondary" className={data.monitor.running ? 'border-amber-200 bg-amber-50 text-amber-800 hover:bg-amber-100' : 'border-emerald-600 bg-emerald-600 text-white hover:bg-emerald-700'} onClick={() => toggleMonitorRunning()} disabled={monitorToggleBusy || busy}>
-              {data.monitor.running ? <PauseCircle className="h-4 w-4" /> : <PlayCircle className="h-4 w-4" />}
-              {monitorToggleBusy ? '处理中' : data.monitor.running ? '暂停全局自动监控' : '开启全局自动监控'}
-            </Button>
-          </>}
           </div>
         </header>
 
         <div className="space-y-5 p-3 sm:p-6">
           {(notice || error) && <div className={`fixed bottom-5 left-1/2 z-[70] flex w-[min(640px,calc(100vw-2rem))] -translate-x-1/2 items-center gap-2 rounded-md border bg-white p-3 text-sm shadow-xl ${error ? 'border-red-200 text-red-700' : notice.startsWith('正在') ? 'border-blue-200 text-blue-800' : 'border-emerald-200 text-emerald-800'}`} role={error ? 'alert' : 'status'} aria-live="polite">{error ? <CircleAlert className="h-4 w-4 shrink-0" /> : notice.startsWith('正在') ? <LoaderCircle className="h-4 w-4 shrink-0 animate-spin" /> : <CircleCheck className="h-4 w-4 shrink-0" />}<span className="min-w-0 flex-1">{error || notice}</span><button type="button" className="inline-flex h-7 w-7 shrink-0 items-center justify-center rounded text-slate-400 hover:bg-slate-100 hover:text-slate-700" onClick={() => { setNotice(''); setError('') }} title="关闭提示" aria-label="关闭提示"><X className="h-4 w-4" /></button></div>}
-          <div className={activePage === 'image-workbench' ? '' : 'hidden'}>{imageWorkbench}</div>
+          {professionalPromptMounted && <div className={activePage === 'image-workbench' && aiCreationView === 'professional' ? '' : 'hidden'}>{promptWorkbench}</div>}
+          <div className={activePage === 'image-workbench' && aiCreationView === 'compose' ? '' : 'hidden'}>{imageWorkbench}</div>
           {activePage !== 'image-workbench' && renderPage()}
         </div>
       </main>
@@ -616,11 +616,26 @@ function App() {
             </div>
             <div className="mt-5 flex justify-end gap-2">
               <Button type="button" variant="secondary" onClick={() => setAuthGuideAccountType(null)}>稍后设置</Button>
-              <Button type="button" onClick={() => { setAuthGuideAccountType(null); setActivePage('auth') }}><Settings className="h-4 w-4" />去账号授权</Button>
+              <Button type="button" onClick={() => { setAuthGuideAccountType(null); openSettings('accounts') }}><Settings className="h-4 w-4" />去账号授权</Button>
             </div>
           </div>
         </div>
       )}
+      <SettingsCenter
+        open={settingsOpen}
+        section={settingsSection}
+        onSectionChange={setSettingsSection}
+        onClose={() => setSettingsOpen(false)}
+        accountContent={authPanel}
+        feishuContent={<div className="space-y-5"><FeishuAuthorization feishu={data.feishu} products={data.products} onSave={saveFeishuSettings} /><FeishuSettings feishu={data.feishu} logs={data.notificationLogs} products={data.products} onSave={saveFeishuSettings} onTest={testFeishu} /></div>}
+        modelContent={modelConfigPanel}
+        currentVersion={data.runtime.version}
+        updateInfo={updateInfo}
+        updateChecking={updateChecking}
+        updateError={updateError}
+        onCheckUpdate={() => checkUpdates(false)}
+        onOpenUpdateDialog={() => { setUpdateOpen(true); if (!updateInfo && !updateChecking) checkUpdates(false).catch(() => undefined) }}
+      />
       <LocalImportDialog key={localImportTarget?.id || 'new-local-import'} open={localImportOpen} dataDir={data.runtime.dataDir} initialItemId={localImportTarget?.itemId || localImportTarget?.lastSnapshot?.itemId || ''} initialAccountType={localImportTarget?.accountType || 'normal'} onClose={() => { setLocalImportOpen(false); setLocalImportTarget(null) }} onImported={localImportCompleted} />
       {updateOpen && <UpdateDialog currentVersion={data.runtime.version} info={updateInfo} checking={updateChecking} error={updateError} onCheck={() => checkUpdates(false)} onClose={() => setUpdateOpen(false)} />}
     </div>

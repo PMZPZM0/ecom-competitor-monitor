@@ -1,14 +1,29 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { applyAppliedCoinDiscount, applyMediaCapturePreference, applyNetworkPromoData, applyVisibleDiscountItems, applyVisibleSurprisePrice, buildBrowserCaptureEvidence, buyerShowCaptureFromNetwork, buyerShowsFromRateDetail, calculateAccountPriceScenario, calculatePriceScenarios, collectDiscountItems, collectDiscountItemsFromText, collectProductProgramItems, collectVisibleSurprisePrices, extractBuyerShowItems, extractSelectedSkuId, extractShopName, filterProductVideoUrls, isUnselectablePromotionSku, resolveCaptureAccessMode, resolveCoinBenefit, resolveSkuPrices, scrapeTmallBuyerShows, scrapeTmallProduct, selectGalleryImages, selectSquareMainImage, sellerIdFromProductMedia } from "./tmallScraper.js";
+import { applyAppliedCoinDiscount, applyMediaCapturePreference, applyNetworkPromoData, applyVisibleDiscountItems, applyVisibleSurprisePrice, buildBrowserCaptureEvidence, buyerShowCaptureFromNetwork, buyerShowsFromRateDetail, calculateAccountPriceScenario, calculatePriceScenarios, collectDiscountItems, collectDiscountItemsFromText, collectProductProgramItems, collectVisibleSurprisePrices, extractBuyerShowItems, extractSelectedSkuId, extractShopName, extractStructuredSku, filterProductVideoUrls, hasCurrentSkuPriceData, hasTmallPriceLoginGate, isUnselectablePromotionSku, resolveCaptureAccessMode, resolveCoinBenefit, resolveSkuPrices, scrapeTmallBuyerShows, scrapeTmallProduct, selectGalleryImages, selectSquareMainImage, sellerIdFromProductMedia } from "./tmallScraper.js";
 
 test("browser captures require a verified account identity before prices are trusted", () => {
   const browserSession = { source: "taobao-browser", cookie: "configured" };
   assert.equal(resolveCaptureAccessMode(browserSession, { authState: { loggedIn: true }, cookieHeader: "sid=value" }), "authenticated");
+  assert.equal(resolveCaptureAccessMode(browserSession, { authState: { loggedIn: true }, cookieHeader: "" }), "authenticated");
   assert.equal(resolveCaptureAccessMode(browserSession, { accessVerified: true }), "authenticated");
   assert.equal(resolveCaptureAccessMode(browserSession, { authState: { loggedIn: false }, cookieHeader: "sid=value" }), "anonymous");
   assert.equal(resolveCaptureAccessMode({ source: "manual-cookie", cookie: "sid=value" }), "anonymous");
   assert.equal(resolveCaptureAccessMode(null), "anonymous");
+});
+
+test("browser page readiness rejects a list-only shell until the current price arrives", () => {
+  assert.equal(hasCurrentSkuPriceData('<script>skuCore={skuBase:{},sku2info:{"1":{"price":{"priceText":"689"}}}}</script>'), false);
+  assert.equal(hasCurrentSkuPriceData('<script>skuCore={sku2info:{"1":{"subPrice":{"priceText":"388"}}}}</script>'), true);
+  assert.equal(hasCurrentSkuPriceData('<script>skuBase={}; priceText="388"; subPrice={}</script>'), true);
+  assert.equal(hasCurrentSkuPriceData('<script>skuCore={sku2info:{"1":{"price":{"priceTitle":"优惠前","priceText":"609"}}}}</script>'), false);
+});
+
+test("price access gate recognizes the real Tmall login prompt only on price responses", () => {
+  const gatedBody = JSON.stringify({ data: { priceActionText: "登录查看更多优惠", priceActionType: "buy_in_mobile" } });
+  assert.equal(hasTmallPriceLoginGate([{ url: "https://h5api.m.tmall.com/h5/mtop.taobao.pcdetail.data.adjust/1.0/", body: gatedBody }]), true);
+  assert.equal(hasTmallPriceLoginGate([{ url: "https://h5api.m.tmall.com/h5/mtop.taobao.detail.getdetail/6.0/", body: gatedBody }]), false);
+  assert.equal(hasTmallPriceLoginGate([{ url: "https://h5api.m.tmall.com/h5/mtop.taobao.pcdetail.data.adjust/1.0/", body: '{"data":{"price":"139"}}' }]), false);
 });
 
 test("shared scrapers reject every non-browser source before network access", async () => {
@@ -23,7 +38,7 @@ test("shared scrapers reject every non-browser source before network access", as
 });
 
 test("browser evidence stores loaded page data once without account credentials", () => {
-  const payload = { url: "https://h5api.m.tmall.com/h5/price", body: "{\"data\":1}", skuId: "1", responseKind: "price" };
+  const payload = { url: "https://h5api.m.tmall.com/h5/price", body: "{\"data\":1}", responseKind: "price" };
   const evidence = buildBrowserCaptureEvidence({
     product: { url: "https://detail.tmall.com/item.htm?id=843315272599" },
     accountType: "vip88",
@@ -38,12 +53,13 @@ test("browser evidence stores loaded page data once without account credentials"
       cookieHeader: "sid=cookie-secret",
       networkPayloads: [payload],
     },
-    promotionCapture: { networkPayloads: [payload], selectionResults: [{ skuId: "1", responseObserved: true }] },
+    promotionCapture: { networkPayloads: [payload], selectionResults: [{ skuId: "1", selected: true, responseReceivedAfterSelection: true }] },
   });
 
   assert.equal(evidence.page.accessVerified, true);
   assert.equal(evidence.page.networkPayloads.length, 1);
-  assert.equal(evidence.page.selectionResults[0].responseObserved, true);
+  assert.equal(evidence.page.selectionResults[0].responseReceivedAfterSelection, true);
+  assert.equal(Object.hasOwn(evidence.page.selectionResults[0], "responseObserved"), false);
   assert.equal(JSON.stringify(evidence).includes("auth-secret"), false);
   assert.equal(JSON.stringify(evidence).includes("cookie-secret"), false);
 });
@@ -118,12 +134,27 @@ test("resolveSkuPrices keeps normal price before coin price", () => {
 });
 
 test("resolveSkuPrices does not invent a missing coin price", () => {
-  assert.deepEqual(resolveSkuPrices([], 199), {
-    normalPrice: 199,
+  assert.deepEqual(resolveSkuPrices([]), {
+    normalPrice: null,
     normalPriceTitle: "普通价",
     surprisePrice: null,
     coinPrice: null,
   });
+});
+
+test("extractStructuredSku retains a list-only SKU without exposing list price as normal price", () => {
+  const skuId = "6198474471999";
+  const html = `<script>window.__DATA__=${JSON.stringify({
+    skuBase: { props: [], skus: [{ skuId, propPath: "" }] },
+    skuCore: { sku2info: { [skuId]: { price: { priceText: "199", priceTitle: "优惠前" }, quantity: 3 } } },
+  })}</script>`;
+  const structured = extractStructuredSku(html);
+
+  assert.equal(structured.skuPrices.length, 1);
+  assert.equal(structured.skuPrices[0].skuId, skuId);
+  assert.equal(structured.skuPrices[0].originalPrice, 199);
+  assert.equal(structured.skuPrices[0].price, null);
+  assert.equal(structured.skuPrices[0].normalPrice, null);
 });
 
 test("resolveCoinBenefit reports real SKU coin details and explicit absence", () => {

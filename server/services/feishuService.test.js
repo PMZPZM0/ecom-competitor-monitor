@@ -54,6 +54,30 @@ test("buildPriceCard renders every SKU and highlights triggered SKUs", () => {
   assert.match(markdown, /¥88\.00/);
 });
 
+test("Feishu alert card names the exact monitor channel and state transition", () => {
+  const product = {
+    url: "https://detail.tmall.com/item.htm?id=1",
+    shopName: "测试店铺",
+    model: "MODEL-1",
+    skuMonitorRules: { sku1: { normal: 100, coin: 90 } },
+    lastSnapshot: {
+      skuPrices: [verifiedSku({ skuId: "sku1", name: "白色款", price: 90, normalPrice: 90, coinPrice: 88 }, ["normal", "coin"])],
+    },
+  };
+  const card = buildPriceCard({
+    type: "below-threshold",
+    product,
+    triggeredSkuIds: ["sku1"],
+    triggeredRules: [{ skuId: "sku1", channel: "normal", resolvedChannel: "normal", event: "crossing-below", priceCents: 9000, thresholdCents: 10000, priceLabel: "普通价" }],
+  });
+  const serialized = JSON.stringify(card);
+  assert.match(serialized, /首次跌破/);
+  assert.match(serialized, /普通价/);
+  assert.match(serialized, /¥90\.00 < ¥100\.00/);
+  assert.match(serialized, /普通价 ¥100\.00/);
+  assert.match(serialized, /淘金币价 ¥90\.00/);
+});
+
 test("price channels stay isolated to the product account type", () => {
   const product = {
     accountType: "gift",
@@ -83,6 +107,47 @@ test("effective price follows normal to surprise to coin chain", () => {
   assert.deepEqual(effectivePriceForSku(verifiedSku({ price: 529, normalPrice: 529, surprisePrice: 489 }, ["normal", "surprise"]), "normal"), { label: "惊喜立减价", value: 489 });
   assert.deepEqual(effectivePriceForSku(verifiedSku({ price: 529, normalPrice: 529 }, ["normal"]), "normal"), { label: "普通价", value: 529 });
   assert.equal(effectivePriceForSku({ price: 1, normalPrice: 1 }, "normal"), null);
+});
+
+test("campaign channels keep explicit labels in effective price and Feishu output", () => {
+  const sku = {
+    skuId: "campaign-1",
+    name: "活动款",
+    price: 150,
+    normalPrice: 150,
+    seckillPrice: 150,
+    seckillStatus: "available",
+    billionPrice: null,
+    billionStatus: "none",
+    resolutionStatus: "verified",
+    priceResolution: {
+      status: "verified",
+      channels: {
+        normal: { status: "verified", valueCents: 15000, evidenceIds: ["normal"] },
+        seckill: { status: "verified", valueCents: 15000, evidenceIds: ["seckill"] },
+        billion: { status: "unavailable", valueCents: null, evidenceIds: [] },
+      },
+    },
+  };
+  assert.deepEqual(effectivePriceForSku(sku, "normal"), { label: "淘宝秒杀价", value: 150 });
+
+  const card = buildPriceCard({
+    type: "manual-sync",
+    product: {
+      accountType: "normal",
+      url: "https://detail.tmall.com/item.htm?id=4",
+      skuMonitorRules: { "campaign-1": { seckill: 155, billion: 145 } },
+      lastSnapshot: { skuPrices: [sku] },
+    },
+    price: 150,
+    threshold: null,
+  });
+  const serialized = JSON.stringify(card);
+  assert.match(serialized, /淘宝秒杀价/);
+  assert.match(serialized, /百亿补贴价/);
+  assert.match(serialized, /¥150\.00/);
+  assert.match(serialized, /淘宝秒杀价 ¥155\.00/);
+  assert.match(serialized, /百亿补贴价 ¥145\.00/);
 });
 
 test("gift and 88VIP effective prices include every supported verified channel", () => {

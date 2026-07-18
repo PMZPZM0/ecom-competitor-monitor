@@ -149,7 +149,7 @@ function downloadBlob(blob: Blob, filename: string) {
 
 function compilePrompt(annotations: Annotation[]) {
   const instructions = annotations.map((annotation, index) => `${index + 1}. ${annotation.kind === 'rectangle' ? '框选区域' : '点击位置'}：${annotation.note.trim()}`)
-  return `请按照批注图中的编号逐项修改对应位置，未标注区域保持不变。\n${instructions.join('\n')}`
+  return `这是严格局部编辑任务。只按照批注图中的编号逐项修改对应位置，编号与修改要求一一对应。除各编号明确要求修改的内容外，未标注区域、产品身份、结构比例、颜色材质、品牌文字、视角与构图必须保持原图不变，不要整体重绘。若某编号要求新增、删除或替换文字，只修改该编号指定区域和指定文字；新增或替换的文字必须与该条原文逐字一致，其他文字保持不变。\n${instructions.join('\n')}`
 }
 
 type Props = {
@@ -224,7 +224,7 @@ export function ImageAnnotationDialog({ item, src, onClose, onSubmit }: Props) {
       const key = event.key.toLowerCase()
       const command = event.ctrlKey || event.metaKey
 
-      if (event.key === 'Escape' && !busy) {
+      if (event.key === 'Escape') {
         event.preventDefault()
         event.stopImmediatePropagation()
         onClose()
@@ -438,11 +438,11 @@ export function ImageAnnotationDialog({ item, src, onClose, onSubmit }: Props) {
   }
 
   return createPortal(
-    <div className="fixed inset-0 z-[120] flex items-center justify-center bg-slate-950/75 p-2 sm:p-5" role="presentation" onMouseDown={() => { if (!busy) onClose() }}>
+    <div className="fixed inset-0 z-[120] flex items-center justify-center bg-slate-950/75 p-2 sm:p-5" role="presentation" onMouseDown={onClose}>
       <div ref={dialogRef} tabIndex={-1} role="dialog" aria-modal="true" aria-labelledby="annotation-dialog-title" className="flex h-[calc(100dvh-1rem)] w-full max-w-7xl flex-col overflow-hidden rounded-md bg-white shadow-2xl outline-none sm:h-[calc(100dvh-2.5rem)]" onMouseDown={(event) => event.stopPropagation()}>
         <header className="flex shrink-0 items-center justify-between gap-4 border-b border-slate-200 px-4 py-3">
           <div className="min-w-0"><h2 id="annotation-dialog-title" className="text-base font-semibold text-slate-950">框选并备注</h2><p className="mt-0.5 truncate text-xs text-slate-500">标出位置并填写修改内容，原图不会被覆盖</p></div>
-          <button type="button" onClick={onClose} disabled={Boolean(busy)} className="inline-flex h-9 w-9 shrink-0 items-center justify-center rounded-md text-slate-500 hover:bg-slate-100 disabled:opacity-40" title="关闭批注（Esc）" aria-label="关闭批注编辑" aria-keyshortcuts="Escape"><X className="h-5 w-5" /></button>
+          <button type="button" onClick={onClose} className="inline-flex h-9 w-9 shrink-0 items-center justify-center rounded-md text-slate-500 hover:bg-slate-100" title="关闭批注（Esc）" aria-label="关闭批注编辑" aria-keyshortcuts="Escape"><X className="h-5 w-5" /></button>
         </header>
 
         <div className="flex min-h-0 flex-1 flex-col lg:grid lg:grid-cols-[minmax(0,1fr)_320px]">
@@ -496,7 +496,7 @@ export function ImageAnnotationDialog({ item, src, onClose, onSubmit }: Props) {
               {error && <div className="rounded-md bg-red-50 px-3 py-2 text-sm text-red-700" role="alert">{error}</div>}
               <div className="space-y-2 border-t border-slate-100 pt-4">
                 <Button type="button" variant="secondary" className="w-full" onClick={() => void exportImage()} disabled={!annotations.length || Boolean(busy)}>{busy === 'export' ? <LoaderCircle className="h-4 w-4 animate-spin" /> : <Download className="h-4 w-4" />}导出带编号批注图</Button>
-                <Button type="button" className="w-full" onClick={() => void submit()} disabled={!annotations.length || Boolean(busy)}>{busy === 'submit' ? <LoaderCircle className="h-4 w-4 animate-spin" /> : <WandSparkles className="h-4 w-4" />}按备注重新生成</Button>
+                <Button type="button" className="w-full" onClick={() => void submit()} disabled={!annotations.length || Boolean(busy)}>{busy === 'submit' ? <LoaderCircle className="h-4 w-4 animate-spin" /> : <WandSparkles className="h-4 w-4" />}{busy === 'submit' ? '正在加入队列' : '加入队列并关闭'}</Button>
               </div>
               <p className="text-xs leading-5 text-slate-400" role="status" aria-live="polite">{annotations.length ? `已标注 ${annotations.length} 处；每个编号都需要填写修改内容。` : '支持框选较大区域，也可以点一下标记细节。'}</p>
             </div>

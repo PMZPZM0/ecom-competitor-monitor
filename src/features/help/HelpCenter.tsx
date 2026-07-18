@@ -8,23 +8,23 @@ const sections = [
   ['guide-account', '账号授权'],
   ['guide-product', '添加与抓取'],
   ['guide-price', '价格与优惠'],
-  ['guide-queue', '监控队列'],
-  ['guide-capture-queue', '抓取队列'],
+  ['guide-queue', '监控计划'],
+  ['guide-capture-queue', '抓取进度'],
   ['guide-feishu', '飞书提醒'],
   ['guide-media', '素材与买家秀'],
-  ['guide-image', 'AI 生图'],
+  ['guide-ai-creation', 'AI 创作'],
   ['guide-update', '版本更新'],
   ['guide-troubleshoot', '异常处理'],
 ] as const
 
 const steps = [
-  { title: '授权账号', caption: '扫码后检测在线', icon: KeyRound, tone: 'border-blue-500 bg-blue-50 text-blue-700', page: 'auth' },
-  { title: '添加商品', caption: '粘贴链接或商品 ID', icon: Search, tone: 'border-cyan-500 bg-cyan-50 text-cyan-700', page: 'overview' },
-  { title: '核对价格', caption: '检查公式与 SKU', icon: ClipboardCheck, tone: 'border-emerald-500 bg-emerald-50 text-emerald-700', page: 'overview' },
-  { title: '设置监控价', caption: '每个 SKU 填阈值', icon: BadgeDollarSign, tone: 'border-amber-500 bg-amber-50 text-amber-700', page: 'overview' },
-  { title: '保存计划', caption: '选择单次或循环', icon: CalendarClock, tone: 'border-violet-500 bg-violet-50 text-violet-700', page: 'overview' },
-  { title: '打开开关', caption: '本商品 + 全局', icon: Power, tone: 'border-green-600 bg-green-50 text-green-700', page: 'overview' },
-  { title: '查看队列', caption: '确认下次执行时间', icon: ListChecks, tone: 'border-slate-500 bg-slate-50 text-slate-700', page: 'queue' },
+  { title: '授权账号', caption: '在设置中心扫码', icon: KeyRound, tone: 'border-blue-500 bg-blue-50 text-blue-700', page: 'settings' },
+  { title: '添加商品', caption: '粘贴链接或商品 ID', icon: Search, tone: 'border-cyan-500 bg-cyan-50 text-cyan-700', page: 'monitoring' },
+  { title: '核对价格', caption: '检查公式与 SKU', icon: ClipboardCheck, tone: 'border-emerald-500 bg-emerald-50 text-emerald-700', page: 'monitoring' },
+  { title: '设置监控价', caption: '每个 SKU 填阈值', icon: BadgeDollarSign, tone: 'border-amber-500 bg-amber-50 text-amber-700', page: 'monitoring' },
+  { title: '保存计划', caption: '选择单次或循环', icon: CalendarClock, tone: 'border-violet-500 bg-violet-50 text-violet-700', page: 'monitoring' },
+  { title: '打开开关', caption: '本商品 + 全局', icon: Power, tone: 'border-green-600 bg-green-50 text-green-700', page: 'monitoring' },
+  { title: '查看任务', caption: '打开右侧任务中心', icon: ListChecks, tone: 'border-slate-500 bg-slate-50 text-slate-700', page: 'monitoring' },
 ] as const
 
 function Section({ id, title, summary, icon: Icon, featured = false, children }: { id: string; title: string; summary: string; icon: LucideIcon; featured?: boolean; children: React.ReactNode }) {
@@ -35,7 +35,7 @@ function Checklist({ items }: { items: string[] }) {
   return <ul className="space-y-2">{items.map((item) => <li key={item} className="flex items-start gap-2"><CircleCheck className="mt-1.5 h-4 w-4 shrink-0 text-emerald-600" /><span>{item}</span></li>)}</ul>
 }
 
-export function HelpCenter({ onNavigate }: { onNavigate: (page: 'auth' | 'overview' | 'queue' | 'image-workbench') => void }) {
+export function HelpCenter({ onNavigate }: { onNavigate: (page: 'settings' | 'monitoring' | 'image-workbench') => void }) {
   function openSection(id: string) {
     const element = document.getElementById(id)
     if (element instanceof HTMLDetailsElement) element.open = true
@@ -71,6 +71,7 @@ export function HelpCenter({ onNavigate }: { onNavigate: (page: 'auth' | 'overvi
             ))}
           </div>
           <div className="flex items-start gap-2 border-l-4 border-amber-400 bg-amber-50 px-4 py-3 text-amber-900"><CircleAlert className="mt-1.5 h-4 w-4 shrink-0" /><span>第一次使用时，先用 1 个商品完成授权、抓取、核价和定时测试，确认价格与前台一致后再批量添加。</span></div>
+          <div className="flex items-start gap-2 border-l-4 border-blue-400 bg-blue-50 px-4 py-3 text-blue-900"><BookOpen className="mt-1.5 h-4 w-4 shrink-0" /><span>主菜单按使用顺序只保留“使用说明书、商品监控、AI 创作、数据记录”。右上角“设置中心”集中管理淘宝账号、飞书、AI 模型和软件更新；“商品监控”右侧任务中心集中查看监控计划和抓取进度。</span></div>
         </Section>
 
         <Section id="guide-launch" title="选择桌面 APP 或浏览器网页" summary="两种方式共用本机服务、账号和商品数据" icon={PlayCircle}>
@@ -82,21 +83,21 @@ export function HelpCenter({ onNavigate }: { onNavigate: (page: 'auth' | 'overvi
           <div className="grid grid-cols-[1fr_auto_1fr_auto_1fr_auto_1fr] items-stretch gap-2 max-[900px]:grid-cols-1">
             {[
               ['全局自动监控', '控制整个软件是否执行后台定时任务'],
-              ['本商品已启用', '决定这个商品是否进入监控队列'],
+              ['本商品已启用', '决定这个商品是否进入监控计划'],
               ['到达计划时间', '单次定时或循环监控只生效一种'],
               ['开始抓取', '按账号池和并发限制执行'],
             ].map(([title, text], index) => <div key={title} className="contents max-[900px]:block"><div className={`rounded-md border p-3 ${index === 3 ? 'border-emerald-200 bg-emerald-50' : 'border-slate-200 bg-white'}`}><div className="font-semibold text-slate-900">{title}</div><div className="mt-1 text-xs leading-5 text-slate-500">{text}</div></div>{index < 3 && <div className="flex items-center justify-center font-semibold text-slate-300 max-[900px]:py-1">+</div>}</div>)}
           </div>
           <Checklist items={[
             '顶部“全局自动监控”是总开关。暂停后，所有商品都不会按时间自动抓取，但单品启停与计划会保留。',
-            '商品卡片“启用本商品”只影响当前商品。启用后会进入监控队列；移出队列不会删除商品和历史数据。',
+            '商品卡片“启用本商品”只影响当前商品。启用后会进入右侧任务中心的监控计划；移出计划不会删除商品和历史数据。',
             '商品卡片底部二选一：单次定时只执行所选日期时间并在完成后暂停；循环监控只按分钟周期执行。',
             '手动点击“抓取”不依赖定时计划；同一账号仍会按顺序执行，避免多个任务同时操作一个浏览器。',
           ]} />
         </Section>
 
         <Section id="guide-account" title="账号授权与账号类型" summary="一个账号会采集页面可见的全部价格通道" icon={KeyRound}>
-          <div className="flex items-start gap-3"><KeyRound className="mt-1 h-5 w-5 shrink-0 text-blue-600" /><div><p>打开“账号授权”，填写账号备注并选择类型，然后点击扫码授权。淘宝 App 扫码完成后点击“检测登录”；未明确标记“登录失效”的扫码账号才会进入抓取候选。</p></div></div>
+          <div className="flex items-start gap-3"><KeyRound className="mt-1 h-5 w-5 shrink-0 text-blue-600" /><div><p>打开右上角“设置中心”的账号授权，填写账号备注并选择类型，然后点击扫码授权。淘宝 App 扫码完成后点击“检测登录”；未明确标记“登录失效”的扫码账号才会进入抓取候选。</p><p className="mt-2">设置中心还集中管理飞书文档与机器人、AI 模型通道和软件更新，日常监控时不需要在多个菜单之间寻找配置。</p></div></div>
           <div className="overflow-x-auto"><table className="w-full border-collapse text-left text-sm"><thead><tr className="border-y border-slate-200 bg-slate-50 text-slate-600"><th className="px-3 py-2">账号类型</th><th className="px-3 py-2">可采集价格</th><th className="px-3 py-2">重要说明</th></tr></thead><tbody className="divide-y divide-slate-100"><tr><td className="px-3 py-3 font-medium">普通账号</td><td className="px-3 py-3">普通、淘宝秒杀、国补、惊喜立减、淘金币等公共通道</td><td className="px-3 py-3">一个普通账号即可采集其页面实际可见的全部公共价格。</td></tr><tr><td className="px-3 py-3 font-medium">礼金账号</td><td className="px-3 py-3">全部可见公共通道 + 礼金价</td><td className="px-3 py-3">不再要求另有普通账号；没有真实礼金资格时显示“未获取”。</td></tr><tr><td className="px-3 py-3 font-medium">88VIP 账号</td><td className="px-3 py-3">全部可见公共通道 + 页面实际返回的礼金价、88VIP 价</td><td className="px-3 py-3">能抓多少取决于该账号对当前商品的真实权益证据。</td></tr></tbody></table></div>
           <Checklist items={['选择账号类型是在指定首选监控视角；首选不可用时，会在其余可用账号中按 88VIP → 礼金 → 普通的能力顺序回退。', '多个账号的价格结果完全隔离，不会互相覆盖；商品卡片可切换账号视角查看，其中标记“监控”的主账号视角才用于监控阈值和飞书。', '页面没有返回可信价格证据时仍会失败或显示“未获取”，不会用标价或其他账号结果补造。', '“待复检”表示检测页临时异常但登录资料仍保留，可稍后重试；只有明确跳转登录页才标记“登录失效”，此时再点击“重新授权”。', '“一键检测全部”只检查登录状态，不会开始商品抓取。一个账号固定使用自己的浏览器资料目录。']} />
         </Section>
@@ -124,18 +125,18 @@ export function HelpCenter({ onNavigate }: { onNavigate: (page: 'auth' | 'overvi
           ]} />
         </Section>
 
-        <Section id="guide-queue" title="监控队列怎么用" summary="只看已启用商品、计划时间和执行顺序" icon={ListChecks}>
-          <div className="flex items-start gap-3"><ListChecks className="mt-1 h-5 w-5 shrink-0 text-blue-600" /><p>“监控队列”只显示已启用商品，默认按下次抓取时间排列。全局暂停时商品仍保留在队列中，但状态会统一显示“等待全局开启”。</p></div>
-          <Checklist items={['队列序号表示当前页面中的执行先后；同一账号严格按顺序抓取，不同账号才会并行。', '“抓取”只立即执行当前商品，优先使用首选账号；不可用时按账号能力回退。', '“移出”只暂停本商品自动监控，商品卡片、历史价格、监控价和计划都保留。', '在总览或分类重新点击“启用本商品”，商品会立即回到队列。']} />
+        <Section id="guide-queue" title="任务中心：监控计划" summary="只看已启用商品、计划时间和执行顺序" icon={ListChecks}>
+          <div className="flex items-start gap-3"><ListChecks className="mt-1 h-5 w-5 shrink-0 text-blue-600" /><p>在“商品监控”右侧打开任务中心并选择“监控计划”，即可查看已启用商品和下次抓取时间。全局暂停时商品仍保留在计划中，但状态会统一显示“等待全局开启”。</p></div>
+          <Checklist items={['计划序号表示当前页面中的执行先后；同一账号严格按顺序抓取，不同账号才会并行。', '“抓取”只立即执行当前商品，优先使用首选账号；不可用时按账号能力回退。', '“移出”只暂停本商品自动监控，商品卡片、历史价格、监控价和计划都保留。', '在商品列表重新点击“启用本商品”，商品会立即回到监控计划。']} />
         </Section>
 
-        <Section id="guide-capture-queue" title="抓取队列怎么用" summary="查看当前排队和进度，刷新页面不会丢任务" icon={TimerReset}>
-          <div className="flex items-start gap-3"><ListChecks className="mt-1 h-5 w-5 shrink-0 text-blue-600" /><p>“抓取队列”记录单品、批量和定时抓取的排队顺序、实时进度与结果。任务由后端执行，刷新页面或切换菜单只会重载界面，不会取消任务。</p></div>
+        <Section id="guide-capture-queue" title="任务中心：抓取进度" summary="查看当前排队和进度，刷新页面不会丢任务" icon={TimerReset}>
+          <div className="flex items-start gap-3"><ListChecks className="mt-1 h-5 w-5 shrink-0 text-blue-600" /><p>在“商品监控”右侧任务中心选择“抓取进度”，可查看单品、批量和定时抓取的排队顺序、实时进度与结果。任务由后端执行，刷新页面或切换菜单只会重载界面，不会取消任务。</p></div>
           <Checklist items={['同一时间执行一个队列任务；批量任务按账号隔离，同一账号串行、不同账号并行，调度上限为 5 个。', '完成或失败项保留 5 秒后自动移出；“数据记录”会长期保存逐商品结果和错误，并提供“重试失败商品”。', '退出整个软件会停止后端进程；未完成任务不会自动续跑，重新打开后按失败记录重试。']} />
         </Section>
 
         <Section id="guide-feishu" title="飞书文档与机器人提醒" summary="文档每次写入，机器人只在低于监控价时提醒" icon={BellRing}>
-          <div className="flex items-start gap-3"><BellRing className="mt-1 h-5 w-5 shrink-0 text-blue-600" /><p>在“账号授权”完成飞书扫码授权后，可创建价格文档；群机器人需要在飞书群中创建自定义机器人，再将 Webhook 和可选签名密钥填入软件。</p></div>
+          <div className="flex items-start gap-3"><BellRing className="mt-1 h-5 w-5 shrink-0 text-blue-600" /><p>在右上角“设置中心”完成飞书扫码授权后，可创建价格文档；群机器人需要在飞书群中创建自定义机器人，再将 Webhook 和可选签名密钥填入软件。</p></div>
           <Checklist items={[
             '飞书文档：每次成功抓取后写入店铺、型号、SKU 和主账号视角的各类价格，并标注账号类型。',
             '机器人提醒：主账号视角中，某个 SKU 的有效价格每次严格低于该 SKU 监控价时都会发送。',
@@ -148,14 +149,17 @@ export function HelpCenter({ onNavigate }: { onNavigate: (page: 'auth' | 'overvi
           <Checklist items={['新增商品时按需勾选“同时抓取买家秀”；不需要时关闭可缩短抓取时间。', '买家秀未开启或抓取失败时，仍可使用“仅重试买家秀”，不会重新计算价格或覆盖 SKU 数据。', '本次失败但历史曾成功时，预览继续显示上次有效缓存，并明确标注缓存状态。', '生成 ZIP 时等待状态变为“下载已开始”后再关闭软件。', '没有真实视频或媒体评价时不会生成占位内容。']} />
         </Section>
 
-        <Section id="guide-image" title="AI 生图怎么用" summary="参考图、高清输出、历史相册、批注与 Photoshop" icon={WandSparkles}>
-          <div className="flex items-start gap-3"><WandSparkles className="mt-1 h-5 w-5 shrink-0 text-blue-600" /><div><p>打开“AI 生图”，先点击生成设置右上角“配置”。选择内部模型通道，再填写图片模型、分析模型和对应 Key；稳定与高速通道的 Key 独立保存，切换不会串用。</p><button type="button" onClick={() => onNavigate('image-workbench')} className="mt-3 inline-flex h-9 items-center gap-2 rounded-md border border-blue-200 bg-blue-50 px-3 text-sm font-medium text-blue-700 hover:bg-blue-100"><WandSparkles className="h-4 w-4" />打开 AI 生图</button></div></div>
-          <Checklist items={['默认建议使用“稳定生图”；需要更快响应时可切换“高速通道”。两者地址已内置且隐藏；原有兼容接口仍可选“自定义配置”并填写地址。', '“测试连接”只验证当前通道、Key 和图片模型是否可用，不会生成图片或产生生图费用。', '每个通道独立保存 Key，切换不会串用；没有当前通道 Key 时请联系管理员。', '输入正向提示词和可选的排除要求；参考图可选择、拖入或粘贴，最多 4 张。超过 8 MB 会先在本机自动压缩。', '1K 是标准输出；2K、4K 是模型生成后由本机增强的高清输出。选择比例、质量、格式、背景和数量后点击“生成图片”。', '图片自动保存到生成历史；点击收藏后进入收藏相册。打开图片详情可下载、删除、复用参数或基于该图继续创作。', '在图片详情点击“批注编辑”，拖拽框选区域或点击放置编号备注点，再为每个编号填写修改内容。系统会保持未标注区域不变；新结果作为独立版本保存，不覆盖原图。', '需要设计师精修时点击“Photoshop 编辑”。软件会打开独立 PNG 工作副本；在 PS 中按 Ctrl/Cmd+S 保存后，返回点击“同步 PS 修改”，结果会作为新版本进入历史，原图不会覆盖。', '本功能要求 Photoshop 安装在运行软件的同一台电脑；请直接保存 PNG 工作副本，不要另存为 PSD 后再同步。', '“停止等待”只停止当前界面等待，上游模型可能仍在生成并计费；完成后结果仍会写入历史。', 'API Key 加密保存在本机，界面和接口不会回显完整密钥；清除操作只影响当前所选通道。']} />
+        <Section id="guide-ai-creation" title="AI 创作怎么用" summary="一句需求完成提示词整理、生图排队和图片修改" icon={WandSparkles}>
+          <div className="flex items-start gap-3"><WandSparkles className="mt-1 h-5 w-5 shrink-0 text-blue-600" /><div><p>“AI 创作”已经合并提示词和生图。普通使用只需选择商品生图或自由生图、上传参考图并写一句想要的效果；需要精确控制时再进入“专业提示词”。</p><button type="button" onClick={() => onNavigate('image-workbench')} className="mt-3 inline-flex h-9 items-center gap-2 rounded-md border border-blue-200 bg-blue-50 px-3 text-sm font-medium text-blue-700 hover:bg-blue-100"><WandSparkles className="h-4 w-4" />打开 AI 创作</button></div></div>
+          <div className="grid gap-2 sm:grid-cols-3">
+            {[['1', '说明需求', '商品生图先上传参考图；自由生图可以不传。'], ['2', '确认提示词', 'AI 自动补全保真、文字防错和画面规范，整理结果仍可修改。'], ['3', '加入队列', '默认生成 1 张；多方案可选 2 张或 4 张。']].map(([step, title, text]) => <div key={step} className="border-l-2 border-blue-500 bg-slate-50 px-3 py-2.5"><div className="text-xs font-semibold text-blue-700">第 {step} 步</div><div className="mt-0.5 font-semibold text-slate-900">{title}</div><div className="mt-1 text-xs leading-5 text-slate-600">{text}</div></div>)}
+          </div>
+          <Checklist items={['首次使用打开右上角“设置中心”的模型配置。每位使用者填写自己的 Key；稳定、高速和自定义通道分别保存，切换不会串用。提示词模型负责理解需求，图片模型负责最终生图。', '商品生图默认要求产品参考图，用于锁定产品结构、颜色、Logo 和原有文字；自由生图适合不依赖具体商品的画面。参考图可选择、拖入或粘贴，超过 8 MB 会先在本机自动压缩。', '系统自动加入文字与标识规范：要求的原文、数字、单位和标点必须准确；未要求时不自行添加文案、价格、二维码、水印或品牌。', '“专业提示词”保留七类电商任务、产品事实、风格方案、三套提示词、风险检查和提示词历史。同步后会回到 AI 创作，仍需确认后才产生生图费用。', '1K 是标准输出；2K、4K 会在模型生成后由本机增强。选择比例、质量、格式、背景和数量后加入生图队列。', '任务进入队列后可马上准备下一张；生成在后台继续，切换到专业提示词、其他菜单或刷新页面都不会取消任务，失败任务可在队列重试。', '图片自动进入生成历史和相册。打开详情可下载、删除、收藏、复用参数、基于此图继续修改，或用框选批注指定局部修改。', '需要设计师精修时点击“Photoshop 编辑”。在 PS 中保存工作副本后返回同步，修改会作为新版本进入历史，原图不会覆盖。', 'API Key 加密保存在当前电脑，界面和接口不会回显完整密钥。']} />
         </Section>
 
         <Section id="guide-update" title="检查并安装新版本" summary="自动检查、选择对应系统安装包并覆盖更新" icon={CloudDownload}>
-          <div className="flex items-start gap-3"><CloudDownload className="mt-1 h-5 w-5 shrink-0 text-blue-600" /><p>侧边栏底部常驻“检查软件更新”。软件会在启动以及从后台回到前台时连接 GitHub Releases，不会在后台频繁轮询；发现新版本会自动打开更新提醒，同一版本只主动提醒一次，关闭后入口仍会持续高亮。</p></div>
-          <Checklist items={['点击更新入口可查看当前版本、最新版本、发布日期和更新说明。', '软件会根据 Windows、macOS Intel 或 macOS Apple Silicon 自动选择对应安装包。', '国内网络可优先使用“加速下载”；镜像不可用时切换“GitHub 原地址”。', '下载后先退出软件，再运行安装包覆盖安装；商品、历史记录、账号资料和飞书配置不会删除。', 'GitHub 暂时无法连接只会影响检查更新，不会影响本地监控与抓取。']} />
+          <div className="flex items-start gap-3"><CloudDownload className="mt-1 h-5 w-5 shrink-0 text-blue-600" /><p>右上角“设置中心”提供软件更新入口。软件会在启动以及从后台回到前台时连接 GitHub Releases，不会在后台频繁轮询；发现新版本会自动打开更新提醒，同一版本只主动提醒一次，关闭后入口仍会持续高亮。</p></div>
+          <Checklist items={['在设置中心点击软件更新可查看当前版本、最新版本、发布日期和更新说明。', '软件会根据 Windows、macOS Intel 或 macOS Apple Silicon 自动选择对应安装包。', '国内网络可优先使用“加速下载”；镜像不可用时切换“GitHub 原地址”。', '下载后先退出软件，再运行安装包覆盖安装；商品、历史记录、账号资料和飞书配置不会删除。', 'GitHub 暂时无法连接只会影响检查更新，不会影响本地监控与抓取。']} />
         </Section>
 
         <Section id="guide-troubleshoot" title="常见异常与处理顺序" summary="按问题展开，只看当前需要的处理步骤" icon={CircleAlert}>
@@ -163,7 +167,7 @@ export function HelpCenter({ onNavigate }: { onNavigate: (page: 'auth' | 'overvi
             {[
               ['抓不到价格或价格不一致', '确认商品链接和 SKU → 检查首选账号状态 → 切换账号视角核对 → 打开核对价格 → 重新抓取。证据不足时软件会拒绝保存。'],
               ['买家秀只有文字或数量很少', '打开买家秀预览查看状态 → 点击仅重试买家秀 → 检查账号登录 → 保留历史成功缓存。'],
-              ['计划不执行', '检查页面顶部全局自动监控 → 检查本商品已启用 → 检查开始时间和周期 → 到监控队列查看下次时间。'],
+              ['计划不执行', '检查页面顶部全局自动监控 → 检查本商品已启用 → 检查开始时间和周期 → 打开右侧任务中心的监控计划查看下次时间。'],
               ['飞书没有消息', '发送测试 → 检查 SKU 监控价 → 确认主账号视角的有效价格严格低于阈值 → 检查自动提醒开关。'],
               ['账号显示待复检或登录失效', '待复检表示检测页临时异常，登录资料仍保留，可稍后再检测；登录失效表示已明确跳转登录页，需要重新授权。'],
               ['macOS 提示已损坏或运行很慢', '“已损坏”表示旧包缺少 Apple 签名与公证，请下载最新的 mac-arm64 安装包；可信旧包的临时处理命令见完整使用说明。首次浏览器授权会较慢，避免同时启动多个抓取任务。'],

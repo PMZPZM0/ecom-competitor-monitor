@@ -1,5 +1,5 @@
 import { Check, CircleAlert, ClipboardPaste, ImagePlus, LoaderCircle, Trash2, Upload } from 'lucide-react'
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useId, useRef, useState } from 'react'
 
 const acceptedTypes = new Set(['image/png', 'image/jpeg', 'image/webp'])
 const defaultMaxFiles = 4
@@ -75,13 +75,16 @@ type Props = {
   images: ReferenceImageFile[]
   sourceImage?: { id: string; previewUrl: string }
   maxFiles?: number
+  required?: boolean
+  description?: string
   disabled?: boolean
   onChange: (images: ReferenceImageFile[]) => void
   onClearSource?: () => void
   onError: (message: string) => void
 }
 
-export function ReferenceImagePicker({ images, sourceImage, maxFiles = defaultMaxFiles, disabled, onChange, onClearSource, onError }: Props) {
+export function ReferenceImagePicker({ images, sourceImage, maxFiles = defaultMaxFiles, required = false, description, disabled, onChange, onClearSource, onError }: Props) {
+  const titleId = useId()
   const inputRef = useRef<HTMLInputElement>(null)
   const imagesRef = useRef(images)
   const [dragging, setDragging] = useState(false)
@@ -182,9 +185,9 @@ export function ReferenceImagePicker({ images, sourceImage, maxFiles = defaultMa
   }
 
   return (
-    <section aria-labelledby="reference-images-title">
+    <section aria-labelledby={titleId}>
       <div className="flex flex-wrap items-center justify-between gap-2">
-        <div id="reference-images-title" className="text-sm font-medium text-slate-800">参考图 <span className="font-normal text-slate-400">可选 · {images.length}/{maxFiles}</span></div>
+        <div id={titleId} className="text-sm font-medium text-slate-800">参考图 <span className={`font-normal ${required ? 'text-blue-600' : 'text-slate-400'}`}>{required ? '必填' : '可选'} · {images.length}/{maxFiles}</span></div>
         <div className="flex items-center gap-1">
           <button type="button" onClick={() => void pasteFromClipboard()} disabled={disabled || processing || images.length >= maxFiles} className="inline-flex h-8 items-center gap-1.5 rounded-md px-2 text-xs font-medium text-slate-600 hover:bg-slate-100 hover:text-slate-900 disabled:cursor-not-allowed disabled:opacity-40" title="读取剪贴板中的图片"><ClipboardPaste className="h-3.5 w-3.5" />粘贴图片</button>
           <button type="button" onClick={() => inputRef.current?.click()} disabled={disabled || processing || images.length >= maxFiles} className="inline-flex h-8 items-center gap-1.5 rounded-md px-2 text-xs font-medium text-blue-700 hover:bg-blue-50 disabled:cursor-not-allowed disabled:opacity-40">
@@ -192,6 +195,7 @@ export function ReferenceImagePicker({ images, sourceImage, maxFiles = defaultMa
           </button>
         </div>
       </div>
+      {description && <p className="mt-1 text-xs leading-5 text-slate-500">{description}</p>}
       <input ref={inputRef} type="file" accept="image/png,image/jpeg,image/webp" multiple className="sr-only" onChange={(event) => { void addFiles(Array.from(event.target.files || []), '选择'); event.target.value = '' }} />
       {sourceImage && <div className="mt-2 flex items-center gap-2 rounded-md border border-blue-100 bg-blue-50 p-2"><img src={sourceImage.previewUrl} alt="历史来源图" className="h-12 w-12 shrink-0 rounded object-cover" /><div className="min-w-0 flex-1"><div className="text-xs font-medium text-blue-900">基于历史图片创作</div><div className="mt-0.5 truncate text-[11px] text-blue-600">来源 {sourceImage.id}</div></div><button type="button" onClick={onClearSource} disabled={disabled} className="inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-md text-blue-700 hover:bg-blue-100 disabled:opacity-40" title="清除来源图片" aria-label="清除来源图片"><Trash2 className="h-3.5 w-3.5" /></button></div>}
       <div

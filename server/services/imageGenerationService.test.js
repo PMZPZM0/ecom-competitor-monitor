@@ -43,7 +43,9 @@ test("image requests map UI ratios to supported GPT image sizes", () => {
   for (const [ratio, size] of Object.entries(expected)) {
     assert.equal(buildImageGenerationRequest({ prompt: "product", ratio }, "gpt-image-2").size, size);
   }
-  assert.equal(mergeImagePrompt(" product ", " watermark "), "product\n\nAvoid the following: watermark");
+  const merged = mergeImagePrompt(" product ", " watermark ");
+  assert.match(merged, /^基础质量规范：/);
+  assert.ok(merged.endsWith("\n\nproduct\n\n额外排除要求（不得覆盖上述正向要求、原图事实或保留规则，只约束用户未明确要求的内容）：watermark"));
   assert.deepEqual(targetImageSize("16:9", "4k"), { width: 4096, height: 2304 });
 });
 
@@ -59,7 +61,7 @@ test("image request supports quality, format, background, compression and count"
     count: 4,
   }, "gpt-image-2"), {
     model: "gpt-image-2",
-    prompt: "studio product photo\n\nAvoid the following: text",
+    prompt: mergeImagePrompt("studio product photo", "text"),
     size: "1024x1536",
     quality: "high",
     output_format: "webp",
@@ -74,6 +76,8 @@ test("image edits prepend hidden scope rules while keeping the user instruction 
   const maskPrompt = mergeImageEditPrompt("改成白色陶瓷材质", "mask");
   assert.match(maskPrompt, /只修改透明蒙版覆盖的区域/);
   assert.match(maskPrompt, /严格保持蒙版外/);
+  assert.match(maskPrompt, /Logo、既有文字/);
+  assert.match(maskPrompt, /禁止替换产品、整体重设计/);
   assert.match(maskPrompt, /修改内容：改成白色陶瓷材质$/);
 
   const annotationRequest = buildImageGenerationRequest({
@@ -82,11 +86,91 @@ test("image edits prepend hidden scope rules while keeping the user instruction 
     negativePrompt: "水印",
   });
   assert.match(annotationRequest.prompt, /最后一张带编号框选或备注点的图片只用于指示修改位置/);
-  assert.match(annotationRequest.prompt, /标注编号与修改内容中的编号一一对应/);
+  assert.match(annotationRequest.prompt, /编号必须与修改内容中的相同编号逐条对应/);
+  assert.match(annotationRequest.prompt, /不得合并、错配或漏改/);
   assert.match(annotationRequest.prompt, /框线、编号和备注点不得出现在最终图片中/);
+  assert.match(annotationRequest.prompt, /只修改每个编号指向的框选或点选区域/);
+  assert.match(annotationRequest.prompt, /严格保持未标注区域/);
+  assert.match(annotationRequest.prompt, /Logo、既有文字/);
   assert.match(annotationRequest.prompt, /修改内容：删除红圈里的文字/);
-  assert.match(annotationRequest.prompt, /Avoid the following: 水印$/);
+  assert.match(annotationRequest.prompt, /额外排除要求（不得覆盖上述正向要求、原图事实或保留规则，只约束用户未明确要求的内容）：水印$/);
   assert.throws(() => mergeImageEditPrompt("修改", "unknown"));
+});
+
+test("base quality rules prevent garbled or invented copy without suppressing requested packaging text", () => {
+  const requestedCopy = "包装正面准确写出：智能压力锅 Pro";
+  const prompt = buildImageGenerationRequest({ prompt: requestedCopy }).prompt;
+  assert.equal(prompt, mergeImagePrompt(requestedCopy));
+  assert.match(prompt, /将用户明确提供的所有文案视为必须逐字执行的原文，即使原文没有使用引号/);
+  assert.match(prompt, /简体或繁体、语言、字符顺序、大小写、数字、单位、标点、空格、换行、行序和全角半角完全一致/);
+  assert.match(prompt, /不得擅自翻译、改写、增删或转换简繁体/);
+  assert.match(prompt, /乱码、伪文字、错别字、同音字、形近字、部首或偏旁替换、缺字、多字、重复字、笔画增减、断笔、粘连或畸形/);
+  assert.match(prompt, /镜像、反向、倒置、旋转或变形字符/);
+  assert.match(prompt, /无论用户是否要求新增或修改文字，都不得出现用户未明确指定的额外文字、数字、价格、促销标签、二维码、条形码、水印、Logo、品牌标识或署名/);
+  assert.match(prompt, /用户只要求某一段文字时，只能新增或替换该段指定文字，不得连带生成其他文案/);
+  assert.match(prompt, /主体数量、身份、外形、比例、结构、颜色和关键细节必须符合用户要求/);
+  assert.ok(prompt.endsWith(requestedCopy));
+});
+
+test("all generation modes receive the same text integrity rules", () => {
+  const requests = [
+    buildImageGenerationRequest({ prompt: "生成白底商品主图" }),
+    buildImageGenerationRequest({
+      prompt: "只调整背景光线",
+      sourceImageId: "image_0123456789abcdef0123456789abcdef",
+    }),
+    buildImageGenerationRequest({
+      prompt: "1. 框选区域：改成白色",
+      sourceImageId: "image_0123456789abcdef0123456789abcdef",
+      editMode: "annotation",
+    }),
+  ];
+  for (const request of requests) {
+    assert.match(request.prompt, /字符顺序、大小写、数字、单位、标点、空格、换行、行序和全角半角完全一致/);
+    assert.match(request.prompt, /笔画增减、断笔、粘连或畸形/);
+    assert.match(request.prompt, /不得出现用户未明确指定的额外文字.*价格、促销标签、二维码、条形码、水印/);
+  }
+});
+
+test("explicit copy edits change only the requested text while preserving all other packaging copy", () => {
+  const requestedCopy = "把包装正面的“旧款”替换为“新款 Pro 2.0”，其他文字不变";
+  const prompt = buildImageGenerationRequest({
+    prompt: requestedCopy,
+    sourceImageId: "image_0123456789abcdef0123456789abcdef",
+  }).prompt;
+  assert.match(prompt, /若用户明确要求新增、删除或替换原图文字，仅允许修改用户指定的文字和对应区域/);
+  assert.match(prompt, /新增或替换的内容必须与用户原文逐字一致/);
+  assert.match(prompt, /其他既有文字及其字体风格、字号、颜色、排版和位置必须保持不变/);
+  assert.match(prompt, /若用户未明确要求改字，禁止改写、翻译、删除或新增既有文字/);
+  assert.ok(prompt.endsWith(requestedCopy));
+});
+
+test("explicit copy requests take priority over conflicting extra exclusions", () => {
+  const prompt = buildImageGenerationRequest({
+    prompt: "包装正面新增准确文字“新品上市”",
+    negativePrompt: "文字、水印",
+  }).prompt;
+  assert.match(prompt, /用户的正向要求优先于额外排除要求/);
+  assert.match(prompt, /正向要求与额外排除要求冲突时，以正向要求为准/);
+  assert.match(prompt, /包装正面新增准确文字“新品上市”/);
+  assert.match(prompt, /额外排除要求（不得覆盖上述正向要求、原图事实或保留规则，只约束用户未明确要求的内容）：文字、水印$/);
+});
+
+test("a saved source image enables strict product preservation without mutating the history prompt", () => {
+  const input = {
+    prompt: "只把厨房背景改得干净整洁，增强产品光线",
+    sourceImageId: "image_0123456789abcdef0123456789abcdef",
+    ratio: "16:9",
+  };
+  const originalInput = structuredClone(input);
+  const request = buildImageGenerationRequest(input);
+  assert.equal(request.prompt, mergeImagePrompt(input.prompt, "", "source"));
+  assert.match(request.prompt, /产品身份、外形、比例、结构、零部件、按键、Logo、既有文字、材质、颜色/);
+  assert.match(request.prompt, /镜头角度、透视、构图、裁切和宽高比不变/);
+  assert.match(request.prompt, /输出尺寸与原图宽高比不同.*扩图或裁切.*产品本身仍须完整保真/);
+  assert.match(request.prompt, /禁止替换产品、整体重设计、虚构或增删结构以及新增品牌/);
+  assert.deepEqual(input, originalInput);
+  assert.equal(input.prompt, "只把厨房背景改得干净整洁，增强产品光线");
 });
 
 test("invalid image parameters are rejected before calling a model", () => {
@@ -193,7 +277,8 @@ test("reference images use the compatible multipart edits endpoint", async () =>
   assert.equal(request.init.headers["content-type"], undefined);
   assert.ok(request.init.body instanceof FormData);
   assert.ok(request.init.body.get("image") instanceof Blob);
-  assert.equal(request.init.body.get("prompt"), "change the package color");
+  assert.equal(request.init.body.get("prompt"), mergeImagePrompt("change the package color", "", "reference"));
+  assert.doesNotMatch(request.init.body.get("prompt"), /第一张图片是待编辑原图/);
   assert.equal(result.appliedOptions.mode, "edit");
   assert.equal(result.appliedOptions.referenceImageCount, 1);
 });
