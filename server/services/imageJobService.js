@@ -846,13 +846,15 @@ export async function stopImageJobQueue() {
   }
   const now = new Date().toISOString();
   if (workerPromise) {
-    await Promise.race([
-      workerPromise,
-      new Promise((resolve) => {
-        const timer = setTimeout(resolve, 1_000);
-        timer.unref?.();
-      }),
-    ]);
+    let shutdownTimer;
+    try {
+      await Promise.race([
+        workerPromise,
+        new Promise((resolve) => { shutdownTimer = setTimeout(resolve, 1_000); }),
+      ]);
+    } finally {
+      clearTimeout(shutdownTimer);
+    }
   }
   const ownedJobId = currentExecution?.jobId || "";
   const recovered = await commitState((state) => recoverOrInterruptActiveJobs(state, now, { excludeRecoveryJobId: ownedJobId }));
