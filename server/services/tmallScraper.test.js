@@ -24,6 +24,7 @@ test("price access gate recognizes the real Tmall login prompt only on price res
   assert.equal(hasTmallPriceLoginGate([{ url: "https://h5api.m.tmall.com/h5/mtop.taobao.pcdetail.data.adjust/1.0/", body: gatedBody }]), true);
   assert.equal(hasTmallPriceLoginGate([{ url: "https://h5api.m.tmall.com/h5/mtop.taobao.detail.getdetail/6.0/", body: gatedBody }]), false);
   assert.equal(hasTmallPriceLoginGate([{ url: "https://h5api.m.tmall.com/h5/mtop.taobao.pcdetail.data.adjust/1.0/", body: '{"data":{"price":"139"}}' }]), false);
+  assert.equal(hasTmallPriceLoginGate([], "登录查看更多优惠"), true);
 });
 
 test("shared scrapers reject every non-browser source before network access", async () => {

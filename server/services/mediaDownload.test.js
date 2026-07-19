@@ -41,6 +41,21 @@ test("remote media refuses redirects outside approved Taobao CDN hosts", async (
   }
 });
 
+test("remote media never requests a Taobao product page from Node", async () => {
+  const originalFetch = globalThis.fetch;
+  let calls = 0;
+  globalThis.fetch = async () => {
+    calls += 1;
+    throw new Error("must not fetch");
+  };
+  try {
+    assert.equal(await fetchRemoteMedia("https://item.taobao.com/item.htm?id=843315272600"), false);
+    assert.equal(calls, 0);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
 test("remote media accepts a supported response from an approved host", async () => {
   const originalFetch = globalThis.fetch;
   globalThis.fetch = async () => ({

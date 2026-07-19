@@ -1,10 +1,10 @@
 import * as cheerio from "cheerio";
 import crypto from "node:crypto";
 import { assertMatchingProductId } from "../utils/productUrl.js";
-import { getRenderedHtml, isTaobaoLoginDocument, isTaobaoLoginUrl, skuIdFromNetworkBody, skuIdFromNetworkUrl } from "./browserService.js";
+import { createTaobaoAccessRestrictedError, getRenderedHtml, isTaobaoAccessRestrictedDocument, isTaobaoLoginDocument, isTaobaoLoginUrl, skuIdFromNetworkBody, skuIdFromNetworkUrl } from "./browserService.js";
 import { applyPriceResolution, PRICE_PARSER_VERSION, resolveEmbeddedSkuPriceEvidence, resolveSkuPriceEvidence, selectAuthoritativePriceResolution } from "./priceResolver.js";
 
-export const SCRAPER_VERSION = "2.0.6";
+export const SCRAPER_VERSION = "2.0.7";
 
 function cleanImage(url) {
   if (!url) return "";
@@ -1257,17 +1257,24 @@ export function applyNetworkPromoData(skuPrices, networkPayloads = [], options =
   });
 }
 
-async function fetchMobilePromotionPayloads(itemId, skuPrices, authSession, renderPage = getRenderedHtml) {
+async function fetchMobilePromotionPayloads(itemId, skuPrices, authSession, renderPage = getRenderedHtml, capturedAt = new Date().toISOString()) {
   if (authSession?.source !== "taobao-browser") return { networkPayloads: [], skuNetworkPayloads: {}, selectionResults: [] };
   const desktopProductUrl = `https://detail.tmall.com/item.htm?id=${encodeURIComponent(itemId)}`;
   try {
-    return await renderPage(desktopProductUrl, authSession, {
-      selectSkus: skuPrices.map((sku) => ({ skuId: sku.skuId, valueIds: sku.selectionValueIds || [] })),
-      localCapture: true,
-      preserveCache: true,
+    const capture = await renderAndReloadBrowserCapture({
+      product: { itemId, url: desktopProductUrl },
+      authSession,
+      renderPage,
+      capturedAt,
+      renderOptions: {
+        selectSkus: skuPrices.map((sku) => ({ skuId: sku.skuId, valueIds: sku.selectionValueIds || [] })),
+        localCapture: true,
+        preserveCache: true,
+      },
     });
+    return capture.promotionCapture;
   } catch (error) {
-    if (error?.code === "TMALL_PRICE_AUTH_REQUIRED") throw error;
+    if (error?.code === "TMALL_PRICE_AUTH_REQUIRED" || error?.code === "TAOBAO_ACCESS_RESTRICTED") throw error;
     return { networkPayloads: [], skuNetworkPayloads: {}, selectionResults: [] };
   }
 }
@@ -1564,8 +1571,9 @@ export function hasCurrentSkuPriceData(html) {
     || /priceText[\s\S]{0,320}subPrice/i.test(source);
 }
 
-export function hasTmallPriceLoginGate(networkPayloads = []) {
-  return networkPayloads.some((payload) => {
+export function hasTmallPriceLoginGate(networkPayloads = [], pageText = "") {
+  return /登录(?:后)?(?:查看更多|查看|获取).*优惠|请登录.*优惠|\\u767b\\u5f55(?:\\u540e)?.*\\u4f18\\u60e0/i.test(String(pageText || ""))
+    || networkPayloads.some((payload) => {
     if (!/mtop\.taobao\.pcdetail\.data\.adjust/i.test(String(payload?.url || ""))) return false;
     const body = String(payload?.body || "");
     return /登录(?:后)?(?:查看更多|查看|获取).*优惠|请登录.*优惠|\\u767b\\u5f55(?:\\u540e)?.*\\u4f18\\u60e0/i.test(body);
@@ -1578,23 +1586,38 @@ function tmallPriceAuthRequiredError() {
   return error;
 }
 
-async function fetchHtml(product, authSession, renderPage = getRenderedHtml, { preserveCache = true } = {}) {
+async function fetchHtml(product, authSession, renderPage = getRenderedHtml, { preserveCache = true, capturedAt = new Date().toISOString() } = {}) {
   if (authSession?.source !== "taobao-browser") {
     throw new Error("商品抓取只允许使用已扫码授权的账号浏览器采集，已阻止后端直接请求淘宝接口。");
   }
   try {
-    const page = await renderPage(product.url, authSession, {
-      captureVideo: product.captureMediaAssets === true,
-      captureBuyerShow: product.captureBuyerShows !== false,
-      localCapture: true,
-      preserveCache,
+    const capture = await renderAndReloadBrowserCapture({
+      product,
+      authSession,
+      renderPage,
+      capturedAt,
+      renderOptions: {
+        captureVideo: product.captureMediaAssets === true,
+        captureBuyerShow: product.captureBuyerShows !== false,
+        localCapture: true,
+        preserveCache,
+      },
     });
+    const page = capture.page;
+    if (isTaobaoAccessRestrictedDocument(`${page.visibleText || ""}\n${page.html || ""}`)) {
+      throw createTaobaoAccessRestrictedError(`${page.visibleText || ""}\n${page.html || ""}`);
+    }
     const looksBlocked = isTaobaoLoginDocument(page.finalUrl, page.html);
-    if (!looksBlocked) return page;
+    if (!looksBlocked) return capture;
     if (isTaobaoLoginUrl(page.finalUrl)) throw new Error("账号登录已明确失效：商品页跳转到淘宝登录页。");
     throw new Error("账号页面需要安全验证，本次抓取已停止，登录状态保留待复检。");
   } catch (error) {
-    throw new Error(`浏览器登录态抓取失败：${error?.message || "商品页加载失败"}`);
+    if (error?.code === "TAOBAO_ACCESS_RESTRICTED") throw error;
+    const wrapped = new Error(`浏览器登录态抓取失败：${error?.message || "商品页加载失败"}`);
+    wrapped.code = error?.code;
+    wrapped.status = error?.status;
+    wrapped.retryAfterMs = error?.retryAfterMs;
+    throw wrapped;
   }
 }
 
@@ -1710,11 +1733,49 @@ async function persistAndReloadBrowserCapture(evidence) {
   };
 }
 
+async function renderAndReloadBrowserCapture({ product, authSession, renderPage = getRenderedHtml, renderOptions = {}, capturedAt }) {
+  const accountType = authSession?.accountType || "normal";
+  let persistedCapture = null;
+  const persistObservedPage = async (observedPage) => {
+    const itemId = extractItemId(observedPage.finalUrl, product.url, observedPage.html);
+    assertMatchingProductId(product.url, itemId, observedPage.finalUrl);
+    persistedCapture = await persistAndReloadBrowserCapture(buildBrowserCaptureEvidence({
+      product,
+      accountType,
+      itemId,
+      page: observedPage,
+      promotionCapture: {
+        networkPayloads: [],
+        selectionResults: observedPage.selectionResults || [],
+      },
+      capturedAt: capturedAt || new Date().toISOString(),
+    }));
+  };
+  const observedPage = await renderPage(product.url, authSession, {
+    ...renderOptions,
+    persistEvidenceBeforeClose: persistObservedPage,
+  });
+  // Test renderers and third-party render adapters may not implement the
+  // before-close hook. They have no live browser tab, so persist their returned
+  // fixture here while retaining the same disk-only parsing contract.
+  if (!persistedCapture) await persistObservedPage(observedPage);
+  return persistedCapture;
+}
+
 export async function scrapeTmallBuyerShows(product, authSession) {
   if (authSession?.source !== "taobao-browser") {
     throw new Error("买家秀只允许使用已扫码授权的账号浏览器采集，已阻止后端直接请求淘宝接口。");
   }
-  let page = await getRenderedHtml(product.url, authSession, { captureBuyerShow: true, localCapture: true, preserveCache: true });
+  const browserCapture = await renderAndReloadBrowserCapture({
+    product,
+    authSession,
+    capturedAt: new Date().toISOString(),
+    renderOptions: { captureBuyerShow: true, localCapture: true, preserveCache: true },
+  });
+  let page = browserCapture.page;
+  if (isTaobaoAccessRestrictedDocument(`${page.visibleText || ""}\n${page.html || ""}`)) {
+    throw createTaobaoAccessRestrictedError(`${page.visibleText || ""}\n${page.html || ""}`);
+  }
   if (isTaobaoLoginDocument(page.finalUrl, page.html)) {
     if (isTaobaoLoginUrl(page.finalUrl)) throw new Error("账号登录已明确失效：买家秀页面跳转到淘宝登录页。");
     throw new Error("账号页面需要安全验证，本次买家秀抓取已停止，登录状态保留待复检。");
@@ -1725,15 +1786,6 @@ export async function scrapeTmallBuyerShows(product, authSession) {
   if (resolveCaptureAccessMode(authSession, page) !== "authenticated") {
     throw new Error("账号浏览器未通过登录身份校验，本次买家秀结果已丢弃。");
   }
-  const browserCapture = await persistAndReloadBrowserCapture(buildBrowserCaptureEvidence({
-    product,
-    accountType: authSession.accountType || "normal",
-    itemId,
-    page,
-    promotionCapture: { networkPayloads: [], selectionResults: [] },
-    capturedAt: new Date().toISOString(),
-  }));
-  page = browserCapture.page;
   html = page.html;
   assertMatchingProductId(product.url, extractItemId(page.finalUrl, product.url, html), page.finalUrl);
   const existingImages = [
@@ -1766,7 +1818,8 @@ export async function scrapeTmallProduct(product, authSession, { renderPage = ge
   }
   const startedAtMs = Date.now();
   const startedAt = new Date(startedAtMs).toISOString();
-  let page = await fetchHtml(product, authSession, renderPage);
+  let initial = await fetchHtml(product, authSession, renderPage, { capturedAt: startedAt });
+  let page = initial.page;
   let accessMode = resolveCaptureAccessMode(authSession, page);
   if (accessMode !== "authenticated") {
     throw new Error("账号浏览器未通过登录身份校验，本次公开页面结果已丢弃；请在账号授权中检测登录后重试。");
@@ -1782,29 +1835,21 @@ export async function scrapeTmallProduct(product, authSession, { renderPage = ge
   }
 
   const accountType = authSession?.accountType || "normal";
-  // Hard boundary: browser output is persisted and read back before any
-  // SKU/price parsing. The first read supplies only selection metadata for
-  // the follow-up browser capture; prices are parsed from the final read.
-  let initial = await persistAndReloadBrowserCapture(buildBrowserCaptureEvidence({
-    product,
-    accountType,
-    itemId,
-    page,
-    promotionCapture: { networkPayloads: [], selectionResults: [] },
-    capturedAt: startedAt,
-  }));
-  if (!hasCurrentSkuPriceData(initial.page.html)) {
-    const refreshedPage = await fetchHtml(product, authSession, renderPage, { preserveCache: false });
+  // Hard boundary: fetchHtml has already sanitized and atomically saved the
+  // browser observation before closing its tab, then reloaded it from disk.
+  // The first read supplies only selection metadata; prices are parsed from
+  // the final local read below.
+  const initialHasCurrentPrice = hasCurrentSkuPriceData(initial.page.html);
+  if (!initialHasCurrentPrice && hasTmallPriceLoginGate(
+    initial.page.networkPayloads || [],
+    `${initial.page.visibleText || ""}\n${initial.page.html || ""}`,
+  )) throw tmallPriceAuthRequiredError();
+  if (!initialHasCurrentPrice) {
+    const refreshed = await fetchHtml(product, authSession, renderPage, { preserveCache: false, capturedAt: startedAt });
+    const refreshedPage = refreshed.page;
     const refreshedItemId = extractItemId(refreshedPage.finalUrl, product.url, refreshedPage.html);
     assertMatchingProductId(product.url, refreshedItemId, refreshedPage.finalUrl);
-    initial = await persistAndReloadBrowserCapture(buildBrowserCaptureEvidence({
-      product,
-      accountType,
-      itemId: refreshedItemId,
-      page: refreshedPage,
-      promotionCapture: { networkPayloads: [], selectionResults: [] },
-      capturedAt: startedAt,
-    }));
+    initial = refreshed;
   }
   page = initial.page;
   let browserCapture = initial;
@@ -1815,7 +1860,7 @@ export async function scrapeTmallProduct(product, authSession, { renderPage = ge
   const promotionCaptureSkus = extractStructuredSku(html).skuPrices;
   const promotionCaptureStartedAt = Date.now();
   let mobilePromotionCapture = promotionCaptureSkus.length
-    ? await fetchMobilePromotionPayloads(itemId, promotionCaptureSkus, authSession, renderPage)
+    ? await fetchMobilePromotionPayloads(itemId, promotionCaptureSkus, authSession, renderPage, startedAt)
     : { networkPayloads: [], skuNetworkPayloads: {}, selectionResults: [] };
   const promotionCaptureCompletedAt = Date.now();
   const reloaded = await persistAndReloadBrowserCapture(buildBrowserCaptureEvidence({

@@ -105,7 +105,7 @@ test("single capture automatically persists sanitized local evidence and local i
       buyerShows: [],
       buyerShowCapture: { status: "skipped", source: "disabled", itemId, reportedTotal: 0, pageCount: 0, requestCount: 0, items: [], mediaCount: 0, textOnlyCount: 0, capturedAt },
       rawSignals: { htmlBytes: 100, imageCount: 2, skuImageCount: 1, priceCount: 1, observedSkuCount: 1, outputSkuCount: 1, verifiedPriceSkuCount: 1 },
-      localFirst: { sourceSaved: true, parsedFromDisk: true },
+      localFirst: { sourceSaved: true, sourceSanitized: true, parsedFromDisk: true },
     };
   };
 

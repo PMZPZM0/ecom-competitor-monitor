@@ -13,7 +13,7 @@ import { loadEnv } from "./utils/env.js";
 import { dbRuntimeInfo, newId, readDb, updateDb } from "./storage/db.js";
 import { analyzeData } from "./services/analysisService.js";
 import { buildTaobaoOAuthUrl } from "./services/authService.js";
-import { clearFailedCaptureJobs, clearFinishedCaptureJobs, clearStaleCaptureQueueJobs, deleteCaptureQueueJob, getCaptureQueueStatus, recoverCaptureQueue, rescheduleMonitor, resumeAuthRequiredCaptureJobs, resumeCaptureJob, runBuyerShowOnce, runCaptureBatchOnce, runProductOnce, scheduleProduct, sessionsForProduct, setSkuMonitorPrice, snapshotHasVerifiedNormalPrice, startScheduler, stopCaptureQueue, stopScheduler, withAccountCaptureLock } from "./services/monitorService.js";
+import { clearFailedCaptureJobs, clearFinishedCaptureJobs, clearStaleCaptureQueueJobs, deleteCaptureQueueJob, getCaptureQueueStatus, recoverCaptureQueue, rescheduleMonitor, resumeAuthRequiredCaptureJobs, resumeCaptureJob, runBuyerShowOnce, runCaptureBatchOnce, runProductOnce, scheduleProduct, sessionsForProduct, setSkuMonitorPrice, snapshotHasVerifiedNormalPrice, startScheduler, stopCaptureQueue, stopScheduler, withProtectedBrowserCapture } from "./services/monitorService.js";
 import { monitorChannelSupported } from "./services/monitorRuleService.js";
 import { createNotificationLog, effectivePriceForSku, publicFeishuConfig, sendFeishuNotification, updateFeishuConfig } from "./services/feishuService.js";
 import { appendPriceDocument, cliStatus, createPriceDocument, readAuthQr, startCliLogin, startCliSetup } from "./services/larkCliService.js";
@@ -57,9 +57,7 @@ import { cleanupEvidenceRetention } from "./services/evidenceRetentionService.js
 import { resumeNotificationOutbox, startNotificationOutboxWorker, stopNotificationOutboxWorker } from "./services/notificationOutboxService.js";
 import {
   createTmallPriceCooldownError,
-  hydrateTmallPriceCircuits,
   isTmallPriceGateError,
-  markTmallPriceGate,
   refreshTmallPriceCircuit,
   tmallPriceCircuitOpen,
   TMALL_PRICE_STATUS,
@@ -69,8 +67,18 @@ loadEnv();
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const projectRoot = path.resolve(__dirname, "..");
-const packageInfo = JSON.parse(fs.readFileSync(path.join(projectRoot, "package.json"), "utf8"));
+const packagePath = path.join(projectRoot, "package.json");
+const packageInfo = JSON.parse(fs.readFileSync(packagePath, "utf8"));
 const startedAt = new Date().toISOString();
+
+function currentVersion() {
+  if (process.env.NODE_ENV === "production") return packageInfo.version;
+  try {
+    return JSON.parse(fs.readFileSync(packagePath, "utf8")).version || packageInfo.version;
+  } catch {
+    return packageInfo.version;
+  }
+}
 
 function resolveBuildCommit() {
   if (process.env.ECOM_MONITOR_BUILD_COMMIT) return process.env.ECOM_MONITOR_BUILD_COMMIT;
@@ -83,7 +91,7 @@ function resolveBuildCommit() {
 
 function runtimeInfo() {
   return {
-    version: packageInfo.version,
+    version: currentVersion(),
     buildCommit: resolveBuildCommit(),
     scraperVersion: SCRAPER_VERSION,
     startedAt,
@@ -246,6 +254,24 @@ function publicAuthSession(session) {
   return result;
 }
 
+function activeTmallPriceProtection(sessions = []) {
+  return sessions.find((session) => session?.source === "taobao-browser" && tmallPriceCircuitOpen(session)) || null;
+}
+
+function protectedAuthCheckResult(session) {
+  const error = createTmallPriceCooldownError(session);
+  return {
+    id: session.id,
+    status: "degraded",
+    loginStatus: session.loginStatus || "valid",
+    tmallPriceStatus: TMALL_PRICE_STATUS.COOLDOWN,
+    checkedAt: session.lastCheckedAt || null,
+    message: `${error.message} 为保护账号，本次只读取本地状态，没有打开淘宝页面。`,
+    retryAfterMs: error.retryAfterMs,
+    session: publicAuthSession(session),
+  };
+}
+
 function tmallPriceStatePatch(session = {}) {
   return {
     tmallPriceStatus: session.tmallPriceStatus || TMALL_PRICE_STATUS.UNKNOWN,
@@ -276,7 +302,7 @@ app.use(express.json({ limit: "2mb" }));
 
 app.get("/api/runtime/update", async (_req, res) => {
   try {
-    res.json(await checkForUpdate(packageInfo.version));
+    res.json(await checkForUpdate(currentVersion()));
   } catch (error) {
     console.error("[update]", error.message);
     res.status(502).json({ message: `无法连接 GitHub 检查更新：${error.message}` });
@@ -324,7 +350,9 @@ function safeFilename(value, fallback = "tmall") {
 }
 
 function isAllowedMediaHost(url) {
-  return /(^|\.)alicdn\.com$|(^|\.)taobao\.com$|(^|\.)tbcdn\.cn$/i.test(url.hostname);
+  return /(^|\.)alicdn\.com$|(^|\.)tbcdn\.cn$/i.test(url.hostname)
+    || /^cloud\.video\.taobao\.com$/i.test(url.hostname)
+    || /(^|\.)cloudvideocdn\.taobao\.com$/i.test(url.hostname);
 }
 
 function cleanMediaUrl(value) {
@@ -684,23 +712,20 @@ export async function captureSanitizedDataPreview(input, { scraper = scrapeTmall
     captureBuyerShows: false,
     captureMediaAssets: false,
   };
-  hydrateTmallPriceCircuits([session]);
-  refreshTmallPriceCircuit(session);
   let captured;
   try {
-    captured = await withAccountCaptureLock(session, () => {
-      if (tmallPriceCircuitOpen(session)) throw createTmallPriceCooldownError(session);
-      return scraper(captureCandidate, session);
-    });
+    captured = await withProtectedBrowserCapture(session, () => scraper(captureCandidate, session));
   } catch (error) {
     if (isTmallPriceGateError(error)) {
-      markTmallPriceGate(session);
       error.status ||= 409;
       await persistTmallPriceState(session);
     }
     throw error;
   }
-  if (captured.localFirst?.sourceSaved !== true || captured.localFirst?.parsedFromDisk !== true || !captured.browserEvidenceFile) {
+  if (captured.localFirst?.sourceSaved !== true
+    || captured.localFirst?.sourceSanitized !== true
+    || captured.localFirst?.parsedFromDisk !== true
+    || !captured.browserEvidenceFile) {
     throw localImportError("LOCAL_FIRST_CAPTURE_INCOMPLETE", "浏览器数据没有完成脱敏落盘和重新读盘，无法生成查看数据。", 422);
   }
   if (!snapshotHasVerifiedNormalPrice(captured)) {
@@ -1136,6 +1161,8 @@ app.post("/api/products/:id/open", async (req, res) => {
     res.status(409).json({ message: `没有可用的${accountLabel}账号登录态，也没有其他可回退的扫码账号，请先在账号授权页面登录。` });
     return;
   }
+  refreshTmallPriceCircuit(authSession);
+  if (tmallPriceCircuitOpen(authSession)) throw createTmallPriceCooldownError(authSession);
   res.json(await openProductInAccountChrome(product.url, authSession));
 });
 
@@ -1742,6 +1769,8 @@ app.post("/api/auth/taobao/scan/start", async (req, res) => {
   const parsed = schema.parse(req.body || {});
   const profileKey = newId("taobao");
   const db = await readDb();
+  const protectedSession = activeTmallPriceProtection(db.authSessions);
+  if (protectedSession) throw createTmallPriceCooldownError(protectedSession);
   const browserPort = await findAvailableBrowserPort([
     ...db.authSessions.map((session) => session.browserPort),
     ...(Array.isArray(db.pendingAuthScans) ? db.pendingAuthScans.map((scan) => scan.browserPort) : []),
@@ -1768,6 +1797,7 @@ app.post("/api/auth/sessions/:id/reauthorize", async (req, res) => {
   if (session.source !== "taobao-browser" || !session.browserProfileKey || !session.browserPort) {
     return res.status(400).json({ message: "手动 Cookie 账号请在左侧重新粘贴 Cookie；只有扫码账号支持重新授权。" });
   }
+  if (tmallPriceCircuitOpen(session)) throw createTmallPriceCooldownError(session);
   await resetTmallSession({ profileKey: session.browserProfileKey, port: session.browserPort });
   const login = await openTmallLogin({ profileKey: session.browserProfileKey, port: session.browserPort });
   await rememberPendingScan({
@@ -1788,6 +1818,8 @@ async function syncPendingScan(profileKey) {
     || (Array.isArray(data.pendingAuthScans) ? data.pendingAuthScans.find((scan) => scan.profileKey === profileKey) : null);
   const existing = data.authSessions.find((session) => session.browserProfileKey === profileKey);
   if (!pending) return existing ? { status: "synced", session: existing } : { status: "expired" };
+  const protectedSession = activeTmallPriceProtection(data.authSessions);
+  if (protectedSession) throw createTmallPriceCooldownError(protectedSession);
   if (existing && !pending.sessionId) {
     await forgetPendingScan(profileKey);
     return { status: "synced", session: existing };
@@ -1874,6 +1906,7 @@ async function checkAuthSession(session) {
   if (session.source !== "taobao-browser" || !session.browserProfileKey || !session.browserPort) {
     return { id: session.id, loginStatus: "manual", message: "手动 Cookie 无法无损检测，请通过实际抓取或重新粘贴 Cookie 更新。" };
   }
+  if (tmallPriceCircuitOpen(session)) return protectedAuthCheckResult(session);
   const state = await checkTaobaoSession({ profileKey: session.browserProfileKey, port: session.browserPort });
   const checkedAt = new Date().toISOString();
   const status = state.status || (state.loggedIn && state.cookie ? "valid" : "degraded");
@@ -2097,7 +2130,7 @@ app.get("/api/download-image", async (req, res) => {
   const schema = z.object({ url: z.string().url(), name: z.string().optional() });
   const parsed = schema.parse(req.query);
   const url = new URL(parsed.url);
-  if (!/(^|\.)alicdn\.com$|(^|\.)taobao\.com$|(^|\.)tbcdn\.cn$/i.test(url.hostname)) {
+  if (!isAllowedMediaHost(url)) {
     res.status(400).json({ message: "只支持下载淘宝/天猫图片。" });
     return;
   }

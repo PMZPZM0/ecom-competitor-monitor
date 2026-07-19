@@ -6,8 +6,10 @@ import {
   canReuseBrowser,
   classifyTaobaoSessionCheck,
   cookieHeaderForUrls,
+  createTaobaoAccessRestrictedError,
   findAvailableBrowserPort,
   isBuyerShowResponseUrl,
+  isTaobaoAccessRestrictedDocument,
   isTaobaoLoginDocument,
   isTaobaoLoginUrl,
   isTmallSilentLoginResponse,
@@ -17,30 +19,14 @@ import {
   skuIdFromNetworkBody,
   skuIdFromNetworkUrl,
   taobaoCookieStateForUrls,
-  tmallSsoSyncUrlsFromSilentLogin,
 } from "./browserService.js";
 
-test("Tmall SSO bridge accepts only the trusted same-session endpoints", () => {
-  const body = `callback({"content":{"data":{"asyncUrls":[
-    "https://pass.tmall.com/add?token=secret",
-    "https://pass.tmall.hk/add?token=secret",
-    "https://pass.fliggy.com/add?token=secret",
-    "https://pass.tmall.com.evil.example/add?token=secret",
-    "http://pass.tmall.com/add?token=secret"
-  ]}}})`;
-  assert.deepEqual(tmallSsoSyncUrlsFromSilentLogin(body).map((value) => new URL(value).hostname), [
-    "pass.tmall.com",
-    "pass.tmall.hk",
-  ]);
-  assert.deepEqual(tmallSsoSyncUrlsFromSilentLogin("not-json"), []);
-});
-
-test("Tmall silent-login JSONP scripts are captured for same-browser SSO", () => {
+test("Tmall silent-login JSONP scripts are excluded from capture", () => {
   assert.equal(shouldCaptureNetworkResponse({
     url: "https://login.taobao.com/newlogin/silentHasLogin.do?callback=x",
     mimeType: "application/javascript",
     status: 200,
-  }, "Script"), true);
+  }, "Script"), false);
   assert.equal(shouldCaptureNetworkResponse({
     url: "https://example.com/unrelated.js",
     mimeType: "application/javascript",
@@ -119,6 +105,14 @@ test("isTaobaoLoginDocument rejects login and verification pages", () => {
   assert.equal(isTaobaoLoginDocument("https://detail.tmall.com/item.htm?id=1", detailLoginBridge), true);
   assert.equal(isTaobaoLoginDocument("https://detail.tmall.com/item.htm?id=1", `${detailLoginBridge}<script>window.skuCore = {}</script>`), false);
   assert.equal(isTaobaoLoginDocument("https://detail.tmall.com/item.htm?id=1", "<script>window.skuCore = {}</script><div hidden>安全验证</div>"), false);
+  const restricted = "您的账户近期访问行为存在异常，涉嫌不当获取使用平台商业信息，系统将限制该账号的部分访问功能。";
+  assert.equal(isTaobaoAccessRestrictedDocument(restricted), true);
+  assert.equal(isTaobaoLoginDocument("https://detail.tmall.com/item.htm?id=1", `<script>window.skuCore = {}</script>${restricted}`), true);
+  assert.equal(isTaobaoAccessRestrictedDocument("正常商品页面，访问与售后服务说明"), false);
+  const now = Date.parse("2026-07-19T16:00:00+08:00");
+  const restriction = createTaobaoAccessRestrictedError(`${restricted} 预计 2026-07-19 17时 后恢复正常。`, now);
+  assert.equal(restriction.code, "TAOBAO_ACCESS_RESTRICTED");
+  assert.equal(restriction.retryAfterMs, 65 * 60_000);
   assert.equal(isTaobaoLoginDocument("https://i.taobao.com/my_taobao.htm", "我的淘宝"), false);
 });
 

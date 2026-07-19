@@ -69,7 +69,7 @@ function verifiedSnapshot(itemId, price = 139) {
     buyerShows: [],
     buyerShowCapture: { status: "skipped", items: [] },
     rawSignals: { observedSkuCount: 1, outputSkuCount: 1, verifiedPriceSkuCount: 1 },
-    localFirst: { sourceSaved: true, parsedFromDisk: true },
+    localFirst: { sourceSaved: true, sourceSanitized: true, parsedFromDisk: true },
   };
 }
 

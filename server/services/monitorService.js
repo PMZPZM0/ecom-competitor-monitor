@@ -34,6 +34,7 @@ import {
 let timer = null;
 const captureQueueTails = new Map();
 let captureAdmissionTail = Promise.resolve();
+let protectedBrowserCaptureTail = Promise.resolve();
 const accountCaptureTails = new Map();
 const queueJobPatchTails = new Map();
 const scheduledCaptureJobIds = new Set();
@@ -353,6 +354,43 @@ export async function withAccountCaptureLock(session, operation) {
   }
 }
 
+async function pauseAutomaticMonitoringForAccessRestriction() {
+  stopScheduler();
+  await updateDb((current) => {
+    current.monitor = { ...current.monitor, running: false, nextRunAt: null };
+    current.products = scheduleProducts(current.products, current.monitor, { reset: true });
+    return current;
+  });
+}
+
+export async function withProtectedBrowserCapture(session, operation) {
+  const execute = async () => {
+    if (session?.source === "taobao-browser") {
+      refreshTmallPriceCircuit(session);
+      if (tmallPriceCircuitOpen(session)) throw createTmallPriceCooldownError(session);
+    }
+    try {
+      if (session) session.lastUsedAt = new Date().toISOString();
+      return await withAccountCaptureLock(session, operation);
+    } catch (error) {
+      if (session?.source === "taobao-browser" && isTmallPriceGateError(error)) {
+        const accessRestricted = error?.code === "TAOBAO_ACCESS_RESTRICTED";
+        const cooldownMs = accessRestricted ? Math.max(60_000, Number(error.retryAfterMs) || 24 * 60 * 60_000) : null;
+        markTmallPriceGate(session, accessRestricted ? {
+          accountCooldownMs: cooldownMs,
+          deviceCooldownMs: cooldownMs,
+          reason: error.code,
+        } : { reason: error?.code || "TMALL_PRICE_AUTH_REQUIRED" });
+        if (accessRestricted) await pauseAutomaticMonitoringForAccessRestriction();
+      }
+      throw error;
+    }
+  };
+  const current = protectedBrowserCaptureTail.catch(() => undefined).then(execute);
+  protectedBrowserCaptureTail = current.then(() => undefined, () => undefined);
+  return current;
+}
+
 function persistSessionHealth(current, sessions) {
   const healthById = new Map(sessions.map((session) => [session.id, session]));
   current.authSessions = current.authSessions.map((session) => {
@@ -474,7 +512,7 @@ function mergedJobResults(previous = [], current = []) {
 }
 
 function captureFailureNeedsAuthorization(message = "") {
-  return /没有可用的.*账号|没有可用的扫码账号|请先.*账号授权|请先.*登录|账号登录已明确失效|天猫优惠价格授权未同步|天猫价格能力(?:正在冷却|暂不可用)|TMALL_PRICE_COOLDOWN/.test(String(message));
+  return /没有可用的.*账号|没有可用的扫码账号|请先.*账号授权|请先.*登录|账号登录已明确失效|淘宝已限制当前账号访问|访问行为存在异常|系统将限制(?:该)?账号|天猫优惠价格授权未同步|天猫价格能力(?:正在冷却|暂不可用)|淘宝访问限制保护中|TMALL_PRICE_COOLDOWN/.test(String(message));
 }
 
 function failedCaptureItems(result) {
@@ -1273,19 +1311,14 @@ export async function captureProduct(product, authSessions = [], { scraper = scr
       for (let attempt = 0; attempt < attempts.length; attempt += 1) {
         const session = attempts[attempt];
         try {
-          const capturedSnapshot = await withAccountCaptureLock(session, async () => {
-            if (session?.source === "taobao-browser") {
-              refreshTmallPriceCircuit(session);
-              if (tmallPriceCircuitOpen(session)) throw createTmallPriceCooldownError(session);
-            }
-            if (session) session.lastUsedAt = new Date().toISOString();
-            return scraper(captureCandidate, session);
-          });
+          const capturedSnapshot = await withProtectedBrowserCapture(session, () => scraper(captureCandidate, session));
           if (!snapshotHasVerifiedNormalPrice(capturedSnapshot)) {
             throw new Error(PRICE_EVIDENCE_UNAVAILABLE_MESSAGE);
           }
           if (session?.source === "taobao-browser"
-            && (capturedSnapshot.localFirst?.sourceSaved !== true || capturedSnapshot.localFirst?.parsedFromDisk !== true)) {
+            && (capturedSnapshot.localFirst?.sourceSaved !== true
+              || capturedSnapshot.localFirst?.sourceSanitized !== true
+              || capturedSnapshot.localFirst?.parsedFromDisk !== true)) {
             throw new Error("浏览器价格证据未完成脱敏落盘和本地重新解析，本次未保存价格。请稍后重试。");
           }
           // This transition is intentionally after local evidence verification.
@@ -1305,7 +1338,6 @@ export async function captureProduct(product, authSessions = [], { scraper = scr
             session.consecutiveFailures = Number(session.consecutiveFailures || 0) + 1;
             if (shouldDegradeSessionForCaptureError(error.message)) session.healthStatus = "degraded";
             if (tmallGate) {
-              markTmallPriceGate(session);
               session.healthStatus = "degraded";
               groupCircuitOpened = true;
             } else if (!tmallCooldown) {
@@ -1643,9 +1675,8 @@ async function runMaterialUnlocked(productId, { source = "manual-materials", scr
   let capturedSnapshot = null;
   let failureMessage = "完整素材页面本次没有返回可验证的图片或视频。";
   for (const session of sessionCandidates) {
-    session.lastUsedAt = new Date().toISOString();
     try {
-      const captured = await withAccountCaptureLock(session, () => scraper(candidate, session));
+      const captured = await withProtectedBrowserCapture(session, () => scraper(candidate, session));
       if (!capturedMaterialCount(captured)) throw new Error(failureMessage);
       capturedSnapshot = captured;
       session.lastSuccessAt = new Date().toISOString();
@@ -1657,6 +1688,7 @@ async function runMaterialUnlocked(productId, { source = "manual-materials", scr
       session.lastFailureAt = new Date().toISOString();
       if (await confirmSessionExpiry(session, failureMessage)) session.loginStatus = "expired";
       else if (shouldDegradeSessionForCaptureError(failureMessage)) session.healthStatus = "degraded";
+      if (isTmallPriceGateError(error) || isTmallPriceCooldownError(error)) break;
     }
   }
 
@@ -1832,9 +1864,11 @@ async function runBuyerShowUnlocked(productId, { source = "manual-buyer-show", s
   let result = null;
   for (let attempt = 0; attempt < 2; attempt += 1) {
     const session = sessionCandidates[attempt % sessionCandidates.length];
+    let attemptError = null;
     try {
-      result = await withAccountCaptureLock(session, () => scraper(product, session));
+      result = await withProtectedBrowserCapture(session, () => scraper(product, session));
     } catch (error) {
+      attemptError = error;
       result = {
         capture: {
           status: "failed",
@@ -1856,6 +1890,7 @@ async function runBuyerShowUnlocked(productId, { source = "manual-buyer-show", s
     captures.push(result.capture);
     interactions.push(...(result.interactions || []).map((interaction) => ({ ...interaction, retryAttempt: attempt + 1 })));
     if (result.capture.status !== "failed") break;
+    if (isTmallPriceGateError(attemptError) || isTmallPriceCooldownError(attemptError)) break;
     if (attempt === 0) await delay(800);
   }
   result.capture.attempts = captures.flatMap((capture) => capture.attempts || []);
@@ -1885,6 +1920,7 @@ async function runBuyerShowUnlocked(productId, { source = "manual-buyer-show", s
   let runRecord = null;
   if (queueJob) await persistQueueJobPatch(queueJob, { stage: "saving", message: "正在保存买家秀结果。" });
   await updateDb((current) => {
+    persistSessionHealth(current, activeSessions);
     const productIndex = current.products.findIndex((item) => item.id === product.id);
     const currentProduct = productIndex >= 0 ? current.products[productIndex] : null;
     const conflict = captureCommitConflict(currentProduct, { product, snapshot: nextSnapshot });

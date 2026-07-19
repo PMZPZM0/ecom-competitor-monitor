@@ -1,5 +1,7 @@
-import { getRenderedHtml } from "../server/services/browserService.js";
+import { getRenderedHtml, skuIdFromNetworkUrl } from "../server/services/browserService.js";
+import { saveBrowserCaptureSource, readBrowserCaptureSource } from "../server/services/localImportService.js";
 import { resolveSkuPriceEvidence } from "../server/services/priceResolver.js";
+import { buildBrowserCaptureEvidence } from "../server/services/tmallScraper.js";
 import { readDb } from "../server/storage/db.js";
 
 function parsePayload(body) {
@@ -74,11 +76,35 @@ const db = await readDb();
 const session = db.authSessions.find((item) => item.accountType === accountType && (item.enabled ?? item.active ?? true));
 if (!session) throw new Error(`No enabled ${accountType} account session`);
 
-if (process.env.PRICE_DIAGNOSTIC_PRELOAD === "1") {
-  await getRenderedHtml(`https://detail.tmall.com/item.htm?id=${encodeURIComponent(itemId)}`, session, { captureVideo: true, captureBuyerShow: true });
-}
-const page = await getRenderedHtml(`https://detail.tmall.com/item.htm?id=${encodeURIComponent(itemId)}`, session, selections.length ? { selectSkus: selections } : { selectSkuNames });
-const responses = (page.networkPayloads || [])
+const product = { itemId, url: `https://detail.tmall.com/item.htm?id=${itemId}` };
+const capturedAt = new Date().toISOString();
+let saved = null;
+const page = await getRenderedHtml(product.url, session, {
+  ...(selections.length ? { selectSkus: selections } : { selectSkuNames }),
+  persistEvidenceBeforeClose: async (observedPage) => {
+    saved = await saveBrowserCaptureSource(buildBrowserCaptureEvidence({
+      product,
+      accountType,
+      itemId,
+      page: observedPage,
+      promotionCapture: { networkPayloads: [], selectionResults: observedPage.selectionResults || [] },
+      capturedAt,
+    }));
+  },
+});
+// Keep diagnostic adapters that do not implement the hook compatible while
+// preserving the same local-only parse boundary.
+if (!saved) saved = await saveBrowserCaptureSource(buildBrowserCaptureEvidence({
+  product,
+  accountType,
+  itemId,
+  page,
+  promotionCapture: { networkPayloads: [], selectionResults: page.selectionResults || [] },
+  capturedAt,
+}));
+const stored = await readBrowserCaptureSource(saved.captureId);
+const localPage = stored.page || {};
+const responses = (localPage.networkPayloads || [])
   .filter((payload) => /mtop\.taobao\.pcdetail\.data\.adjust/i.test(payload.url || ""))
   .map((payload) => {
     const parsed = parsePayload(payload.body);
@@ -93,14 +119,17 @@ const responses = (page.networkPayloads || [])
       evidence: collectEvidence(parsed),
     };
   });
-const resolutionSkuIds = selections.length ? selections.map((item) => item.skuId) : Array.from(new Set((page.networkPayloads || []).map((payload) => payload.responseSkuId).filter(Boolean)));
+const resolutionSkuIds = selections.length
+  ? selections.map((item) => item.skuId)
+  : Array.from(new Set((localPage.networkPayloads || []).map((payload) => skuIdFromNetworkUrl(payload.url)).filter(Boolean)));
 const resolutions = resolutionSkuIds.map((skuId) => {
-  const selection = page.selectionResults.find((item) => item.skuId === skuId);
-  const result = resolveSkuPriceEvidence(page.skuNetworkPayloads?.[skuId] || [], {
+  const selection = (localPage.selectionResults || []).find((item) => item.skuId === skuId);
+  const payloads = (localPage.networkPayloads || []).filter((payload) => skuIdFromNetworkUrl(payload.url) === skuId);
+  const result = resolveSkuPriceEvidence(payloads, {
     itemId,
     skuId,
     accountType,
-    selectedSkuVerified: Boolean(selection?.responseObserved),
+    selectedSkuVerified: Boolean(selection?.responseReceivedAfterSelection),
     capturedAt: "diagnostic",
   });
   return {
@@ -115,5 +144,5 @@ const resolutions = resolutionSkuIds.map((skuId) => {
   };
 });
 
-console.log(JSON.stringify({ itemId, accountType, selectionResults: page.selectionResults, responses, resolutions }, null, 2));
+console.log(JSON.stringify({ itemId, accountType, sourceFile: stored.sourceFile, localFirst: stored.localFirst, selectionResults: localPage.selectionResults, responses, resolutions }, null, 2));
 process.exit(0);

@@ -39,13 +39,14 @@ test("raw data capture writes evidence without mutating products, snapshots, run
   const before = structuredClone(await readDb());
   let scraperCalls = 0;
   const capturedAt = "2026-07-17T08:01:00.000Z";
+  let capturedSnapshot;
   const scraper = async (product, usedSession) => {
     scraperCalls += 1;
     assert.equal(product.id, `raw_${itemId}`);
     assert.equal(product.captureBuyerShows, false);
     assert.equal(product.captureMediaAssets, false);
     assert.equal(usedSession.id, session.id);
-    return {
+    capturedSnapshot = {
       parserVersion: "raw-viewer-test",
       resolutionStatus: "verified",
       capturedAt,
@@ -77,6 +78,7 @@ test("raw data capture writes evidence without mutating products, snapshots, run
       localFirst: { sourceSaved: true, sourceSanitized: true, parsedFromDisk: true, networkAccessedAfterCapture: false },
       rawSignals: { observedSkuCount: 1, outputSkuCount: 1, verifiedPriceSkuCount: 1 },
     };
+    return capturedSnapshot;
   };
 
   const result = await captureSanitizedDataPreview({ sessionId: session.id, itemId, url: `https://detail.tmall.com/item.htm?id=${itemId}`, platform: "tmall" }, { scraper });
@@ -93,4 +95,13 @@ test("raw data capture writes evidence without mutating products, snapshots, run
   assert.equal(exported.dataType, "sanitized-price-evidence");
   assert.equal(exported.skuPrices[0].normalPrice, 139);
   assert.equal(exported.skuPrices[0].image, "");
+
+  const unsanitized = structuredClone(capturedSnapshot);
+  unsanitized.localFirst.sourceSanitized = false;
+  await assert.rejects(
+    captureSanitizedDataPreview({ sessionId: session.id, itemId, url: `https://detail.tmall.com/item.htm?id=${itemId}`, platform: "tmall" }, {
+      scraper: async () => unsanitized,
+    }),
+    /没有完成脱敏落盘和重新读盘/,
+  );
 });

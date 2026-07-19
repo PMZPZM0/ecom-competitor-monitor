@@ -53,6 +53,7 @@ const {
   snapshotAllowsPriceAlerts,
   shouldRunCaptureRetry,
   withAccountCaptureLock,
+  withProtectedBrowserCapture,
 } = await import("./monitorService.js");
 const { updateFeishuConfig } = await import("./feishuService.js");
 const { resetTmallPriceCircuitForTests } = await import("./tmallPriceCircuitService.js");
@@ -329,6 +330,63 @@ test("runProductOnce routes buyer-show work to its isolated scraper without addi
   await clearFinishedCaptureJobs();
 });
 
+test("a material access restriction stops account fallback and blocks the buyer-show lane", async () => {
+  resetTmallPriceCircuitForTests();
+  const productId = "cross-lane-restriction-product";
+  const itemId = "880003";
+  const snapshot = { id: "cross-lane-restriction-snapshot", productId, ...verifiedSnapshot(itemId, 169) };
+  await updateDb((db) => {
+    db.products.push({
+      id: productId,
+      itemId,
+      url: `https://detail.tmall.com/item.htm?id=${itemId}`,
+      name: "跨队列保护商品",
+      accountType: "normal",
+      enabled: false,
+      lastSnapshot: structuredClone(snapshot),
+    });
+    db.snapshots.push(structuredClone(snapshot));
+    return db;
+  });
+  const sessions = [
+    { id: "restricted-material-a", source: "taobao-browser", accountType: "normal", browserProfileKey: "restricted-material-a", browserPort: 9241, loginStatus: "valid" },
+    { id: "restricted-material-b", source: "taobao-browser", accountType: "normal", browserProfileKey: "restricted-material-b", browserPort: 9242, loginStatus: "valid" },
+  ];
+  let materialCalls = 0;
+  const materials = await runCaptureBatchOnce({
+    source: "cross-lane-restriction-materials",
+    productIds: [productId],
+    includeDisabled: true,
+    captureKind: "materials",
+    authSessions: sessions,
+    scraper: async () => {
+      materialCalls += 1;
+      const error = new Error("淘宝已限制当前账号访问，自动抓取已立即停止。");
+      error.code = "TAOBAO_ACCESS_RESTRICTED";
+      error.retryAfterMs = 60_000;
+      throw error;
+    },
+  });
+  assert.equal(materialCalls, 1);
+  assert.equal(materials.run.status, "failed");
+
+  let buyerShowCalls = 0;
+  const buyerShow = await runProductOnce(productId, {
+    source: "cross-lane-restriction-buyer-show",
+    captureKind: "buyer-show",
+    authSessions: [{ id: "restricted-buyer-c", source: "taobao-browser", accountType: "normal", browserProfileKey: "restricted-buyer-c", browserPort: 9243, loginStatus: "valid" }],
+    scraper: async () => {
+      buyerShowCalls += 1;
+      return { capture: { status: "complete", items: [] }, items: [], interactions: [] };
+    },
+  });
+  assert.equal(buyerShowCalls, 0);
+  assert.equal(buyerShow.ok, false);
+  assert.match(buyerShow.capture.failureCode, /淘宝访问限制保护中/);
+  resetTmallPriceCircuitForTests();
+  await clearFinishedCaptureJobs();
+});
+
 function verifiedSku(sku, channels = ["normal"]) {
   const fields = { normal: "normalPrice", government: "governmentPrice", surprise: "surprisePrice", gift: "giftPrice", vip88: "vipPrice", coin: "coinPrice" };
   return {
@@ -354,7 +412,7 @@ function completePriceSnapshot(skuPrices, extra = {}) {
       outputSkuCount: skuPrices.length,
       verifiedPriceSkuCount,
     },
-    localFirst: extra.localFirst || { sourceSaved: true, parsedFromDisk: true },
+    localFirst: extra.localFirst || { sourceSaved: true, sourceSanitized: true, parsedFromDisk: true },
   };
 }
 
@@ -815,6 +873,56 @@ test("Tmall price gate stops account fallback and queued capture attempts", asyn
   resetTmallPriceCircuitForTests();
 });
 
+test("an account access restriction stops fallback and every later local capture", async () => {
+  resetTmallPriceCircuitForTests();
+  const sessions = [
+    { id: "restricted-primary", name: "普通账号 A", accountType: "normal", source: "taobao-browser", browserProfileKey: "restricted-profile-a", browserPort: 9521, loginStatus: "valid" },
+    { id: "restricted-fallback", name: "普通账号 B", accountType: "normal", source: "taobao-browser", browserProfileKey: "restricted-profile-b", browserPort: 9522, loginStatus: "valid" },
+  ];
+  let scraperCalls = 0;
+  const restrictedScraper = async () => {
+    scraperCalls += 1;
+    const error = new Error("淘宝已限制当前账号访问，自动抓取已立即停止。");
+    error.code = "TAOBAO_ACCESS_RESTRICTED";
+    error.retryAfterMs = 60_000;
+    throw error;
+  };
+
+  const first = await captureProduct({ id: "restricted-product-1", accountType: "normal" }, sessions, { scraper: restrictedScraper });
+  const second = await captureProduct({ id: "restricted-product-2", accountType: "normal" }, sessions, { scraper: restrictedScraper });
+
+  assert.equal(first.snapshot, null);
+  assert.equal(second.snapshot, null);
+  assert.equal(scraperCalls, 1);
+  assert.equal(sessions[0].tmallPriceFailureReason, "TAOBAO_ACCESS_RESTRICTED");
+  assert.match(second.product.lastError, /淘宝访问限制保护中/);
+  assert.equal(sessions[1].tmallPriceStatus, undefined);
+  resetTmallPriceCircuitForTests();
+});
+
+test("browser price evidence is rejected unless the reloaded local source was sanitized", async () => {
+  resetTmallPriceCircuitForTests();
+  const session = {
+    id: "unsanitized-account",
+    name: "普通账号",
+    accountType: "normal",
+    source: "taobao-browser",
+    browserProfileKey: "unsanitized-profile",
+    browserPort: 9523,
+    loginStatus: "valid",
+  };
+  const snapshot = verifiedSnapshot("unsanitized-product", 99);
+  snapshot.localFirst.sourceSanitized = false;
+
+  const result = await captureProduct({ id: "unsanitized-product", accountType: "normal" }, [session], {
+    scraper: async () => snapshot,
+  });
+
+  assert.equal(result.snapshot, null);
+  assert.match(result.product.lastError, /未完成脱敏落盘和本地重新解析/);
+  resetTmallPriceCircuitForTests();
+});
+
 test("local-only products never invoke the browser scraper", async () => {
   let scraperCalls = 0;
   const result = await captureProduct({
@@ -1187,4 +1295,68 @@ test("account capture lock releases the browser after a failed capture", async (
   const session = { id: "normal", browserProfileKey: "recovery", browserPort: 9225 };
   await assert.rejects(withAccountCaptureLock(session, async () => { throw new Error("capture failed"); }), /capture failed/);
   assert.equal(await withAccountCaptureLock(session, async () => "recovered"), "recovered");
+});
+
+test("protected browser capture serializes different account profiles on one device", async () => {
+  resetTmallPriceCircuitForTests();
+  const events = [];
+  let releaseFirst;
+  let firstStarted;
+  const ready = new Promise((resolve) => { firstStarted = resolve; });
+  const firstSession = { id: "protected-a", source: "taobao-browser", browserProfileKey: "protected-a", browserPort: 9231 };
+  const secondSession = { id: "protected-b", source: "taobao-browser", browserProfileKey: "protected-b", browserPort: 9232 };
+  const first = withProtectedBrowserCapture(firstSession, async () => {
+    events.push("first-start");
+    firstStarted();
+    await new Promise((resolve) => { releaseFirst = resolve; });
+    events.push("first-end");
+  });
+  await ready;
+  const second = withProtectedBrowserCapture(secondSession, async () => { events.push("second-start"); });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.deepEqual(events, ["first-start"]);
+  releaseFirst();
+  await Promise.all([first, second]);
+  assert.deepEqual(events, ["first-start", "first-end", "second-start"]);
+  resetTmallPriceCircuitForTests();
+});
+
+test("an account access restriction persistently pauses automatic monitoring", async () => {
+  resetTmallPriceCircuitForTests();
+  const productId = "restriction-pauses-monitor";
+  const before = await readDb();
+  const previousMonitor = structuredClone(before.monitor);
+  await updateDb((db) => {
+    db.monitor = { ...db.monitor, running: true, nextRunAt: new Date(Date.now() + 60_000).toISOString() };
+    db.products.push({
+      id: productId,
+      itemId: "880099",
+      enabled: true,
+      nextMonitorAt: new Date(Date.now() + 60_000).toISOString(),
+    });
+    return db;
+  });
+
+  try {
+    const session = { id: "restricted-monitor", source: "taobao-browser", browserProfileKey: "restricted-monitor", browserPort: 9233 };
+    await assert.rejects(withProtectedBrowserCapture(session, async () => {
+      const error = new Error("淘宝已限制当前账号访问，自动抓取已立即停止。");
+      error.code = "TAOBAO_ACCESS_RESTRICTED";
+      error.retryAfterMs = 60_000;
+      throw error;
+    }), /自动抓取已立即停止/);
+
+    const after = await readDb();
+    assert.equal(after.monitor.running, false);
+    assert.equal(after.monitor.nextRunAt, null);
+    assert.equal(after.products.find((product) => product.id === productId).enabled, true);
+    assert.equal(after.products.find((product) => product.id === productId).nextMonitorAt, null);
+  } finally {
+    resetTmallPriceCircuitForTests();
+    await updateDb((db) => {
+      db.monitor = previousMonitor;
+      db.products = db.products.filter((product) => product.id !== productId);
+      return db;
+    });
+  }
 });

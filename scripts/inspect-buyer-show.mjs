@@ -1,5 +1,6 @@
 import { getRenderedHtml } from "../server/services/browserService.js";
-import { extractBuyerShowItems } from "../server/services/tmallScraper.js";
+import { buildBrowserCaptureEvidence, extractBuyerShowItems } from "../server/services/tmallScraper.js";
+import { readBrowserCaptureSource, saveBrowserCaptureSource } from "../server/services/localImportService.js";
 import { readDb } from "../server/storage/db.js";
 
 function parseBody(body) {
@@ -38,8 +39,33 @@ if (!itemId) throw new Error("Usage: node scripts/inspect-buyer-show.mjs <itemId
 const db = await readDb();
 const session = db.authSessions.find((item) => item.accountType === accountType && (item.enabled ?? item.active ?? true));
 if (!session) throw new Error(`No enabled ${accountType} account session`);
-const page = await getRenderedHtml(`https://detail.tmall.com/item.htm?id=${encodeURIComponent(itemId)}`, session, { captureBuyerShow: true });
-const payloads = page.buyerShowPayloads || [];
+const product = { itemId, url: `https://detail.tmall.com/item.htm?id=${encodeURIComponent(itemId)}` };
+const capturedAt = new Date().toISOString();
+let saved = null;
+const page = await getRenderedHtml(product.url, session, {
+  captureBuyerShow: true,
+  persistEvidenceBeforeClose: async (observedPage) => {
+    saved = await saveBrowserCaptureSource(buildBrowserCaptureEvidence({
+      product,
+      accountType,
+      itemId,
+      page: observedPage,
+      promotionCapture: { networkPayloads: [], selectionResults: observedPage.selectionResults || [] },
+      capturedAt,
+    }));
+  },
+});
+if (!saved) saved = await saveBrowserCaptureSource(buildBrowserCaptureEvidence({
+  product,
+  accountType,
+  itemId,
+  page,
+  promotionCapture: { networkPayloads: [], selectionResults: page.selectionResults || [] },
+  capturedAt,
+}));
+const stored = await readBrowserCaptureSource(saved.captureId);
+const localPage = stored.page || {};
+const payloads = localPage.networkPayloads?.filter((payload) => payload.responseKind === "buyer-show") || [];
 const parsedItems = extractBuyerShowItems("", payloads);
 console.log(JSON.stringify({
   itemId,

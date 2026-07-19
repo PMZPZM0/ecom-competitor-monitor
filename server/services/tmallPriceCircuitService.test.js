@@ -44,6 +44,21 @@ test("a Tmall price gate opens account and local-device circuits", () => {
   assert.equal(error.code, "TMALL_PRICE_COOLDOWN");
   assert.equal(isTmallPriceCooldownError(error), true);
   assert.equal(isTmallPriceGateError({ code: "TMALL_PRICE_AUTH_REQUIRED" }), true);
+  assert.equal(isTmallPriceGateError({ code: "TAOBAO_ACCESS_RESTRICTED" }), true);
+});
+
+test("an access restriction keeps every local account blocked for the platform recovery window", () => {
+  const account = session();
+  markTmallPriceGate(account, {
+    now: 1_000,
+    accountCooldownMs: 60_000,
+    deviceCooldownMs: 60_000,
+    reason: "TAOBAO_ACCESS_RESTRICTED",
+  });
+  const other = { ...session(), id: "session-2", browserProfileKey: "profile-2", browserPort: 9518 };
+  assert.equal(account.tmallPriceFailureReason, "TAOBAO_ACCESS_RESTRICTED");
+  assert.equal(tmallPriceCircuitOpen(other, 60_999), true);
+  assert.match(createTmallPriceCooldownError(account, 2_000).message, /淘宝访问限制保护中/);
 });
 
 test("different account profiles share the short local-device cooldown", () => {
@@ -56,14 +71,29 @@ test("different account profiles share the short local-device cooldown", () => {
   assert.equal(tmallPriceCircuitOpen(first, 6_001), true);
 });
 
-test("a verified price response is the only success transition and clears the circuit", () => {
+test("a verified in-flight response cannot clear active local-device protection", () => {
   const account = session();
   markTmallPriceGate(account, { now: 1_000, accountCooldownMs: 10_000, deviceCooldownMs: 10_000 });
   markTmallPriceSuccess(account, 2_000);
   assert.equal(account.tmallPriceStatus, "valid");
   assert.equal(account.tmallPriceCooldownUntil, null);
-  assert.equal(tmallPriceCircuitOpen(account, 2_001), false);
+  assert.equal(tmallPriceCircuitOpen(account, 2_001), true);
+  assert.equal(tmallPriceCircuitOpen(account, 11_001), false);
   assert.equal(account.tmallPriceFailureCount, 0);
+});
+
+test("a success from another account cannot clear an access-restriction circuit", () => {
+  const restricted = session();
+  const inFlightSuccess = { ...session(), id: "session-2", browserProfileKey: "profile-2", browserPort: 9518 };
+  markTmallPriceGate(restricted, {
+    now: 1_000,
+    accountCooldownMs: 60_000,
+    deviceCooldownMs: 60_000,
+    reason: "TAOBAO_ACCESS_RESTRICTED",
+  });
+  markTmallPriceSuccess(inFlightSuccess, 2_000);
+  assert.equal(tmallPriceCircuitOpen(inFlightSuccess, 2_001), true);
+  assert.match(createTmallPriceCooldownError(inFlightSuccess, 2_001).message, /淘宝访问限制保护中/);
 });
 
 test("persisted cooldown is restored after a service restart", () => {

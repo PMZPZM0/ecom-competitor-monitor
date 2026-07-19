@@ -10,7 +10,6 @@ const profileDir = path.join(profileRoot, "legacy");
 const accountProfilesDir = profileRoot;
 const remotePort = Number(process.env.TAOBAO_BROWSER_PORT || 9223);
 const taobaoAuthUrls = ["https://i.taobao.com/my_taobao.htm", "https://www.taobao.com/", "https://detail.tmall.com/"];
-const tmallSsoSyncHosts = new Set(["pass.tmall.com", "pass.tmall.hk"]);
 const browserProcesses = new Map();
 const browserStartPromises = new Map();
 const browserModes = new Map();
@@ -51,22 +50,6 @@ export function skuIdFromNetworkBody(body) {
   } catch {
     return "";
   }
-}
-
-export function tmallSsoSyncUrlsFromSilentLogin(body) {
-  const data = parseNetworkBody(body)?.content?.data;
-  const candidates = Array.isArray(data?.asyncUrls) ? data.asyncUrls : [];
-  const urls = [];
-  for (const candidate of candidates) {
-    try {
-      const url = new URL(String(candidate));
-      if (url.protocol !== "https:" || !tmallSsoSyncHosts.has(url.hostname) || url.pathname !== "/add") continue;
-      urls.push(url.toString());
-    } catch {
-      // Ignore malformed or untrusted bridge URLs from the page response.
-    }
-  }
-  return [...new Set(urls)];
 }
 
 export function isTmallSilentLoginResponse(value) {
@@ -117,42 +100,6 @@ export async function resetTmallSession(options = {}) {
   return expiredCookies.length;
 }
 
-// Each background tab receives fresh silent-login bridge URLs. Reusing a
-// browser-wide TTL here leaves the SKU-selection tab without Tmall identity.
-async function refreshTmallSsoFromCapturedLogin(cdp, responses, productUrl) {
-  const silentResponses = [...responses.entries()].filter(([, response]) => isTmallSilentLoginResponse(response.url));
-  if (!silentResponses.length) return false;
-
-  const bodyResults = await Promise.allSettled(silentResponses.map(async ([requestId]) => {
-    const result = await cdp.send("Network.getResponseBody", { requestId }, 5000);
-    return tmallSsoSyncUrlsFromSilentLogin(result.body);
-  }));
-  const syncUrls = [...new Set(bodyResults.flatMap((result) => result.status === "fulfilled" ? result.value : []))];
-  if (!syncUrls.length) return false;
-
-  await cdp.send("Runtime.evaluate", {
-    expression: `new Promise((resolve) => {
-      const urls = ${JSON.stringify(syncUrls)};
-      let pending = urls.length;
-      const finish = () => { pending -= 1; if (pending <= 0) resolve(true); };
-      for (const url of urls) {
-        const script = document.createElement('script');
-        const timer = setTimeout(() => { script.remove(); finish(); }, 4000);
-        script.async = true;
-        script.src = url;
-        script.onload = script.onerror = () => { clearTimeout(timer); script.remove(); finish(); };
-        document.head.appendChild(script);
-      }
-    })`,
-    awaitPromise: true,
-    returnByValue: true,
-  }, 10000);
-  responses.clear();
-  await cdp.send("Page.navigate", { url: productUrl }, 10000);
-  await new Promise((resolve) => setTimeout(resolve, 7000));
-  return true;
-}
-
 export function isBuyerShowResponseUrl(value) {
   return /(?:rate|review|comment|evaluate)/i.test(String(value || ""));
 }
@@ -160,10 +107,10 @@ export function isBuyerShowResponseUrl(value) {
 export function shouldCaptureNetworkResponse(response = {}, type = "") {
   const responseUrl = String(response.url || "");
   const mimeType = String(response.mimeType || "");
+  if (isTmallSilentLoginResponse(responseUrl)) return false;
   const relevantUrl = /(?:\/h5\/mtop|mtop\.|detail|promotion|benefit|price|sku|rate|review|comment|evaluate|feed|silentHasLogin)/i.test(responseUrl);
   const dataResponse = /json/i.test(mimeType) || /XHR|Fetch/i.test(type);
-  const silentLoginBridge = /\/newlogin\/silentHasLogin\.do/i.test(responseUrl);
-  return relevantUrl && (dataResponse || silentLoginBridge) && Number(response.status || 0) < 400;
+  return relevantUrl && dataResponse && Number(response.status || 0) < 400;
 }
 
 export function canReuseBrowser(runtimeHeadless, requestedHeadless) {
@@ -380,11 +327,29 @@ export function isTaobaoLoginUrl(url = "") {
   }
 }
 
+export function isTaobaoAccessRestrictedDocument(html = "") {
+  return /访问行为存在异常|不当获取使用平台商业信息|系统将限制(?:该)?账号|再次违规将升级处置/i.test(String(html));
+}
+
+export function createTaobaoAccessRestrictedError(text = "", now = Date.now()) {
+  const source = String(text || "");
+  const match = source.match(/预计\s*(\d{4})-(\d{1,2})-(\d{1,2})\s*(\d{1,2})时(?:(\d{1,2})分)?/);
+  const until = match
+    ? Date.parse(`${match[1]}-${match[2].padStart(2, "0")}-${match[3].padStart(2, "0")}T${match[4].padStart(2, "0")}:${(match[5] || "0").padStart(2, "0")}:00+08:00`)
+    : 0;
+  const error = new Error("淘宝已限制当前账号访问，自动抓取已立即停止；请等待页面提示恢复后再检测，期间不要重复抓取或重新授权。");
+  error.code = "TAOBAO_ACCESS_RESTRICTED";
+  error.status = 423;
+  error.retryAfterMs = Number.isFinite(until) && until > now ? until - now + 5 * 60_000 : 24 * 60 * 60_000;
+  return error;
+}
+
 export function isTaobaoLoginDocument(url = "", html = "") {
   const source = String(html);
   const hasProductData = /skuCore|skuBase|skuOptionsArea/i.test(source);
   const loginBridge = /pc-detail-ssr-2025[\s\S]{0,8000}\/(?:login_jump|close_iframe_page)|aluWVJSBridge[\s\S]{0,2000}sdkLogin|["']action["']\s*:\s*["']login["']/i.test(source);
   return isTaobaoLoginUrl(url)
+    || isTaobaoAccessRestrictedDocument(source)
     || (!hasProductData && (/手机扫码登录|密码登录|短信登录|请登录后继续|安全验证|请完成验证/i.test(source) || loginBridge));
 }
 
@@ -916,9 +881,18 @@ export async function getRenderedHtml(url, authSession = {}, renderOptions = {})
     });
     await cdp.send("Runtime.enable");
     await cdp.send("Page.enable");
+    const assertNoAccessRestriction = async () => {
+      const textResult = await cdp.send("Runtime.evaluate", {
+        expression: "document.body?.innerText || ''",
+        returnByValue: true,
+      }, 10000);
+      const text = textResult.result?.value || "";
+      if (isTaobaoAccessRestrictedDocument(text)) throw createTaobaoAccessRestrictedError(text);
+      return text;
+    };
     await cdp.send("Page.navigate", { url });
     await new Promise((resolve) => setTimeout(resolve, 7000));
-    await refreshTmallSsoFromCapturedLogin(cdp, priceResponses, url);
+    await assertNoAccessRestriction();
     const selectSkuNames = Array.isArray(renderOptions.selectSkuNames)
       ? renderOptions.selectSkuNames.filter(Boolean)
       : renderOptions.selectSkuName ? [renderOptions.selectSkuName] : [];
@@ -968,6 +942,7 @@ export async function getRenderedHtml(url, authSession = {}, renderOptions = {})
         reason: selectionResult.result?.value?.missing ? `missing-value:${selectionResult.result.value.missing}` : responseReceivedAfterSelection ? "response-received" : "response-timeout",
       });
       if (responseReceivedAfterSelection) await new Promise((resolve) => setTimeout(resolve, 600));
+      await assertNoAccessRestriction();
     }
     for (const selectSkuName of selectSkuNames) {
       const selectionResult = await cdp.send("Runtime.evaluate", {
@@ -989,6 +964,7 @@ export async function getRenderedHtml(url, authSession = {}, renderOptions = {})
         returnByValue: true,
       }, 10000);
       if (selectionResult.result?.value?.clicked) await new Promise((resolve) => setTimeout(resolve, 2200));
+      await assertNoAccessRestriction();
     }
     if (renderOptions.captureVideo) {
       const videoTabResult = await cdp.send("Runtime.evaluate", {
@@ -1002,6 +978,7 @@ export async function getRenderedHtml(url, authSession = {}, renderOptions = {})
         returnByValue: true,
       }, 10000);
       if (videoTabResult.result?.value?.clicked) await new Promise((resolve) => setTimeout(resolve, 2200));
+      await assertNoAccessRestriction();
     }
     if (renderOptions.captureBuyerShow) {
       for (let attempt = 0; attempt < 2 && buyerShowResponses.size === 0; attempt += 1) {
@@ -1040,6 +1017,7 @@ export async function getRenderedHtml(url, authSession = {}, renderOptions = {})
         }, 10000);
         buyerShowInteractions.push({ attempt: attempt + 1, ...(buyerShowTabResult.result?.value || { clicked: false }) });
         if (buyerShowTabResult.result?.value?.clicked) await new Promise((resolve) => setTimeout(resolve, attempt === 0 ? 4800 : 3600));
+        await assertNoAccessRestriction();
         if (buyerShowResponses.size === 0 && attempt === 0) {
           await cdp.send("Runtime.evaluate", {
             expression: "window.scrollTo(0, Math.min(document.body.scrollHeight, 3600)); undefined",
@@ -1097,14 +1075,17 @@ export async function getRenderedHtml(url, authSession = {}, renderOptions = {})
       expression: "window.location.href",
       returnByValue: true,
     }, 10000);
+    if (isTaobaoAccessRestrictedDocument(`${visibleTextResult.result?.value || ""}\n${result.result?.value || ""}`)) {
+      throw createTaobaoAccessRestrictedError(visibleTextResult.result?.value || result.result?.value || "");
+    }
     // Keep the identity check on canonical Taobao URLs. A Tmall product page
     // may not receive the `.taobao.com` identity cookies by URL scope even
     // though this same persistent browser is still signed in.
     const authState = await getTaobaoAuthState(context);
     // Buyer-show responses are read first so large price telemetry cannot use
     // the payload budget before the delayed review requests finish.
-    // JSONP login bridges can contain one-time session tokens. They are used
-    // in memory for SSO only and must never enter the local evidence file.
+    // JSONP login bridges can contain one-time session tokens and must never
+    // enter the local evidence file.
     const responseEntries = [...buyerShowResponses, ...priceResponses]
       .filter(([, response]) => !isTmallSilentLoginResponse(response.url));
     const bodyResults = await Promise.allSettled(responseEntries.map(async ([requestId, response]) => {
@@ -1126,7 +1107,7 @@ export async function getRenderedHtml(url, authSession = {}, renderOptions = {})
     }
     const buyerShowPayloads = networkPayloads.filter((payload) => payload.responseKind === "buyer-show");
     const priceNetworkPayloads = networkPayloads.filter((payload) => payload.responseKind === "price");
-    return {
+    const capturedPage = {
       html: result.result?.value || "",
       visibleText: visibleTextResult.result?.value || "",
       networkPayloads,
@@ -1141,6 +1122,13 @@ export async function getRenderedHtml(url, authSession = {}, renderOptions = {})
       cookieHeader: authState.cookie || "",
       authState,
     };
+    // Persist sanitized evidence while the browser tab is still alive. The
+    // caller must finish the local write before this function closes CDP/tab.
+    // No parser runs here; this hook only records the browser observation.
+    if (typeof renderOptions.persistEvidenceBeforeClose === "function") {
+      await renderOptions.persistEvidenceBeforeClose(capturedPage);
+    }
+    return capturedPage;
   } finally {
     cdp?.close();
     if (tab?.id) await closeTab(tab.id, context);
