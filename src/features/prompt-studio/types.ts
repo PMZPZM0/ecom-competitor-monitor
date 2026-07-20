@@ -127,6 +127,11 @@ export type QuickPromptGenerationResult = PromptGenerationResult & {
   recommendedVariantKey: PromptVariantKey
 }
 
+export type PromptEnhancementResult = {
+  prompt: string
+  model: string
+}
+
 export type ProductRecognitionResult = {
   facts: PromptProductFacts
   confidence?: number

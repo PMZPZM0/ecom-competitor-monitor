@@ -13,6 +13,7 @@ function sku(skuId, channels) {
     skuId,
     price: 0.01,
     normalPrice: 0.01,
+    resolutionStatus: "verified",
     priceResolution: {
       status: "verified",
       channels: Object.fromEntries(Object.entries(channels).map(([channel, valueCents]) => [
@@ -24,8 +25,8 @@ function sku(skuId, channels) {
 }
 
 test("monitor channels are constrained by the product primary account type", () => {
-  assert.deepEqual(monitorChannelsForAccount("normal"), ["lowest", "normal", "billion", "seckill", "government", "surprise", "coin"]);
-  assert.equal(monitorChannelSupported("normal", "gift"), false);
+  assert.deepEqual(monitorChannelsForAccount("normal"), ["lowest", "normal", "billion", "seckill", "government", "surprise", "gift", "coin"]);
+  assert.equal(monitorChannelSupported("normal", "gift"), true);
   assert.equal(monitorChannelSupported("gift", "gift"), true);
   assert.equal(monitorChannelSupported("gift", "vip88"), false);
   assert.equal(monitorChannelSupported("vip88", "vip88"), true);
@@ -44,7 +45,7 @@ test("reads only verified integer-cent channel evidence", () => {
   assert.equal(resolveMonitorPriceCents({ ...item, priceResolution: undefined }, "normal", "normal"), null);
 });
 
-test("lowest price includes only channels supported by the current account", () => {
+test("lowest price includes every verified channel available to the current account", () => {
   const item = sku("sku-1", {
     normal: 13900,
     billion: 12900,
@@ -56,13 +57,24 @@ test("lowest price includes only channels supported by the current account", () 
     coin: 11400,
   });
 
-  assert.equal(resolveMonitorPriceCents(item, "normal", "lowest"), 11400);
+  assert.equal(resolveMonitorPriceCents(item, "normal", "lowest"), 10900);
   assert.equal(resolveMonitorPriceCents(item, "normal", "billion"), 12900);
   assert.equal(resolveMonitorPriceCents(item, "normal", "seckill"), 12500);
   assert.equal(resolveMonitorPriceCents(item, "gift", "lowest"), 10900);
   assert.equal(resolveMonitorPriceCents(item, "vip88", "lowest"), 9900);
-  assert.equal(resolveMonitorPriceCents(item, "normal", "gift"), null);
+  assert.equal(resolveMonitorPriceCents(item, "normal", "gift"), 10900);
   assert.equal(resolveMonitorPriceCents(item, "gift", "vip88"), null);
+});
+
+test("a restricted first-order gift remains 88VIP-only even if its channel is marked verified", () => {
+  const item = sku("sku-1", { normal: 13900, gift: 9900 });
+  item.giftPrice = 9900;
+  item.priceResolution.promotions = [{ code: "1", kind: "gift", label: "首单礼金" }];
+
+  assert.equal(resolveMonitorPriceCents(item, "normal", "gift"), null);
+  assert.equal(resolveMonitorPriceCents(item, "normal", "lowest"), 13900);
+  assert.equal(resolveMonitorPriceCents(item, "gift", "gift"), null);
+  assert.equal(resolveMonitorPriceCents(item, "vip88", "gift"), 9900);
 });
 
 test("compares exact cents and treats equality as recovered", () => {
@@ -135,9 +147,9 @@ test("evaluates nested SKU channel rules and returns matching persistent state",
   });
 
   assert.deepEqual(result.evaluations.map(({ skuId, channel, event, resolvedChannel }) => ({ skuId, channel, event, resolvedChannel })), [
-    { skuId: "sku-1", channel: "lowest", event: "crossing-below", resolvedChannel: "normal" },
+    { skuId: "sku-1", channel: "lowest", event: "crossing-below", resolvedChannel: "gift" },
     { skuId: "sku-1", channel: "normal", event: "none", resolvedChannel: "normal" },
-    { skuId: "sku-1", channel: "gift", event: "unavailable", resolvedChannel: null },
+    { skuId: "sku-1", channel: "gift", event: "crossing-below", resolvedChannel: "gift" },
     { skuId: "missing-sku", channel: "normal", event: "unavailable", resolvedChannel: null },
   ]);
   assert.deepEqual(Object.keys(result.nextStates["sku-1"]), ["lowest", "normal", "gift"]);

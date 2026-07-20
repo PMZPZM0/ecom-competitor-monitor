@@ -23,7 +23,8 @@ import type {
   ImageLibraryItem,
   ModelConfig,
 } from '../../types/domain'
-import type { PromptReferenceFiles, QuickPromptGenerationResult, QuickPromptRequest } from '../prompt-studio/types'
+import type { PromptEnhancementResult, PromptReferenceFiles, QuickPromptRequest } from '../prompt-studio/types'
+import { visibleNegativePrompt, visiblePrompt } from '../prompt-studio/promptLayers'
 import { ImageAnnotationDialog, type AnnotationExportMode } from './ImageAnnotationDialog'
 import { ImageDetailDialog } from './ImageDetailDialog'
 import { ImageJobQueue } from './ImageJobQueue'
@@ -46,7 +47,7 @@ const resolutions = [
 ] as const
 
 const DRAFT_KEY = 'ecommerce-monitor-image-draft-v2'
-const PROMPT_ENHANCEMENT_OUTBOX_KEY = 'ecommerce-monitor-prompt-enhancement-outbox-v1'
+const PROMPT_ENHANCEMENT_OUTBOX_KEY = 'ecommerce-monitor-prompt-enhancement-outbox-v2'
 
 type MessageTone = 'neutral' | 'success' | 'error'
 type LibraryView = 'history' | 'favorites'
@@ -94,15 +95,17 @@ const promptTemplates = [
   { label: '移动配件', prompt: '优化配件的摆放位置与角度，使画面协调自然，其余内容保持不变。' },
   { label: '白底主图', prompt: '改为纯净白色背景，保留真实自然的接触阴影，产品主体完整居中。' },
   { label: '厨房场景', prompt: '将背景改为干净整洁的现代厨房场景，光线自然，产品主体保持不变。' },
-  { label: '预留文案区', prompt: '调整留白，为后续排版预留清晰文案区域，不新增任何文字。' },
+  { label: '优化文案区', prompt: '调整留白，为已确认的文字信息安排清晰的排版区域；文字内容继续逐字保留。' },
 ] as const
 
 function loadDraft(): Draft {
   try {
     const saved = JSON.parse(window.localStorage.getItem(DRAFT_KEY) || '{}') as Partial<Draft>
+    const savedPrompt = typeof saved.prompt === 'string' ? saved.prompt : ''
+    const savedNegativePrompt = typeof saved.negativePrompt === 'string' ? saved.negativePrompt : ''
     return {
-      prompt: typeof saved.prompt === 'string' ? saved.prompt : '',
-      negativePrompt: typeof saved.negativePrompt === 'string' ? saved.negativePrompt : '',
+      prompt: visiblePrompt(savedPrompt),
+      negativePrompt: visibleNegativePrompt(savedNegativePrompt),
       ratio: ratios.some((item) => item.value === saved.ratio) ? saved.ratio as Draft['ratio'] : '1:1',
       resolution: resolutions.some((item) => item.value === saved.resolution) ? saved.resolution as Draft['resolution'] : '1k',
       quality: ['low', 'medium', 'high'].includes(saved.quality || '') ? saved.quality as Draft['quality'] : 'medium',
@@ -168,10 +171,6 @@ function mergeImages(current: ImageLibraryItem[], incoming: ImageLibraryItem[]) 
   return [...map.values()].sort((left, right) => new Date(right.createdAt).getTime() - new Date(left.createdAt).getTime())
 }
 
-function mergeNegativePrompts(generated = '', userProvided = '') {
-  return [...new Set([generated.trim(), userProvided.trim()].filter(Boolean))].join('\n') || undefined
-}
-
 function promptHelpErrorMessage(error: unknown) {
   const message = error instanceof Error ? error.message : ''
   if ((error instanceof ApiError && error.status === 524) || /\b524\b|gateway timeout|请求超时|响应超时/i.test(message)) {
@@ -184,7 +183,7 @@ type Props = {
   config: ModelConfig
   active?: boolean
   onOpenModelSettings: () => void
-  onEnhancePrompt: (request: QuickPromptRequest, files: PromptReferenceFiles) => Promise<QuickPromptGenerationResult>
+  onEnhancePrompt: (request: QuickPromptRequest, files: PromptReferenceFiles) => Promise<PromptEnhancementResult>
   onOpenProfessionalPrompt: () => void
   incomingDraft?: ImageWorkbenchDraftTransfer | null
 }
@@ -333,7 +332,18 @@ export function ImageWorkbench({ config, active = true, onOpenModelSettings, onE
   }, [loadJobs, loadLibrary])
 
   useEffect(() => {
-    const draft: Draft = { prompt, negativePrompt, ratio, resolution, quality, format, background, count, creationMode, promptReady: false }
+    const draft: Draft = {
+      prompt,
+      negativePrompt,
+      ratio,
+      resolution,
+      quality,
+      format,
+      background,
+      count,
+      creationMode,
+      promptReady: false,
+    }
     window.localStorage.setItem(DRAFT_KEY, JSON.stringify(draft))
   }, [background, count, creationMode, format, negativePrompt, prompt, quality, ratio, resolution])
 
@@ -348,8 +358,8 @@ export function ImageWorkbench({ config, active = true, onOpenModelSettings, onE
       formRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' })
       return
     }
-    setPrompt(incomingDraft.prompt)
-    setNegativePrompt(incomingNegativePrompt)
+    setPrompt(visiblePrompt(incomingDraft.prompt))
+    setNegativePrompt(visibleNegativePrompt(incomingNegativePrompt))
     setRatio(incomingDraft.ratio)
     setResolution(incomingDraft.resolution)
     setQuality(incomingDraft.quality)
@@ -502,7 +512,7 @@ export function ImageWorkbench({ config, active = true, onOpenModelSettings, onE
     const sourceSnapshot = sourceImage
     const revision = promptEditRevisionRef.current
     setHelpingPrompt(true)
-    setPromptHelpFeedback({ tone: 'neutral', message: 'AI 正在把这句话整理成可直接生图的完整提示词…' })
+    setPromptHelpFeedback({ tone: 'neutral', message: '真实文字模型正在自由创作最终提示词…' })
     try {
       const productReferenceFiles = await promptFilesForEnhancement(referenceSnapshot, sourceSnapshot)
       const enhancementRequest: QuickPromptRequest = {
@@ -523,28 +533,17 @@ export function ImageWorkbench({ config, active = true, onOpenModelSettings, onE
         { ...enhancementRequest, clientRequestId: promptOutbox.key },
         { productReferenceFiles, styleReferenceFiles: [] },
       )
-      const blockingChecks = result.riskChecks.filter((item) => item.status === 'error')
-      if (blockingChecks.length) {
-        throw new Error(`AI 检查未通过：${blockingChecks.map((item) => item.message).join('；')}。请调整需求，或进入专业提示词处理。`)
-      }
-      const variant = result.variants[result.recommendedVariantKey] || result.variants.commercial || result.variants.safe
-      if (!variant?.prompt.trim()) throw new Error('AI 没有返回可用提示词，原内容已保留。')
-      const nextNegativePrompt = mergeNegativePrompts(variant.negativePrompt, request.negativePrompt) || ''
-      const lengthError = overlongImagePrompt(variant.prompt, nextNegativePrompt)
+      if (!result.prompt.trim()) throw new Error('AI 没有返回可用提示词，原内容已保留。')
+      const lengthError = overlongImagePrompt(result.prompt, request.negativePrompt)
       if (lengthError) throw new Error(`AI 返回的${lengthError.label}超过 ${lengthError.limit} 个字符，原内容已保留。请重试或使用专业提示词。`)
       if (promptEditRevisionRef.current !== revision) {
         setPromptHelpFeedback({ tone: 'neutral', message: 'AI 帮写已完成，但你刚刚修改了内容，因此没有覆盖输入框。再次点击即可按最新内容帮写。' })
         return
       }
       clearRequestOutbox(promptStorage, PROMPT_ENHANCEMENT_OUTBOX_KEY, promptOutbox.key)
-      setPrompt(variant.prompt.trim())
-      setNegativePrompt(nextNegativePrompt)
+      setPrompt(result.prompt.trim())
       setPromptReady(true)
-      const noticeCount = result.warnings.length + result.riskChecks.filter((item) => item.status === 'warning').length
-      setPromptHelpFeedback({
-        tone: noticeCount ? 'neutral' : 'success',
-        message: noticeCount ? `AI 已帮写并填回输入框，有 ${noticeCount} 项提示，请确认后生成。` : 'AI 已帮写并填回输入框，你可以继续修改后直接生成。',
-      })
+      setPromptHelpFeedback({ tone: 'success', message: `AI 已自由帮写并填回输入框（${result.model}），你可以继续修改。` })
     } catch (error) {
       setPromptHelpFeedback({ tone: 'error', message: promptHelpErrorMessage(error) })
     } finally {
@@ -722,8 +721,8 @@ export function ImageWorkbench({ config, active = true, onOpenModelSettings, onE
   }
 
   function reuseParameters(item: ImageLibraryItem) {
-    setPrompt(item.prompt || '')
-    setNegativePrompt(item.negativePrompt || '')
+    setPrompt(visiblePrompt(item.prompt))
+    setNegativePrompt(visibleNegativePrompt(item.negativePrompt))
     setPromptReady(true)
     promptEditRevisionRef.current += 1
     setPromptHelpFeedback({ tone: 'success', message: '历史提示词已填入，可继续修改后直接生成。' })
@@ -761,7 +760,7 @@ export function ImageWorkbench({ config, active = true, onOpenModelSettings, onE
     scrollToSettings()
   }
 
-  async function submitAnnotation(blob: Blob, mode: AnnotationExportMode, editPrompt: string, item: ImageLibraryItem) {
+  async function submitAnnotation(blob: Blob, mode: AnnotationExportMode, editPrompt: string, item: ImageLibraryItem, maskBlob?: Blob) {
     if (!imageConfigured) throw new Error('图片模型未配置。请先关闭批注，完成模型配置后再编辑。')
     const extension = blob.type === 'image/webp' ? 'webp' : 'png'
     const filename = `${mode === 'mask' ? 'mask' : 'annotation'}-${item.id}.${extension}`
@@ -781,7 +780,10 @@ export function ImageWorkbench({ config, active = true, onOpenModelSettings, onE
     }
     const files = mode === 'mask'
       ? { maskImage: file }
-      : { referenceImages: [file] }
+      : {
+          referenceImages: [file],
+          ...(maskBlob ? { maskImage: maskBlob } : {}),
+        }
     const enqueued = await enqueueGeneration(request, files)
     if (!enqueued) throw new Error('批注任务未能加入队列，请根据工作台提示处理后重试。')
   }
@@ -816,7 +818,7 @@ export function ImageWorkbench({ config, active = true, onOpenModelSettings, onE
         </div>
         <div className="flex items-stretch">
           <button type="button" onClick={() => setSelectedImage(item)} className="min-w-0 flex-1 px-3 py-2.5 text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-blue-500">
-            <div className="line-clamp-1 text-xs font-medium text-slate-700">{item.prompt || '未命名图片'}</div>
+            <div className="line-clamp-1 text-xs font-medium text-slate-700">{visiblePrompt(item.prompt) || '未命名图片'}</div>
             <div className="mt-1 flex items-center justify-between gap-2 text-[11px] text-slate-400"><span>{new Date(item.createdAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</span><span className="truncate uppercase">{item.resolution}{item.upscaled ? ' 增强' : ''} · {item.format}</span></div>
             {(item.nativeSize || item.outputSize) && <div className="mt-1 truncate text-[10px] text-slate-400">{item.nativeSize && item.outputSize && item.nativeSize !== item.outputSize ? `${item.nativeSize} → ${item.outputSize}` : item.outputSize || item.nativeSize}</div>}
           </button>
@@ -888,7 +890,7 @@ export function ImageWorkbench({ config, active = true, onOpenModelSettings, onE
             <details className="group border-t border-slate-100 pt-1">
               <summary className="cursor-pointer list-none py-2 text-sm font-medium text-slate-600 hover:text-blue-700">更多设置 <span className="font-normal text-slate-400">排除要求、质量、格式与背景</span></summary>
               <div className="space-y-4 pt-2">
-                <label className="block" htmlFor="image-generation-negative-prompt"><span className="text-sm font-medium text-slate-800">额外排除要求 <span className="font-normal text-slate-400">可选</span></span><textarea id="image-generation-negative-prompt" value={negativePrompt} maxLength={IMAGE_PROMPT_LIMITS.negativePrompt} rows={3} onChange={(event) => { setNegativePrompt(event.target.value); promptEditRevisionRef.current += 1; clearInputError() }} placeholder="只写本次额外不要出现的内容" className="mt-2 w-full resize-y rounded-md border border-slate-200 bg-white px-3 py-2.5 text-sm leading-6 text-slate-900 outline-none transition placeholder:text-slate-400 focus:border-blue-500 focus:ring-2 focus:ring-blue-100" /><span className="mt-1 flex items-start gap-1.5 text-xs leading-5 text-slate-500"><ShieldCheck className="mt-0.5 h-3.5 w-3.5 shrink-0 text-emerald-600" />已内置文字防错、产品保真和无意外水印规范。</span></label>
+                <label className="block" htmlFor="image-generation-negative-prompt"><span className="text-sm font-medium text-slate-800">额外排除要求 <span className="font-normal text-slate-400">可选</span></span><textarea id="image-generation-negative-prompt" value={negativePrompt} maxLength={IMAGE_PROMPT_LIMITS.negativePrompt} rows={3} onChange={(event) => { setNegativePrompt(event.target.value); promptEditRevisionRef.current += 1; clearInputError() }} placeholder="只写本次额外不要出现的内容" className="mt-2 w-full resize-y rounded-md border border-slate-200 bg-white px-3 py-2.5 text-sm leading-6 text-slate-900 outline-none transition placeholder:text-slate-400 focus:border-blue-500 focus:ring-2 focus:ring-blue-100" /><span className="mt-1 flex items-start gap-1.5 text-xs leading-5 text-slate-500"><ShieldCheck className="mt-0.5 h-3.5 w-3.5 shrink-0 text-emerald-600" />生图时仅追加文字清晰规范，其余按你的提示词执行。</span></label>
                 <div className="grid grid-cols-3 gap-3">
                   <label className="text-sm font-medium text-slate-800">质量<select value={quality} onChange={(event) => setQuality(event.target.value as Draft['quality'])} className="mt-2 h-10 w-full rounded-md border border-slate-200 bg-white px-2 text-sm text-slate-800 outline-none focus:border-blue-500 focus:ring-2 focus:ring-blue-100"><option value="low">快速</option><option value="medium">标准</option><option value="high">高清</option></select></label>
                   <label className="text-sm font-medium text-slate-800">格式<select value={format} onChange={(event) => setFormat(event.target.value as Draft['format'])} className="mt-2 h-10 w-full rounded-md border border-slate-200 bg-white px-2 text-sm uppercase text-slate-800 outline-none focus:border-blue-500 focus:ring-2 focus:ring-blue-100"><option value="png">PNG</option><option value="jpeg">JPEG</option><option value="webp">WEBP</option></select></label>
@@ -932,7 +934,7 @@ export function ImageWorkbench({ config, active = true, onOpenModelSettings, onE
       </div>
 
       {selectedImage && <ImageDetailDialog item={selectedImage} src={fullImageSrc(selectedImage)} busy={selectedBusy} onClose={() => setSelectedImage(null)} onDownload={() => void downloadImage(selectedImage)} onDelete={() => void deleteImage(selectedImage)} onToggleFavorite={() => void toggleFavorite(selectedImage)} onEdit={() => { setEditingImage(selectedImage); setSelectedImage(null) }} photoshopStatus={photoshopStatuses[selectedImage.id]} onPhotoshopOpen={() => void openInPhotoshop(selectedImage)} onPhotoshopSync={() => void syncFromPhotoshop(selectedImage)} onViewPhotoshopVersion={(item) => setSelectedImage(item)} onReuse={() => reuseParameters(selectedImage)} onCreateFrom={() => createFromImage(selectedImage)} />}
-      {editingImage && <ImageAnnotationDialog item={editingImage} src={fullImageSrc(editingImage)} onClose={() => setEditingImage(null)} onSubmit={(blob, mode, editPrompt) => submitAnnotation(blob, mode, editPrompt, editingImage)} />}
+      {editingImage && <ImageAnnotationDialog item={editingImage} src={fullImageSrc(editingImage)} onClose={() => setEditingImage(null)} onSubmit={(blob, mode, editPrompt, maskBlob) => submitAnnotation(blob, mode, editPrompt, editingImage, maskBlob)} />}
     </>
   )
 }

@@ -206,6 +206,16 @@ test("prompt studio routes persist profiles, presets, generated variants, and hi
     globalThis.fetch = async (url, init) => {
       const body = JSON.parse(init.body);
       upstreamRequests.push({ url: String(url), body });
+      if (String(url).endsWith("/chat/completions")) {
+        const systemPrompt = body?.messages?.find((message) => message.role === "system")?.content || "";
+        const content = systemPrompt.includes("根据用户需求自由发挥")
+          ? "国庆主题形成大胆的空间层次与独特视觉叙事，文字自然融入画面焦点。"
+          : "OK";
+        return new Response(JSON.stringify({ choices: [{ message: { content } }] }), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        });
+      }
       const name = body?.text?.format?.name;
       const requestText = JSON.stringify(body?.input || []);
       if (name === "prompt_set" && requestText.includes("国庆海报")) {
@@ -252,6 +262,19 @@ test("prompt studio routes persist profiles, presets, generated variants, and hi
     assert.deepEqual(analyzed.body.facts, productFacts);
     assert.equal(analyzed.body.confidence, 0.94);
     assert.deepEqual(analyzed.body.warnings, ["产品背面不可见"]);
+
+    const enhanceForm = new FormData();
+    enhanceForm.append("request", JSON.stringify({
+      userRequest: "自由发挥写一条高级国庆海报提示词",
+      creationMode: "free",
+      saveHistory: false,
+      clientRequestId: "d58d98ca-e8bd-4187-a765-f6a96168cc68",
+    }));
+    enhanceForm.append("productImages", new Blob(["enhance-reference"], { type: "image/png" }), "reference.png");
+    const enhanced = await api(nativeFetch, `${baseUrl}/api/prompt-studio/enhance`, { method: "POST", body: enhanceForm });
+    assert.equal(enhanced.status, 200);
+    assert.equal(enhanced.body.model, upstreamRequests[1].body.model);
+    assert.match(enhanced.body.prompt, /国庆主题/);
 
     const generateForm = new FormData();
     generateForm.append("request", JSON.stringify(generationRequest));
@@ -386,31 +409,42 @@ test("prompt studio routes persist profiles, presets, generated variants, and hi
     assert.equal(promptConnection.body.target, "prompt");
     assert.equal(promptConnection.body.model, "gpt-4.1-mini");
 
-    assert.equal(upstreamRequests.length, 11);
-    assert.ok(upstreamRequests.every((request) => request.url === "https://cn.pptoken.cc/v1/responses"));
-    assert.deepEqual(upstreamRequests.map((request) => request.body.text.format.name), [
+    assert.equal(upstreamRequests.length, 15);
+    assert.equal(upstreamRequests.filter((request) => request.url === "https://cn.pptoken.cc/v1/chat/completions").length, 2);
+    assert.equal(upstreamRequests.filter((request) => request.url === "https://cn.pptoken.cc/v1/responses").length, 13);
+    assert.deepEqual(upstreamRequests.map((request) => request.body.messages
+      ? (request.body.messages.some((message) => message.role === "system") ? "freeform_prompt" : "connection_test")
+      : request.body.text.format.name), [
       "product_facts",
+      "freeform_prompt",
       "prompt_set",
       "quick_prompt_interpretation",
       "prompt_set",
+      "quick_prompt_interpretation",
       "prompt_set",
+      "quick_prompt_interpretation",
       "prompt_set",
+      "quick_prompt_interpretation",
       "prompt_set",
       "quick_prompt_interpretation",
       "prompt_set",
       "quick_prompt_interpretation",
       "connection_test",
     ]);
-    assert.deepEqual(upstreamRequests.slice(0, 4).map((request) => (
+    assert.deepEqual(upstreamRequests.slice(0, 5).map((request) => request.body.messages
+      ? request.body.messages.flatMap((message) => Array.isArray(message.content) ? message.content : []).filter((item) => item.type === "image_url").length
+      : request.body.input[1].content.filter((item) => item.type === "input_image").length), [1, 1, 2, 1, 1]);
+    assert.deepEqual(upstreamRequests.slice(5, 11).map((request) => (
       request.body.input[1].content.filter((item) => item.type === "input_image").length
-    )), [1, 2, 1, 1]);
-    assert.deepEqual(upstreamRequests.slice(4, 9).map((request) => (
+    )), [0, 0, 0, 0, 0, 0]);
+    assert.deepEqual(upstreamRequests.slice(11, 14).map((request) => (
       request.body.input[1].content.filter((item) => item.type === "input_image").length
-    )), [0, 0, 0, 1, 1]);
-    assert.match(upstreamRequests[4].body.input[1].content[0].text, /自由生成一张清爽的夏日厨房活动海报/);
-    assert.match(upstreamRequests[7].body.input[1].content[0].text, /当前为商品生图模式/);
-    assert.equal(upstreamRequests[10].body.model, "gpt-4.1-mini");
-    assert.equal(upstreamRequests[10].body.text.format.strict, true);
+    )), [1, 1, 1]);
+    assert.match(upstreamRequests[5].body.input[1].content[0].text, /自由生成一张清爽的夏日厨房活动海报/);
+    assert.match(upstreamRequests[5].body.input[1].content[0].text, /当前为自由生图模式/);
+    assert.match(upstreamRequests[11].body.input[1].content[0].text, /当前为商品生图模式/);
+    assert.equal(upstreamRequests[14].body.model, "gpt-4.1-mini");
+    assert.deepEqual(upstreamRequests[14].body.messages, [{ role: "user", content: "只回复 OK" }]);
 
     const updatedHistory = await api(nativeFetch, `${baseUrl}/api/prompt-studio/history/${generated.body.id}`, jsonOptions("PATCH", {
       name: "压力锅夏季活动海报",
@@ -424,6 +458,32 @@ test("prompt studio routes persist profiles, presets, generated variants, and hi
 
     globalThis.fetch = nativeFetch;
     await stopServer(server);
+
+    const dbPath = path.join(dataDir, "db.json");
+    const legacyDb = JSON.parse(await fs.readFile(dbPath, "utf8"));
+    const legacyEntry = legacyDb.promptStudio.quickRequests.find((entry) => entry.id === quickProductNoHistoryInput.clientRequestId);
+    assert.ok(legacyEntry);
+    legacyEntry.pipelineVersion = 1;
+    legacyEntry.response = { legacy: true };
+    await fs.writeFile(dbPath, JSON.stringify(legacyDb, null, 2), "utf8");
+
+    const legacyRegenerationRequests = [];
+    globalThis.fetch = async (url, init) => {
+      const body = JSON.parse(init.body);
+      const name = body?.text?.format?.name;
+      legacyRegenerationRequests.push({ url: String(url), name });
+      const output = name === "quick_prompt_interpretation"
+        ? quickPromptInterpretation
+        : name === "prompt_set"
+          ? modelPromptSet
+          : null;
+      assert.ok(output, `unexpected legacy regeneration request: ${name}`);
+      return new Response(JSON.stringify({ output_text: JSON.stringify(output) }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      });
+    };
+
     server = await startServer({ port: 0 });
     baseUrl = `http://127.0.0.1:${server.address().port}`;
 
@@ -432,7 +492,23 @@ test("prompt studio routes persist profiles, presets, generated variants, and hi
     persistedQuickRetryForm.append("productImages", new Blob(["no-history-product-image"], { type: "image/png" }), "after-restart.png");
     const persistedQuickRetry = await api(nativeFetch, `${baseUrl}/api/prompt-studio/quick-generate`, { method: "POST", body: persistedQuickRetryForm });
     assert.equal(persistedQuickRetry.status, 200);
-    assert.deepEqual(persistedQuickRetry.body, quickProductNoHistory.body);
+    assert.equal("legacy" in persistedQuickRetry.body, false);
+    assert.equal(persistedQuickRetry.body.request.userRequest, quickProductNoHistoryInput.userRequest);
+    assert.deepEqual(legacyRegenerationRequests.map((request) => request.name), ["quick_prompt_interpretation", "prompt_set"]);
+
+    const migratedCacheDb = JSON.parse(await fs.readFile(dbPath, "utf8"));
+    const migratedEntries = migratedCacheDb.promptStudio.quickRequests.filter((entry) => entry.id === quickProductNoHistoryInput.clientRequestId);
+    assert.equal(migratedEntries.length, 1);
+    assert.equal(migratedEntries[0].pipelineVersion, 2);
+    assert.deepEqual(migratedEntries[0].response, persistedQuickRetry.body);
+
+    const cachedQuickRetryForm = new FormData();
+    cachedQuickRetryForm.append("request", JSON.stringify(quickProductNoHistoryInput));
+    cachedQuickRetryForm.append("productImages", new Blob(["no-history-product-image"], { type: "image/png" }), "cached-after-restart.png");
+    const cachedQuickRetry = await api(nativeFetch, `${baseUrl}/api/prompt-studio/quick-generate`, { method: "POST", body: cachedQuickRetryForm });
+    assert.equal(cachedQuickRetry.status, 200);
+    assert.deepEqual(cachedQuickRetry.body, persistedQuickRetry.body);
+    assert.equal(legacyRegenerationRequests.length, 2);
 
     const restored = await api(nativeFetch, `${baseUrl}/api/prompt-studio`);
     assert.equal(restored.status, 200);

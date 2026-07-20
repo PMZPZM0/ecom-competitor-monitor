@@ -30,8 +30,10 @@ test("Feishu document rows keep account price channels independent", () => {
       priceResolution: {
         status: "verified",
         channels: {
+          normal: { status: "verified", valueCents: 7900, evidenceIds: ["normal"] },
           seckill: { status: "verified", valueCents: 7500, evidenceIds: ["seckill"] },
           billion: { status: "unavailable", valueCents: null, evidenceIds: [] },
+          gift: { status: "verified", valueCents: 6900, evidenceIds: ["gift"] },
         },
       },
     }],
@@ -48,4 +50,65 @@ test("Feishu document rows keep account price channels independent", () => {
   assert.match(xml, /不适用/);
   assert.match(xml, /无淘金币/);
   assert.doesNotMatch(xml, /NaN/);
+});
+
+test("Feishu document identifies a verified normal-account new-customer gift", () => {
+  const xml = reportXml({
+    accountType: "normal",
+    shopName: "新客店铺",
+    model: "NEW-1",
+    url: "https://detail.tmall.com/item.htm?id=2",
+  }, {
+    capturedAt: "2026-07-20T08:00:00.000Z",
+    accessMode: "authenticated",
+    primaryAccountType: "normal",
+    skuPrices: [{
+      skuId: "new-gift",
+      name: "新客款",
+      normalPrice: 139,
+      giftPrice: 1,
+      giftStatus: "available",
+      resolutionStatus: "verified",
+      priceResolution: {
+        status: "verified",
+        promotions: [{ code: "coupon2RedForNewUser", kind: "gift", label: "新客礼金" }],
+        channels: {
+          normal: { status: "verified", valueCents: 13900, evidenceIds: ["normal"] },
+          gift: { status: "verified", valueCents: 11300, label: "新客礼金价", evidenceIds: ["gift"] },
+        },
+      },
+    }],
+  });
+
+  assert.match(xml, /<b>价格身份：<\/b>普通账号/);
+  assert.match(xml, /新客礼金价 ¥113\.00/);
+  assert.doesNotMatch(xml, /¥1\.00/);
+});
+
+test("Feishu document does not display a restricted first-order gift from a stale field", () => {
+  const xml = reportXml({
+    accountType: "normal",
+    url: "https://detail.tmall.com/item.htm?id=3",
+  }, {
+    accessMode: "authenticated",
+    primaryAccountType: "normal",
+    skuPrices: [{
+      skuId: "first-order-gift",
+      normalPrice: 139,
+      giftPrice: 99,
+      giftStatus: "none",
+      resolutionStatus: "verified",
+      priceResolution: {
+        status: "verified",
+        promotions: [{ code: "1", kind: "gift", label: "首单礼金" }],
+        channels: {
+          normal: { status: "verified", valueCents: 13900, evidenceIds: ["normal"] },
+          gift: { status: "verified", valueCents: 9900, label: "首单礼金价", evidenceIds: ["stale-gift"] },
+        },
+      },
+    }],
+  });
+
+  assert.match(xml, /不适用/);
+  assert.doesNotMatch(xml, /¥99\.00/);
 });

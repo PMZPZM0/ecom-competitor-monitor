@@ -109,6 +109,88 @@ test("effective price follows normal to surprise to coin chain", () => {
   assert.equal(effectivePriceForSku({ price: 1, normalPrice: 1 }, "normal"), null);
 });
 
+test("a normal account uses a verified new-customer gift in lowest price and Feishu output", () => {
+  const sku = verifiedSku({
+    skuId: "new-customer-gift",
+    name: "新客款",
+    price: 139,
+    normalPrice: 139,
+    giftPrice: 113,
+    giftStatus: "available",
+  }, ["normal", "gift"]);
+  sku.priceResolution.promotions = [{ code: "coupon2RedForNewUser", kind: "gift", label: "新客礼金" }];
+  sku.priceResolution.channels.gift.label = "新客礼金价";
+  sku.giftPrice = 1;
+
+  assert.deepEqual(effectivePriceForSku(sku, "normal"), { label: "新客礼金价", value: 113 });
+
+  const card = buildPriceCard({
+    type: "manual-sync",
+    product: {
+      accountType: "normal",
+      shopName: "新客店铺",
+      model: "NEW-1",
+      url: "https://detail.tmall.com/item.htm?id=5",
+      lastSnapshot: { primaryAccountType: "normal", skuPrices: [sku] },
+    },
+    price: 113,
+    priceLabel: "新客礼金价",
+  });
+  const serialized = JSON.stringify(card);
+  assert.match(serialized, /新客礼金价/);
+  assert.match(serialized, /¥113\.00/);
+  assert.doesNotMatch(serialized, /¥1\.00/);
+});
+
+test("code 1 remains restricted to 88VIP even if a stale resolver marked the gift channel verified", () => {
+  const sku = verifiedSku({
+    skuId: "first-order-verified",
+    name: "首单款",
+    price: 139,
+    normalPrice: 139,
+    giftPrice: 99,
+    giftStatus: "available",
+  }, ["normal", "gift"]);
+  sku.priceResolution.promotions = [{ code: "1", kind: "gift", label: "首单礼金" }];
+  sku.priceResolution.channels.gift.label = "首单礼金价";
+
+  assert.deepEqual(effectivePriceForSku(sku, "normal"), { label: "普通价", value: 139 });
+  assert.deepEqual(effectivePriceForSku(sku, "gift"), { label: "普通价", value: 139 });
+  assert.deepEqual(effectivePriceForSku(sku, "vip88"), { label: "首单礼金价", value: 99 });
+});
+
+test("a restricted first-order gift cannot leak from a stale normal-account field", () => {
+  const sku = verifiedSku({
+    skuId: "first-order-gift",
+    name: "首单款",
+    price: 139,
+    normalPrice: 139,
+    giftPrice: 99,
+    giftStatus: "none",
+  }, ["normal"]);
+  sku.priceResolution.promotions = [{ code: "1", kind: "gift", label: "首单礼金" }];
+  sku.priceResolution.channels.gift = {
+    status: "unavailable",
+    valueCents: null,
+    reason: "different-account-promotion",
+    evidenceIds: [],
+  };
+
+  assert.deepEqual(effectivePriceForSku(sku, "normal"), { label: "普通价", value: 139 });
+  const card = buildPriceCard({
+    type: "manual-sync",
+    product: {
+      accountType: "normal",
+      url: "https://detail.tmall.com/item.htm?id=6",
+      lastSnapshot: { primaryAccountType: "normal", skuPrices: [sku] },
+    },
+    price: 139,
+  });
+  const serialized = JSON.stringify(card);
+  assert.match(serialized, /不适用/);
+  assert.doesNotMatch(serialized, /¥99\.00/);
+});
+
 test("campaign channels keep explicit labels in effective price and Feishu output", () => {
   const sku = {
     skuId: "campaign-1",

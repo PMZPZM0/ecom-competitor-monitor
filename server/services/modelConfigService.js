@@ -511,6 +511,12 @@ export async function discoverAvailableModels(config = {}, {
 
 function modelResponseText(data) {
   if (typeof data?.output_text === "string" && data.output_text.trim()) return data.output_text.trim();
+  const chatContent = data?.choices?.[0]?.message?.content;
+  if (typeof chatContent === "string" && chatContent.trim()) return chatContent.trim();
+  if (Array.isArray(chatContent)) {
+    const chatText = chatContent.map((item) => typeof item?.text === "string" ? item.text : "").filter(Boolean).join("\n").trim();
+    if (chatText) return chatText;
+  }
   return Array.isArray(data?.output)
     ? data.output.flatMap((item) => Array.isArray(item?.content) ? item.content : [])
       .map((item) => typeof item?.text === "string" ? item.text : "")
@@ -528,7 +534,7 @@ export async function testPromptModel(config = {}, {
   timeoutMs = 15_000,
 } = {}) {
   const resolved = resolveModelConfig(config, { env });
-  const data = await requestModelApiJson(`${resolved.baseUrl}/responses`, {
+  const data = await requestModelApiJson(`${resolved.baseUrl}/chat/completions`, {
     apiKey: resolved.apiKey,
     fetchImpl,
     label: "提示词模型连接测试",
@@ -536,34 +542,11 @@ export async function testPromptModel(config = {}, {
     timeoutMs,
     body: {
       model: resolved.model,
-      input: "只返回测试结果。",
-      text: {
-        format: {
-          type: "json_schema",
-          name: "connection_test",
-          strict: true,
-          schema: {
-            type: "object",
-            properties: { ok: { type: "boolean", enum: [true] } },
-            required: ["ok"],
-            additionalProperties: false,
-          },
-        },
-      },
+      messages: [{ role: "user", content: "只回复 OK" }],
     },
   });
-  let result;
-  try {
-    result = JSON.parse(modelResponseText(data));
-  } catch {
-    throw new ModelApiError("提示词模型连接测试返回了无效 JSON。", {
-      code: "MODEL_API_INVALID_RESPONSE",
-      status: 502,
-    });
-  }
-  if (!result || typeof result !== "object" || Array.isArray(result)
-    || result.ok !== true || Object.keys(result).length !== 1) {
-    throw new ModelApiError("提示词模型连接测试返回结构无效。", {
+  if (!modelResponseText(data)) {
+    throw new ModelApiError("提示词模型连接测试没有返回文字。", {
       code: "MODEL_API_INVALID_RESPONSE",
       status: 502,
     });

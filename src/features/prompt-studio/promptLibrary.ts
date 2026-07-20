@@ -47,18 +47,18 @@ export const builtInPromptTemplates: PromptLibraryTemplate[] = [
   },
   {
     id: 'chinese-text-safe',
-    name: '中文文字防错',
-    summary: '优先生成无字底图；必须出字时严格锁定原文。',
+    name: '中文海报文字',
+    summary: '直接生成你确认过的文字，保持清晰、准确且不乱码。',
     group: 'optimizer',
     category: 'campaign-poster',
     tags: ['中文', '防乱码', '海报', '包装文字'],
     featured: true,
-    userRequest: '优先生成可供后期排版的无字底图，并预留完整、干净的文案安全区。不得生成伪文字、随机字母、价格或促销词；产品包装和 Logo 上已有文字必须保持原样、清晰可读。',
+    userRequest: '把我确认过的文字逐条排进海报，建立清楚的字号层级、行距、对齐和安全区。所有文字逐字执行，不翻译、不改写、不增删；未明确提供的价格、品牌、活动规则或其他字符不要擅自添加，产品包装和 Logo 上已有文字保持原样。',
     taskFields: {
       copyArea: '预留一块边界清楚、背景干净且不遮挡产品的文案区域',
       visualFocus: '产品为第一视觉，文案区与主体层级明确',
     },
-    copyMode: 'reserved',
+    copyMode: 'exact',
   },
   {
     id: 'commercial-photography',
@@ -177,7 +177,6 @@ export const builtInPromptTemplates: PromptLibraryTemplate[] = [
     group: 'poster',
     category: 'campaign-poster',
     tags: ['活动海报', '无字底图', '留白', 'PS'],
-    featured: true,
     userRequest: '生成电商活动海报的无字底图：产品是第一视觉，活动氛围来自色彩、光影、构图和少量装饰；预留边界清楚的标题、卖点和价格排版区域，不生成任何伪文字、价格、促销词或随机字符。',
     taskFields: {
       copyArea: '在不遮挡产品的位置预留约 30% 至 40% 的干净文案区域',

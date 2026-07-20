@@ -8,25 +8,47 @@ import {
   cookieHeaderForUrls,
   createTaobaoAccessRestrictedError,
   findAvailableBrowserPort,
+  itemIdFromNetworkBody,
+  itemIdFromNetworkUrl,
   isBuyerShowResponseUrl,
   isTaobaoAccessRestrictedDocument,
   isTaobaoLoginDocument,
   isTaobaoLoginUrl,
   isTmallSilentLoginResponse,
+  isTrustedTmallSilentLoginResponse,
   isTmallSessionCookie,
   shouldCaptureNetworkResponse,
   shouldPreserveCaptureCache,
   skuIdFromNetworkBody,
   skuIdFromNetworkUrl,
   taobaoCookieStateForUrls,
+  tmallSsoSyncUrlsFromSilentLogin,
 } from "./browserService.js";
 
-test("Tmall silent-login JSONP scripts are excluded from capture", () => {
+test("Tmall SSO bridge accepts only trusted same-session endpoints", () => {
+  const body = `callback({"content":{"data":{"asyncUrls":[
+    "https://pass.tmall.com/add?token=secret",
+    "https://pass.tmall.hk/add?token=secret",
+    "https://pass.fliggy.com/add?token=secret",
+    "https://pass.tmall.com.evil.example/add?token=secret",
+    "http://pass.tmall.com/add?token=secret",
+    "https://pass.tmall.com:444/add?token=secret",
+    "https://user:pass@pass.tmall.com/add?token=secret",
+    "https://pass.tmall.com/other?token=secret"
+  ]}}})`;
+  assert.deepEqual(tmallSsoSyncUrlsFromSilentLogin(body).map((value) => new URL(value).hostname), [
+    "pass.tmall.com",
+    "pass.tmall.hk",
+  ]);
+  assert.deepEqual(tmallSsoSyncUrlsFromSilentLogin("not-json"), []);
+});
+
+test("Tmall silent-login JSONP scripts are captured only for in-browser SSO", () => {
   assert.equal(shouldCaptureNetworkResponse({
     url: "https://login.taobao.com/newlogin/silentHasLogin.do?callback=x",
     mimeType: "application/javascript",
     status: 200,
-  }, "Script"), false);
+  }, "Script"), true);
   assert.equal(shouldCaptureNetworkResponse({
     url: "https://example.com/unrelated.js",
     mimeType: "application/javascript",
@@ -37,6 +59,20 @@ test("Tmall silent-login JSONP scripts are excluded from capture", () => {
     mimeType: "application/javascript",
     status: 403,
   }, "Script"), false);
+});
+
+test("Tmall SSO bridge accepts only the real Taobao silent-login source", () => {
+  assert.equal(isTrustedTmallSilentLoginResponse("https://login.taobao.com/newlogin/silentHasLogin.do?callback=x"), true);
+  for (const url of [
+    "https://evil.example/newlogin/silentHasLogin.do",
+    "https://login.taobao.com.evil.example/newlogin/silentHasLogin.do",
+    "http://login.taobao.com/newlogin/silentHasLogin.do",
+    "https://login.taobao.com:444/newlogin/silentHasLogin.do",
+    "https://user:pass@login.taobao.com/newlogin/silentHasLogin.do",
+  ]) {
+    assert.equal(isTrustedTmallSilentLoginResponse(url), false);
+    assert.equal(isTmallSilentLoginResponse(url), true);
+  }
 });
 
 test("Tmall silent-login bridges stay out of persisted capture payloads", () => {
@@ -66,15 +102,19 @@ test("background capture reuses a visible account browser without mode restart",
 });
 
 test("skuIdFromNetworkUrl reads the exact SKU from pcdetail adjust requests", () => {
-  const data = encodeURIComponent(JSON.stringify({ id: "123", exParams: JSON.stringify({ skuId: "6198474471058", modules: "skuClick" }) }));
+  const data = encodeURIComponent(JSON.stringify({ itemId: "843315272519", exParams: JSON.stringify({ skuId: "6198474471058", modules: "skuClick" }) }));
   assert.equal(skuIdFromNetworkUrl(`https://h5api.m.tmall.com/h5/mtop.taobao.pcdetail.data.adjust/1.0/?data=${data}`), "6198474471058");
+  assert.equal(itemIdFromNetworkUrl(`https://h5api.m.tmall.com/h5/mtop.taobao.pcdetail.data.adjust/1.0/?data=${data}`), "843315272519");
   assert.equal(skuIdFromNetworkUrl("https://example.com/no-data"), "");
+  assert.equal(itemIdFromNetworkUrl("https://example.com/no-data"), "");
 });
 
 test("skuIdFromNetworkBody uses the authoritative pcdetail response SKU", () => {
-  const body = JSON.stringify({ data: { componentsVO: { xsRedPacketParamVO: { trackParams: { skuId: "6198474471057" } } } } });
+  const body = JSON.stringify({ data: { componentsVO: { xsRedPacketParamVO: { trackParams: { itemId: "843315272519", skuId: "6198474471057" } } } } });
   assert.equal(skuIdFromNetworkBody(body), "6198474471057");
+  assert.equal(itemIdFromNetworkBody(body), "843315272519");
   assert.equal(skuIdFromNetworkBody(JSON.stringify({ data: { skuId: "wrong-level" } })), "");
+  assert.equal(itemIdFromNetworkBody(JSON.stringify({ data: { itemId: "wrong-level" } })), "");
 });
 
 test("isTaobaoLoginUrl recognizes Taobao login redirects", () => {

@@ -25,6 +25,7 @@ import {
 } from './promptLibrary'
 import { PromptGardenPanel } from './PromptGardenPanel'
 import type { PromptGardenPrompt } from './promptGarden'
+import { visibleNegativePrompt, visiblePrompt } from './promptLayers'
 import type { PromptCategory, PromptHistoryItem, PromptVariantKey } from './types'
 
 type LibraryView = 'templates' | 'garden' | 'history'
@@ -72,7 +73,7 @@ function historySearchText(item: PromptHistoryItem) {
     item.name,
     categoryLabels[item.category],
     variantLabels[item.selectedVariantKey],
-    ...Object.values(item.variants).flatMap((variant) => [variant.title, variant.prompt, variant.negativePrompt, variant.rationale]),
+    ...Object.values(item.variants).flatMap((variant) => [variant.title, visiblePrompt(variant.prompt), visibleNegativePrompt(variant.negativePrompt), variant.rationale]),
   ].join(' ').toLocaleLowerCase('zh-CN')
 }
 
@@ -316,7 +317,7 @@ export function PromptLibraryPanel({
                     {favoriteBusy ? <LoaderCircle className="h-3.5 w-3.5 animate-spin motion-reduce:animate-none" /> : <Heart className={`h-3.5 w-3.5 ${item.isFavorite ? 'fill-current' : ''}`} />}
                   </button>
                 </div>
-                <p className="mt-2 line-clamp-3 text-xs leading-5 text-slate-600">{selectedVariant.prompt}</p>
+                <p className="mt-2 line-clamp-3 text-xs leading-5 text-slate-600">{visiblePrompt(selectedVariant.prompt)}</p>
                 <div className="mt-2 flex items-center gap-1">
                   <Button type="button" size="sm" variant="secondary" disabled={busy} onClick={() => void onReuseHistory(item)}>
                     <RefreshCw className="h-3.5 w-3.5" />复用

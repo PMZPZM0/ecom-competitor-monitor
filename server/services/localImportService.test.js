@@ -19,6 +19,7 @@ const {
   LOCAL_IMPORT_MAX_FILES,
   mergeLocalImportSnapshot,
   readBrowserCaptureSource,
+  reparseBrowserCaptureSource,
   saveBrowserCaptureSource,
   saveLocalImportSource,
   validateLocalEvidenceDirectory,
@@ -46,6 +47,73 @@ function response(skuId, price1, price2, promotions) {
 
 function pcdetailUrl(itemId, skuId) {
   return `https://h5api.m.tmall.com/h5/mtop.taobao.pcdetail.data.adjust/1.0/?data=${encodeURIComponent(JSON.stringify({ itemId, skuId }))}`;
+}
+
+function newUserGiftBrowserCapture() {
+  const itemId = "613114976305";
+  const currentSkuId = "6012220507404";
+  const skuCases = [
+    { skuId: "5053947379176", originalPrice: 609, normalPrice: 270, giftPrice: 244 },
+    { skuId: "5175235530908", originalPrice: 690, normalPrice: 297, giftPrice: 271 },
+    { skuId: "5925291249025", originalPrice: 609, normalPrice: 243, giftPrice: 217 },
+    { skuId: currentSkuId, originalPrice: 589, normalPrice: 269, giftPrice: 243 },
+    { skuId: "5984100993900", originalPrice: 729, normalPrice: 270, giftPrice: 244 },
+    { skuId: "6035530305968", originalPrice: 669, normalPrice: 315, giftPrice: 289 },
+  ];
+  const embedded = {
+    itemId,
+    skuBase: {
+      props: [],
+      skus: skuCases.map(({ skuId }) => ({ skuId, propPath: "" })),
+    },
+    skuCore: {
+      sku2info: Object.fromEntries(skuCases.map(({ skuId, originalPrice, normalPrice }, index) => [skuId, {
+        subPrice: { priceText: String(normalPrice), priceTitle: "平台加补后" },
+        price: { priceText: String(originalPrice) },
+        quantity: index + 1,
+      }])),
+    },
+    xsRedPacketParamVO: {
+      trackParams: { itemId, skuId: currentSkuId, price1: "589", price2: "243" },
+      xsRedPocketParams: {
+        tbShopRedPocket: JSON.stringify({
+          itemId,
+          detailExtraParam: {},
+          umpInfo: {
+            umpPromotionList: [
+              { promotionName: "coupon2RedForNewUser", amount: 2600, threshold: 2601 },
+              { toolCode: "spsd4cjmj", promotionName: "spsd4cjmj", amount: 7100, threshold: 0 },
+              { toolCode: "spsd4price", promotionName: "spsd4price", amount: 24900, threshold: 0 },
+            ],
+          },
+        }),
+      },
+    },
+  };
+  return {
+    itemId,
+    currentSkuId,
+    skuCases,
+    capture: {
+      captureType: "account-browser-local-source",
+      itemId,
+      requestedUrl: `https://detail.tmall.com/item.htm?id=${itemId}&sign=browser-request-secret`,
+      finalUrl: `https://detail.tmall.com/item.htm?id=${itemId}&token=browser-final-secret`,
+      accountType: "normal",
+      page: {
+        html: `<script>window.__DATA__=${JSON.stringify(embedded)}</script>`,
+        visibleText: "首单礼金 店铺新客专享",
+        finalUrl: `https://detail.tmall.com/item.htm?id=${itemId}`,
+        statusCode: 200,
+        source: "browser",
+        accessVerified: true,
+        networkPayloads: [],
+        selectionResults: [],
+      },
+      authorization: "Bearer browser-authorization-secret",
+      cookie: "sid=browser-cookie-secret",
+    },
+  };
 }
 
 test("imports an explicitly identified pcdetail response and verifies normal plus surprise prices", async () => {
@@ -147,7 +215,7 @@ test("local evidence keeps billion and seckill channels after disk parsing", asy
   assert.equal(record.snapshot.skuPrices.find((sku) => sku.skuId === seckillSku)?.priceResolution.channels.seckill.status, "verified");
 });
 
-test("imports nested url/body records and applies the gift-account formula", async () => {
+test("imports nested url/body records and applies the 88VIP-only first-order gift formula", async () => {
   const itemId = "843315272520";
   const skuId = "6274971435306";
   const body = response(skuId, "199", "119", [
@@ -174,7 +242,7 @@ test("imports nested url/body records and applies the gift-account formula", asy
         },
       }]],
     },
-  }), { accountType: "gift" });
+  }), { accountType: "vip88" });
 
   const sku = preview.skuPrices[0];
   assert.equal(preview.canCommit, true);
@@ -231,16 +299,27 @@ test("browser capture is sanitized, saved first, and re-read without a network r
     requestedUrl: "https://detail.tmall.com/item.htm?id=843315272599&data=encoded-request-secret&spm=tracking-secret",
     finalUrl: "https://detail.tmall.com/item.htm?id=843315272599&exParams=encoded-final-secret",
     page: {
-      html: '<script>const cookie="sid=browser-secret";window.__ACCOUNT__={"nick":"private-nick","nickname":"private-nickname","userId":"private-user","uid":"private-uid","accountId":"private-account","loginId":"private-login","openId":"private-open","unionId":"private-union","unb":"private-unb","wk_unb":"private-wk-unb"}</script><div>本地页面</div>',
-      visibleText: "nickname=visible-private-nickname 本地页面",
+      html: '<script>const cookie="sid=browser-secret";window.__ACCOUNT__={"nick":"private-nick","nickname":"private-nickname","userId":"private-user","uid":"private-uid","accountId":"private-account","loginId":"private-login","openId":"private-open","unionId":"private-union","unb":"private-unb","wk_unb":"private-wk-unb"};window.__SAFE_PARAMS__={"mi_id":"private-html-mi-id"};window.__ADDRESS__={"addressList":[{"addressId":"private-address-id","areaId":"private-area-id","briefAddress":"private-brief-address","detailAddress":"private-detail-address","tel":"private-tel","userName":"private-user-name"}],"displayNick":"private-display-nick"};window.__ESCAPED__="{\\"userName\\":\\"private-escaped-user\\",\\"tel\\":\\"private-escaped-tel\\"}"</script><div>本地页面</div>',
+      visibleText: "nickname=visible-private-nickname userName=visible-private-user tel=visible-private-tel 本地页面",
       finalUrl: "https://detail.tmall.com/item.htm?id=843315272599&data=encoded-page-secret",
+      safeParams: { mi_id: "private-mi-id" },
       networkPayloads: [{
         url: `https://h5api.m.tmall.com/h5/mtop.taobao.pcdetail.data.adjust/1.0/?data=${encodeURIComponent(JSON.stringify({ itemId: "843315272599", skuId: "6274971435999", token: encodedCredential }))}&sign=url-secret`,
         skuId: "6274971435999",
         requestSkuId: "6274971435999",
         responseSkuId: "6274971435999",
-        body: JSON.stringify({ data: { componentsVO: { xsRedPacketParamVO: { trackParams: { skuId: "6274971435999", price1: "199", price2: "139" } } } } }),
+        captureRunId: "selection-run-sanitized",
+        responseSequence: 1,
+        body: JSON.stringify({ data: { addressList: [{ addressId: "private-body-address", tel: "private-body-tel", userName: "private-body-user" }], displayNick: "private-body-display", componentsVO: { deliveryVO: { addressId: "private-delivery-address", areaId: "private-delivery-area" }, xsRedPacketParamVO: { trackParams: { skuId: "6274971435999", price1: "199", price2: "139" } } } } }),
         responseKind: "price",
+      }],
+      selectionResults: [{
+        skuId: "6274971435999",
+        selected: true,
+        responseReceivedAfterSelection: true,
+        captureRunId: "selection-run-sanitized",
+        responseSequenceStartExclusive: 0,
+        responseSequenceEndInclusive: 1,
       }],
     },
     authorization: "Bearer browser-auth-secret",
@@ -248,14 +327,26 @@ test("browser capture is sanitized, saved first, and re-read without a network r
   const saved = await saveBrowserCaptureSource(capture);
   capture.page.html = "内存对象已被改写";
   const diskText = await fs.readFile(path.join(dataDir, saved.sourceFile), "utf8");
-  assert.doesNotMatch(diskText, /browser-secret|browser-auth-secret|url-secret|encoded-browser-token|encoded-request-secret|tracking-secret|encoded-final-secret|encoded-page-secret|private-(?:nick|nickname|user|uid|account|login|open|union|unb|wk-unb)|visible-private-nickname/);
+  assert.doesNotMatch(diskText, /browser-secret|browser-auth-secret|url-secret|encoded-browser-token|encoded-request-secret|tracking-secret|encoded-final-secret|encoded-page-secret|private-(?:nick|nickname|user|uid|account|login|open|union|unb|wk-unb|mi-id|html-mi-id|address-id|area-id|brief-address|detail-address|tel|user-name|display-nick|escaped-user|escaped-tel|body-address|body-tel|body-user|body-display|delivery-address|delivery-area)|visible-private-(?:nickname|user|tel)/);
   assert.match(diskText, /\[REDACTED\]/);
   const stored = JSON.parse(diskText);
   assert.equal(stored.requestedUrl, "https://detail.tmall.com/item.htm?id=843315272599");
   assert.equal(stored.finalUrl, "https://detail.tmall.com/item.htm?id=843315272599");
   assert.equal(stored.page.finalUrl, "https://detail.tmall.com/item.htm?id=843315272599");
+  assert.equal(stored.page.safeParams.mi_id, "[REDACTED]");
+  assert.doesNotMatch(stored.page.html, /private-html-mi-id/);
   assert.equal(stored.page.networkPayloads[0].url, "https://h5api.m.tmall.com/h5/mtop.taobao.pcdetail.data.adjust/1.0/?itemId=843315272599&skuId=6274971435999");
-  assert.equal(JSON.parse(stored.page.networkPayloads[0].body).data.componentsVO.xsRedPacketParamVO.trackParams.price2, "139");
+  assert.equal(stored.page.networkPayloads[0].captureRunId, "selection-run-sanitized");
+  assert.equal(stored.page.networkPayloads[0].responseSequence, 1);
+  const storedBody = JSON.parse(stored.page.networkPayloads[0].body);
+  assert.equal(storedBody.data.addressList, "[REDACTED]");
+  assert.equal(storedBody.data.displayNick, "[REDACTED]");
+  assert.equal(storedBody.data.componentsVO.deliveryVO.addressId, "[REDACTED]");
+  assert.equal(storedBody.data.componentsVO.deliveryVO.areaId, "[REDACTED]");
+  assert.equal(storedBody.data.componentsVO.xsRedPacketParamVO.trackParams.price2, "139");
+  assert.equal(stored.page.selectionResults[0].captureRunId, "selection-run-sanitized");
+  assert.equal(stored.page.selectionResults[0].responseSequenceStartExclusive, 0);
+  assert.equal(stored.page.selectionResults[0].responseSequenceEndInclusive, 1);
 
   const originalFetch = globalThis.fetch;
   let networkCalls = 0;
@@ -277,6 +368,96 @@ test("browser capture is sanitized, saved first, and re-read without a network r
     assert.equal(cleared.sourceFileCount, 0);
     assert.deepEqual(cleared.deletedCaptureIds, [saved.captureId]);
     await assert.rejects(fs.stat(path.join(dataDir, saved.sourceFile)), { code: "ENOENT" });
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("reloaded browser SSR evidence applies an item-scoped new-user gift to every eligible SKU across all capable accounts", async () => {
+  const { itemId, currentSkuId, skuCases, capture } = newUserGiftBrowserCapture();
+  const saved = await saveBrowserCaptureSource(capture);
+  capture.page.html = "<script>window.__DATA__={}</script>";
+
+  const browserSourcePath = path.join(dataDir, saved.sourceFile);
+  const browserSource = await fs.readFile(browserSourcePath, "utf8");
+  assert.doesNotMatch(browserSource, /browser-request-secret|browser-final-secret|browser-authorization-secret|browser-cookie-secret/);
+  assert.match(browserSource, /coupon2RedForNewUser/);
+  assert.equal((await fs.stat(browserSourcePath)).isFile(), true);
+  assert.deepEqual((await fs.readdir(path.dirname(browserSourcePath))).filter((name) => name.endsWith(".tmp")), []);
+
+  const originalFetch = globalThis.fetch;
+  let networkCalls = 0;
+  globalThis.fetch = async () => {
+    networkCalls += 1;
+    throw new Error("SSR price parsing must remain local after browser capture");
+  };
+  try {
+    const reloaded = await readBrowserCaptureSource(saved.captureId);
+    assert.equal(reloaded.localFirst.sourceSaved, true);
+    assert.equal(reloaded.localFirst.sourceSanitized, true);
+    assert.equal(reloaded.localFirst.parsedFromDisk, true);
+    assert.match(reloaded.page.html, /coupon2RedForNewUser/);
+    assert.doesNotMatch(reloaded.page.html, /window\.__DATA__=\{\}/);
+
+    for (const accountType of ["normal", "gift", "vip88"]) {
+      const preview = await createLocalImport(JSON.stringify(reloaded), { accountType, itemIdHint: itemId });
+      assert.deepEqual(preview.localFirst, {
+        sourceSaved: true,
+        sourceSanitized: true,
+        parsedFromDisk: true,
+        networkAccessed: false,
+      });
+      assert.equal(preview.canCommit, true);
+      assert.equal(preview.verifiedSkuCount, 6);
+
+      const current = preview.skuPrices.find((sku) => sku.skuId === currentSkuId);
+      assert.equal(current.resolutionStatus, "verified");
+      assert.equal(current.originalPrice, 589);
+      assert.equal(current.normalPrice, 269);
+      assert.equal(current.giftPrice, 243);
+      assert.equal(current.giftStatus, "available");
+      assert.equal(current.priceResolution.source, "embedded-promotion");
+      assert.equal(current.priceResolution.channels.gift.label, "新客礼金价");
+      assert.equal(current.priceCalculation.normal, "标价 589.00 - 超级立减 71.00 - 平台立减 249.00 = 普通价 269.00");
+      assert.equal(current.priceCalculation.gift, "普通价 269.00 - 新客礼金 26.00 = 新客礼金价 243.00");
+
+      for (const expected of skuCases) {
+        const sku = preview.skuPrices.find((item) => item.skuId === expected.skuId);
+        assert.equal(sku.resolutionStatus, "verified", expected.skuId);
+        assert.equal(sku.normalPrice, expected.normalPrice, expected.skuId);
+        assert.equal(sku.giftPrice, expected.giftPrice, expected.skuId);
+        assert.equal(sku.giftStatus, "available", expected.skuId);
+        assert.equal(sku.priceResolution.channels.gift.status, "verified", expected.skuId);
+        assert.equal(sku.priceResolution.channels.gift.label, "新客礼金价", expected.skuId);
+        assert.equal(
+          sku.priceCalculation.gift,
+          `普通价 ${expected.normalPrice.toFixed(2)} - 新客礼金 26.00 = 新客礼金价 ${expected.giftPrice.toFixed(2)}`,
+          expected.skuId,
+        );
+      }
+
+      const record = await loadLocalImportRecord(preview.importId);
+      const storedCurrent = record.snapshot.skuPrices.find((sku) => sku.skuId === currentSkuId);
+      assert.equal(storedCurrent.priceResolution.channels.gift.label, "新客礼金价");
+      assert.equal(storedCurrent.giftPrice, 243);
+      assert.deepEqual(record.snapshot.skuPrices.map((sku) => sku.giftPrice), skuCases.map((sku) => sku.giftPrice));
+    }
+
+    const reparsed = await reparseBrowserCaptureSource(saved.captureId, { accountType: "normal", itemIdHint: itemId });
+    assert.deepEqual(reparsed.localFirst, {
+      sourceSaved: true,
+      sourceSanitized: true,
+      parsedFromDisk: true,
+      networkAccessedAfterCapture: false,
+    });
+    assert.deepEqual(reparsed.snapshot.skuPrices.map((sku) => sku.giftPrice), skuCases.map((sku) => sku.giftPrice));
+    assert.equal(reparsed.snapshot.itemId, itemId);
+    assert.equal(reparsed.snapshot.source, "browser");
+    assert.equal(reparsed.snapshot.browserEvidenceId, saved.captureId);
+    assert.equal(reparsed.snapshot.localFirst.parsedFromDisk, true);
+
+    assert.equal(networkCalls, 0);
+    assert.deepEqual((await fs.readdir(path.join(dataDir, "local-imports"))).filter((name) => name.endsWith(".tmp")), []);
   } finally {
     globalThis.fetch = originalFetch;
   }

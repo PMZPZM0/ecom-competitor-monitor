@@ -12,6 +12,7 @@ import {
   normalizePromptStudioState,
   validateQuickPromptInput,
   validatePromptStudioInput,
+  writeFreeformImagePrompt,
 } from "./promptStudioService.js";
 import { MODEL_CHANNELS, updateModelConfig } from "./modelConfigService.js";
 
@@ -218,6 +219,60 @@ test("analysis explicitly rejects missing keys, non-JSON, and incomplete model o
   );
 });
 
+test("freeform prompt help returns the real model prompt without templates or hidden creative rules", async () => {
+  const finalPrompt = "一幅大胆而精致的国庆主题视觉，金色光轨穿过深红空间，城市轮廓与飘带形成强烈纵深，主标题融入中央视觉焦点。";
+  let request;
+  const result = await writeFreeformImagePrompt(modelConfig(), {
+    userRequest: "做一张有高级感的国庆海报",
+    creationMode: "free",
+  }, {
+    env,
+    productImages: [{ mimetype: "image/png", buffer: Buffer.from("reference") }],
+    idempotencyKey: "freeform-test",
+    fetchImpl: async (url, init) => {
+      request = { url, body: JSON.parse(init.body) };
+      return new Response(JSON.stringify({ choices: [{ message: { content: finalPrompt } }] }), { status: 200 });
+    },
+  });
+
+  assert.deepEqual(result, { prompt: finalPrompt, model: "gpt-4.1-mini" });
+  assert.equal(request.url, `${MODEL_CHANNELS.stable.baseUrl}/chat/completions`);
+  assert.equal(request.body.messages[1].content.filter((item) => item.type === "image_url").length, 1);
+  assert.equal(request.body.messages[0].content, "根据用户需求自由发挥，写出你认为最好的生图提示词。");
+  assert.doesNotMatch(request.body.messages[0].content, /稳妥执行|商业增强|创意方案|产品事实|类目硬约束|主标题|副标题|卖点/);
+  assert.equal(request.body.messages[1].content[0].text, "用户需求：做一张有高级感的国庆海报");
+});
+
+test("freeform prompt help fails visibly instead of substituting a local template", async () => {
+  await assert.rejects(
+    writeFreeformImagePrompt(modelConfig(), { userRequest: "国庆海报", creationMode: "free" }, {
+      env,
+      fetchImpl: async () => new Response("upstream timeout", { status: 524 }),
+    }),
+    (error) => error.status === 524 && !/本地规则保底/.test(error.message),
+  );
+});
+
+test("freeform prompt help retries one transient 524 with the same idempotency key", async () => {
+  let calls = 0;
+  const keys = [];
+  const result = await writeFreeformImagePrompt(modelConfig(), { userRequest: "国庆海报", creationMode: "free" }, {
+    env,
+    idempotencyKey: "freeform-524-retry",
+    sleep: async () => {},
+    fetchImpl: async (_url, init) => {
+      calls += 1;
+      keys.push(init.headers["idempotency-key"]);
+      if (calls === 1) return new Response("gateway timeout", { status: 524 });
+      return new Response(JSON.stringify({ choices: [{ message: { content: "自由创作的国庆海报提示词" } }] }), { status: 200 });
+    },
+  });
+
+  assert.equal(result.prompt, "自由创作的国庆海报提示词");
+  assert.equal(calls, 2);
+  assert.deepEqual(keys, ["freeform-524-retry", "freeform-524-retry"]);
+});
+
 test("quick prompt interpretation defaults parameters and locks the original user request", async () => {
   let request;
   const userRequest = "把这个压力锅放进明亮厨房，做成真实的电商场景图";
@@ -250,7 +305,7 @@ test("quick prompt interpretation defaults parameters and locks the original use
   assert.equal(result.input.category, "product-scene");
   assert.equal(result.recommendedVariantKey, "commercial");
   assert.equal(result.model, "gpt-4.1-mini");
-  assert.match(request.body.input[1].content[0].text, /未指定创作模式，沿用旧版快捷提示词规则/);
+  assert.match(request.body.input[1].content[0].text, /当前未指定创作模式：有参考图时锁定产品事实，无参考图时只根据用户原话自由设计/);
   assert.doesNotMatch(request.body.input[1].content[0].text, /saveHistory/);
 });
 
@@ -298,13 +353,20 @@ test("product creation requires a reference while free creation can run without 
 
 test("simple free requests can be interpreted and assembled locally when the prompt gateway is unavailable", () => {
   const interpreted = interpretQuickPromptLocally({
-    userRequest: "国庆海报",
+    userRequest: "年货节宣传海报",
     creationMode: "free",
     parameters: { ratio: "4:3", resolution: "2k", quality: "high", background: "opaque" },
   }, { reason: "提示词通道上游响应超时（524），已使用本地规则。" });
   assert.equal(interpreted.input.category, "campaign-poster");
-  assert.equal(interpreted.input.copy.mode, "reserved");
-  assert.match(interpreted.input.style.palette, /红色、金色/);
+  assert.deepEqual(interpreted.input.copy, {
+    mode: "none",
+    title: "",
+    subtitle: "",
+    sellingPoints: [],
+    price: "",
+    campaignInfo: "",
+    additionalText: [],
+  });
   assert.match(interpreted.warnings[0], /524/);
 
   const generated = generatePromptSetLocally(interpreted.input, {
@@ -316,10 +378,194 @@ test("simple free requests can be interpreted and assembled locally when the pro
   assert.deepEqual(Object.keys(generated.variants), ["safe", "commercial", "creative"]);
   assert.ok(generated.riskChecks.every((item) => item.status === "pass"));
   for (const variant of Object.values(generated.variants)) {
-    assert.match(variant.prompt, /国庆海报/);
-    assert.match(variant.prompt, /文字必须清晰可读/);
+    const visible = variant.prompt.split("以下为服务端硬约束")[0];
+    assert.match(visible, /年货节宣传海报/);
+    assert.doesNotMatch(visible, /新春焕新季|新年好物|品质好物|焕新日常|主标题|副标题|卖点/);
+    assert.match(variant.prompt, /清晰可读/);
     assert.match(variant.negativePrompt, /乱码/);
+    assert.match(variant.negativePrompt, /以下为服务端基础排除规则/);
   }
+});
+
+test("local prompt fallback preserves only explicit copy and never invents a poster template", () => {
+  const noText = interpretQuickPromptLocally({ userRequest: "国庆无字底图，只预留后期排版区域", creationMode: "free" });
+  assert.equal(noText.input.category, "campaign-poster");
+  assert.deepEqual(noText.input.copy, {
+    mode: "reserved",
+    title: "",
+    subtitle: "",
+    sellingPoints: [],
+    price: "",
+    campaignInfo: "",
+    additionalText: [],
+  });
+
+  for (const request of ["国庆海报，不要文案", "活动海报，不需要文字", "促销海报，只要背景不要加字", "国庆海报不放字", "活动海报不显示任何文字"]) {
+    const textFree = interpretQuickPromptLocally({ userRequest: request, creationMode: "free" });
+    assert.equal(textFree.input.category, "campaign-poster", request);
+    assert.equal(textFree.input.copy.mode, "reserved", request);
+  }
+
+  const festivalVisual = interpretQuickPromptLocally({ userRequest: "国庆节日氛围图，红金配色", creationMode: "free" });
+  assert.equal(festivalVisual.input.category, "campaign-poster");
+  assert.equal(festivalVisual.input.copy.mode, "none");
+
+  const activityScene = interpretQuickPromptLocally({ userRequest: "户外活动场景图", creationMode: "free" });
+  assert.equal(activityScene.input.category, "product-scene");
+  assert.equal(activityScene.input.copy.mode, "none");
+
+  for (const request of ["详情图", "卖点图", "功能图"]) {
+    const detail = interpretQuickPromptLocally({ userRequest: request, creationMode: "free" });
+    assert.equal(detail.input.category, "detail-page", request);
+    assert.equal(detail.input.copy.mode, "none", request);
+  }
+
+  const scene = interpretQuickPromptLocally({ userRequest: "生成一个未来感厨房场景", creationMode: "free" });
+  assert.equal(scene.input.category, "product-scene");
+  assert.equal(scene.input.copy.mode, "none");
+
+  for (const request of [
+    "活动海报，预留文案区，主标题写“新品上市”",
+    "海报文字不要太小，标题写“焕新生活”",
+    "删除旧文字后换新标题，标题写“夏日上新”",
+  ]) {
+    const withCopy = interpretQuickPromptLocally({ userRequest: request, creationMode: "free" });
+    assert.equal(withCopy.input.copy.mode, "exact", request);
+    assert.ok(withCopy.input.copy.title, request);
+  }
+  assert.equal(interpretQuickPromptLocally({ userRequest: "海报不要生成文字乱码", creationMode: "free" }).input.copy.mode, "none");
+});
+
+test("model interpretation does not replace an empty poster plan with a fixed copy template", async () => {
+  const modelResult = quickPromptResult("campaign-poster");
+  modelResult.copy = { mode: "reserved", title: "", subtitle: "", sellingPoints: [], price: "", campaignInfo: "", additionalText: [] };
+  let request;
+  const interpreted = await interpretQuickPrompt(modelConfig(), { userRequest: "做一张智能压力锅活动海报", creationMode: "product" }, {
+    env,
+    productImages: [{ mimetype: "image/png", buffer: Buffer.from("product") }],
+    fetchImpl: async (url, init) => {
+      request = JSON.parse(init.body);
+      return jsonResponse(modelResult);
+    },
+  });
+  assert.deepEqual(interpreted.input.copy, {
+    mode: "none",
+    title: "",
+    subtitle: "",
+    sellingPoints: [],
+    price: "",
+    campaignInfo: "",
+    additionalText: [],
+  });
+  assert.match(request.input[0].content[0].text, /不要套用固定口号、固定节日文案、固定配色或固定版式/);
+  assert.doesNotMatch(request.input[0].content[0].text, /必须给出可编辑的中文主标题、副标题和 1 至 3 个短卖点/);
+});
+
+test("model poster copy stays creative without server templates or keyword filtering", async () => {
+  async function interpretCopy(userRequest, copy) {
+    const modelResult = quickPromptResult("campaign-poster");
+    modelResult.copy = copy;
+    return interpretQuickPrompt(modelConfig(), { userRequest, creationMode: "product" }, {
+      env,
+      productImages: [{ mimetype: "image/png", buffer: Buffer.from("product") }],
+      fetchImpl: async () => jsonResponse(modelResult),
+    });
+  }
+
+  const freeCopy = {
+    mode: "exact",
+    title: "围炉见新",
+    subtitle: "让年味自然发生",
+    sellingPoints: ["暖意入席", "好物相伴"],
+    price: "",
+    campaignInfo: "",
+    additionalText: [],
+  };
+  const creative = await interpretCopy("做一张智能压力锅年货节海报", freeCopy);
+  assert.deepEqual(creative.input.copy, freeCopy);
+
+  const explicit = await interpretCopy("做一张海报，主标题写“夏日上新”", {
+    mode: "exact",
+    title: "夏日新品",
+    subtitle: "轻盈色彩，点亮日常",
+    sellingPoints: ["质感呈现"],
+    price: "",
+    campaignInfo: "",
+    additionalText: [],
+  });
+  assert.equal(explicit.input.copy.title, "夏日上新");
+  assert.equal(explicit.input.copy.subtitle, "轻盈色彩，点亮日常");
+  assert.deepEqual(explicit.input.copy.sellingPoints, ["质感呈现"]);
+});
+
+test("visible prompt plans contain creative direction and editable copy but no backend control language", async () => {
+  const modelResult = modelPromptSet();
+  for (const variant of Object.values(modelResult)) {
+    variant.prompt = "红金主题形成前中后景与鲜明节奏；不得虚构价格；禁止改变产品结构。";
+  }
+  const generated = await generatePromptSet(modelConfig(), validInput("campaign-poster"), {
+    env,
+    fetchImpl: async () => jsonResponse(modelResult),
+  });
+  const localInput = { ...validInput("campaign-poster"), userRequest: "国庆活动海报，不要编造价格" };
+  const local = generatePromptSetLocally(localInput);
+  for (const variant of Object.values(generated.variants)) {
+    assert.match(variant.prompt.split("以下为服务端硬约束")[0], /前中后景|节奏|主题/);
+  }
+  for (const result of [generated, local]) {
+    for (const variant of Object.values(result.variants)) {
+      const visible = variant.prompt.split("以下为服务端硬约束")[0];
+      assert.match(visible, /【文案原文（可编辑）】/);
+      assert.doesNotMatch(visible, /不得|禁止|不虚构|不允许|硬约束|安全规则|服务端规则|后台规则|不引入任何新事实/);
+      assert.match(variant.prompt, /以下为服务端硬约束/);
+    }
+  }
+});
+
+test("model poster copy keeps non-factual atmosphere language", async () => {
+  const modelResult = quickPromptResult("campaign-poster");
+  modelResult.copy = {
+    mode: "exact",
+    title: "让美好自然发生",
+    subtitle: "轻盈色彩，点亮日常",
+    sellingPoints: ["质感呈现", "焕新日常"],
+    price: "",
+    campaignInfo: "",
+    additionalText: [],
+  };
+  const interpreted = await interpretQuickPrompt(modelConfig(), {
+    userRequest: "做一张智能压力锅活动海报",
+    creationMode: "product",
+  }, {
+    env,
+    productImages: [{ mimetype: "image/png", buffer: Buffer.from("product") }],
+    fetchImpl: async () => jsonResponse(modelResult),
+  });
+  assert.deepEqual(interpreted.input.copy, modelResult.copy);
+  assert.doesNotMatch(interpreted.warnings.join(" "), /已改用中性文案/);
+});
+
+test("model poster copy may use a natural one-line structure without server augmentation", async () => {
+  const modelResult = quickPromptResult("campaign-poster");
+  modelResult.copy = {
+    mode: "exact",
+    title: "围炉见新",
+    subtitle: "",
+    sellingPoints: [],
+    price: "",
+    campaignInfo: "",
+    additionalText: [],
+  };
+  const interpreted = await interpretQuickPrompt(modelConfig(), {
+    userRequest: "年货节宣传海报",
+    creationMode: "product",
+  }, {
+    env,
+    productImages: [{ mimetype: "image/png", buffer: Buffer.from("product") }],
+    fetchImpl: async () => jsonResponse(modelResult),
+  });
+  assert.deepEqual(interpreted.input.copy, modelResult.copy);
+  assert.doesNotMatch(JSON.stringify(interpreted.input.copy), /新春焕新季|新年好物|品质好物|焕新日常/);
 });
 
 test("prompt generation retries one idempotent transient failure with jitter but does not retry 524", async () => {
@@ -445,8 +691,8 @@ test("prompt generation separates product and style images and server-appends al
     assert.match(variant.prompt, /一锅多用/);
     assert.match(variant.prompt, /到手价 ¥499/);
     assert.match(variant.prompt, /使用纯净白底/);
-    assert.match(variant.prompt, /【输出参数】/);
-    assert.match(variant.prompt, /3:4/);
+    assert.doesNotMatch(variant.prompt, /【输出参数】/);
+    assert.match(variant.prompt, /结构化生成参数控制/);
     assert.deepEqual(variant.recommendedParameters, input.parameters);
     assert.doesNotMatch(variant.negativePrompt, /无文字|白色背景|无Logo/);
     assert.match(variant.negativePrompt, /乱码/);
@@ -538,6 +784,60 @@ test("prompt generation fits model negative phrases around complete server safet
   assert.match(result.variants.safe.negativePrompt, /低清晰度/);
   assert.match(result.variants.safe.negativePrompt, /文案增删/);
   assert.doesNotMatch(result.variants.safe.negativePrompt, /无文字|无Logo/);
+});
+
+test("negative artifact wording keeps QR codes, barcodes, and watermarks blocked", async () => {
+  for (const userRequest of [
+    "做一张活动海报，不要二维码、条形码或水印。",
+    "做一张活动海报，画面无二维码、条形码或水印。",
+  ]) {
+    const input = {
+      ...validInput("campaign-poster"),
+      userRequest,
+      copy: {
+        mode: "none",
+        title: "",
+        subtitle: "",
+        sellingPoints: [],
+        price: "",
+        campaignInfo: "",
+        additionalText: [],
+      },
+    };
+    const modelResult = modelPromptSet();
+    for (const variant of Object.values(modelResult)) variant.negativePrompt = "";
+    const result = await generatePromptSet(modelConfig(), input, {
+      env,
+      fetchImpl: async () => jsonResponse(modelResult),
+    });
+    assert.match(result.variants.safe.negativePrompt, /二维码/);
+    assert.match(result.variants.safe.negativePrompt, /条形码/);
+    assert.match(result.variants.safe.negativePrompt, /水印/);
+  }
+});
+
+test("positive artifact wording can intentionally opt into QR codes and watermarks", async () => {
+  const input = {
+    ...validInput("campaign-poster"),
+    userRequest: "请在右下角添加一个二维码，并保留品牌水印。",
+    copy: {
+      mode: "none",
+      title: "",
+      subtitle: "",
+      sellingPoints: [],
+      price: "",
+      campaignInfo: "",
+      additionalText: [],
+    },
+  };
+  const modelResult = modelPromptSet();
+  for (const variant of Object.values(modelResult)) variant.negativePrompt = "";
+  const result = await generatePromptSet(modelConfig(), input, {
+    env,
+    fetchImpl: async () => jsonResponse(modelResult),
+  });
+  assert.doesNotMatch(result.variants.safe.negativePrompt, /二维码/);
+  assert.doesNotMatch(result.variants.safe.negativePrompt, /水印/);
 });
 
 test("prompt generation rejects too many images and incomplete model variants", async () => {

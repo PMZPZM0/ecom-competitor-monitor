@@ -251,7 +251,7 @@ test("model test uses the image model endpoint without exposing its key", async 
   });
 });
 
-test("prompt model test calls the configured Responses endpoint and validates strict JSON", async () => {
+test("prompt model test calls the compatible Chat Completions endpoint and accepts real text", async () => {
   const config = updateModelConfig({ baseUrl: "https://models.example.com/v1" }, {
     model: "vendor/prompt-model",
     apiKey: "sk-prompt-model-secret",
@@ -262,22 +262,15 @@ test("prompt model test calls the configured Responses endpoint and validates st
     now: () => "2026-07-17T00:00:00.000Z",
     fetchImpl: async (url, init) => {
       request = { url, init, body: JSON.parse(init.body) };
-      return new Response(JSON.stringify({ output_text: JSON.stringify({ ok: true }) }), { status: 200 });
+      return new Response(JSON.stringify({ choices: [{ message: { content: "OK" } }] }), { status: 200 });
     },
   });
 
-  assert.equal(request.url, "https://models.example.com/v1/responses");
+  assert.equal(request.url, "https://models.example.com/v1/chat/completions");
   assert.equal(request.init.method, "POST");
   assert.equal(request.init.headers.authorization, "Bearer sk-prompt-model-secret");
   assert.equal(request.body.model, "vendor/prompt-model");
-  assert.equal(request.body.text.format.type, "json_schema");
-  assert.equal(request.body.text.format.strict, true);
-  assert.deepEqual(request.body.text.format.schema, {
-    type: "object",
-    properties: { ok: { type: "boolean", enum: [true] } },
-    required: ["ok"],
-    additionalProperties: false,
-  });
+  assert.deepEqual(request.body.messages, [{ role: "user", content: "只回复 OK" }]);
   assert.deepEqual(result, {
     ok: true,
     status: "success",
@@ -288,16 +281,16 @@ test("prompt model test calls the configured Responses endpoint and validates st
   assert.equal(JSON.stringify(result).includes("sk-prompt-model-secret"), false);
 });
 
-test("prompt model test rejects non-JSON and invalid structured output", async () => {
+test("prompt model test rejects responses without text", async () => {
   const config = updateModelConfig({ baseUrl: "https://models.example.com/v1" }, {
     model: "prompt-model",
     apiKey: "sk-prompt-invalid-response",
   }, { env });
-  for (const outputText of ["not-json", JSON.stringify({ ok: false }), JSON.stringify({ ok: true, extra: true })]) {
+  for (const response of [{}, { choices: [] }, { choices: [{ message: { content: "" } }] }]) {
     await assert.rejects(
       testPromptModel(config, {
         env,
-        fetchImpl: async () => new Response(JSON.stringify({ output_text: outputText }), { status: 200 }),
+        fetchImpl: async () => new Response(JSON.stringify(response), { status: 200 }),
       }),
       (error) => error instanceof ModelApiError
         && error.code === "MODEL_API_INVALID_RESPONSE"

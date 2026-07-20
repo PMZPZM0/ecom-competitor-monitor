@@ -137,6 +137,15 @@ test("local import routes reject cross-site writes and commit verified prices id
     });
     assert.equal(monitorPrice.status, 200);
 
+    const newCustomerGiftMonitor = await jsonRequest(`${baseUrl}/api/products/${firstCommit.body.product.id}/sku-monitor-price`, {
+      method: "PATCH",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ skuId, value: 120, channel: "gift" }),
+    });
+    assert.equal(newCustomerGiftMonitor.status, 200);
+    assert.equal(newCustomerGiftMonitor.body.accountType, "normal");
+    assert.equal(newCustomerGiftMonitor.body.skuMonitorRules[skuId].gift, 120);
+
     const nextPreview = await jsonRequest(previewUrl, {
       method: "POST",
       headers: { "content-type": "text/plain" },
@@ -156,6 +165,7 @@ test("local import routes reject cross-site writes and commit verified prices id
     assert.equal(overview.body.products.length, 1);
     assert.equal(overview.body.snapshots.length, 2);
     assert.equal(overview.body.products[0].skuMonitorPrices[skuId], 150);
+    assert.equal(overview.body.products[0].skuMonitorRules[skuId].gift, 120);
     assert.deepEqual(overview.body.runs.map((run) => run.source), ["local-import", "local-import"]);
 
     const enableLocalOnly = await jsonRequest(`${baseUrl}/api/products/${firstCommit.body.product.id}`, {

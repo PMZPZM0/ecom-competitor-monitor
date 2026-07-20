@@ -18,6 +18,12 @@ test("image routes accept multipart references and persist a manageable local li
   const baseUrl = `http://127.0.0.1:${address.port}`;
   const nativeFetch = globalThis.fetch.bind(globalThis);
   const png = await sharp({ create: { width: 20, height: 20, channels: 4, background: "#336699" } }).png().toBuffer();
+  const annotationResult = await sharp({ create: { width: 20, height: 20, channels: 4, background: "#f4f0e8" } }).png().toBuffer();
+  const maskPixels = Buffer.alloc(1024 * 1024 * 4, 255);
+  for (let row = 0; row < 1024; row += 1) {
+    for (let column = 0; column < 512; column += 1) maskPixels[(row * 1024 + column) * 4 + 3] = 0;
+  }
+  const annotationMask = await sharp(maskPixels, { raw: { width: 1024, height: 1024, channels: 4 } }).png().toBuffer();
   let upstreamRequest;
 
   try {
@@ -93,14 +99,21 @@ test("image routes accept multipart references and persist a manageable local li
     assert.equal(textOnly.appliedOptions.mode, "generate");
 
     const editInstruction = "改成白色陶瓷材质";
+    globalThis.fetch = async (url, init) => {
+      upstreamRequest = { url: String(url), init };
+      return new Response(JSON.stringify({ data: [{ b64_json: annotationResult.toString("base64") }] }), { status: 200 });
+    };
     const annotationForm = new FormData();
     annotationForm.append("request", JSON.stringify({ ...request, prompt: editInstruction, sourceImageId: textOnly.images[0].id, editMode: "annotation" }));
     annotationForm.append("referenceImages", new Blob([png], { type: "image/png" }), "annotation.png");
+    annotationForm.append("maskImage", new Blob([annotationMask], { type: "image/png" }), "annotation-mask.png");
     const annotationResponse = await nativeFetch(`${baseUrl}/api/images/generate`, { method: "POST", body: annotationForm });
     const annotation = await annotationResponse.json();
     assert.equal(annotationResponse.status, 200);
     assert.equal(annotation.images[0].prompt, editInstruction);
     assert.doesNotMatch(annotation.images[0].prompt, /局部批注编辑任务/);
+    assert.equal(annotation.appliedOptions.maskApplied, true);
+    assert.ok(upstreamRequest.init.body.get("mask") instanceof Blob);
     assert.match(String(upstreamRequest.init.body.get("prompt")), /局部批注编辑任务/);
     assert.match(String(upstreamRequest.init.body.get("prompt")), /修改内容：改成白色陶瓷材质/);
     await nativeFetch(`${baseUrl}/api/images/${annotation.images[0].id}`, { method: "DELETE" });

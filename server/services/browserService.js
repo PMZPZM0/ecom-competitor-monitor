@@ -1,6 +1,7 @@
 import fs from "node:fs";
 import net from "node:net";
 import path from "node:path";
+import { randomUUID } from "node:crypto";
 import { execFile, spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
 
@@ -10,6 +11,7 @@ const profileDir = path.join(profileRoot, "legacy");
 const accountProfilesDir = profileRoot;
 const remotePort = Number(process.env.TAOBAO_BROWSER_PORT || 9223);
 const taobaoAuthUrls = ["https://i.taobao.com/my_taobao.htm", "https://www.taobao.com/", "https://detail.tmall.com/"];
+const tmallSsoSyncHosts = new Set(["pass.tmall.com", "pass.tmall.hk"]);
 const browserProcesses = new Map();
 const browserStartPromises = new Map();
 const browserModes = new Map();
@@ -19,15 +21,26 @@ export function browserRuntimeInfo() {
   return { profileDir: accountProfilesDir, captureBrowserIdleMs: 0 };
 }
 
-export function skuIdFromNetworkUrl(value) {
+function identityFromNetworkUrl(value) {
   try {
     const parsed = new URL(value);
     const data = JSON.parse(parsed.searchParams.get("data") || "{}");
     const exParams = typeof data.exParams === "string" ? JSON.parse(data.exParams) : data.exParams || {};
-    return String(exParams.skuId || data.skuId || data.selectSkuId || parsed.searchParams.get("skuId") || "");
+    return {
+      itemId: String(exParams.itemId || exParams.itemNumId || data.itemId || data.itemNumId || data.id || parsed.searchParams.get("itemId") || parsed.searchParams.get("id") || ""),
+      skuId: String(exParams.skuId || data.skuId || data.selectSkuId || parsed.searchParams.get("skuId") || ""),
+    };
   } catch {
-    return "";
+    return { itemId: "", skuId: "" };
   }
+}
+
+export function itemIdFromNetworkUrl(value) {
+  return identityFromNetworkUrl(value).itemId;
+}
+
+export function skuIdFromNetworkUrl(value) {
+  return identityFromNetworkUrl(value).skuId;
 }
 
 function parseNetworkBody(body) {
@@ -41,19 +54,65 @@ function parseNetworkBody(body) {
   }
 }
 
-export function skuIdFromNetworkBody(body) {
+function identityFromNetworkBody(body) {
   const value = parseNetworkBody(body)?.data?.componentsVO?.xsRedPacketParamVO?.trackParams;
-  if (!value) return "";
+  if (!value) return { itemId: "", skuId: "" };
   try {
     const trackParams = typeof value === "string" ? JSON.parse(value) : value;
-    return String(trackParams?.skuId || "");
+    return {
+      itemId: String(trackParams?.itemId || trackParams?.itemNumId || ""),
+      skuId: String(trackParams?.skuId || ""),
+    };
   } catch {
-    return "";
+    return { itemId: "", skuId: "" };
   }
+}
+
+export function itemIdFromNetworkBody(body) {
+  return identityFromNetworkBody(body).itemId;
+}
+
+export function skuIdFromNetworkBody(body) {
+  return identityFromNetworkBody(body).skuId;
+}
+
+export function tmallSsoSyncUrlsFromSilentLogin(body) {
+  const data = parseNetworkBody(body)?.content?.data;
+  const candidates = Array.isArray(data?.asyncUrls) ? data.asyncUrls : [];
+  const urls = [];
+  for (const candidate of candidates) {
+    try {
+      const url = new URL(String(candidate));
+      if (url.protocol !== "https:"
+        || !tmallSsoSyncHosts.has(url.hostname)
+        || url.port
+        || url.username
+        || url.password
+        || url.pathname !== "/add") continue;
+      urls.push(url.toString());
+    } catch {
+      // Ignore malformed or untrusted bridge URLs returned by the login page.
+    }
+  }
+  return [...new Set(urls)];
 }
 
 export function isTmallSilentLoginResponse(value) {
   return /\/newlogin\/silentHasLogin\.do/i.test(String(value || ""));
+}
+
+export function isTrustedTmallSilentLoginResponse(value) {
+  try {
+    const url = new URL(String(value || ""));
+    return url.protocol === "https:"
+      && url.hostname === "login.taobao.com"
+      && !url.port
+      && !url.username
+      && !url.password
+      && url.pathname === "/newlogin/silentHasLogin.do";
+  } catch {
+    return false;
+  }
 }
 
 export function isTmallSessionCookie(cookie = {}) {
@@ -100,6 +159,43 @@ export async function resetTmallSession(options = {}) {
   return expiredCookies.length;
 }
 
+// Tmall returns one-time same-browser SSO bridge URLs after a Taobao login.
+// They are consumed only inside the authorized browser tab and never become
+// part of capturedPage, the local evidence file, logs, or backend requests.
+async function refreshTmallSsoFromCapturedLogin(cdp, responses, productUrl) {
+  const silentResponses = [...responses.entries()].filter(([, response]) => isTrustedTmallSilentLoginResponse(response.url));
+  if (!silentResponses.length) return false;
+
+  const bodyResults = await Promise.allSettled(silentResponses.map(async ([requestId]) => {
+    const result = await cdp.send("Network.getResponseBody", { requestId }, 5000);
+    return tmallSsoSyncUrlsFromSilentLogin(result.body);
+  }));
+  const syncUrls = [...new Set(bodyResults.flatMap((result) => result.status === "fulfilled" ? result.value : []))];
+  if (!syncUrls.length) return false;
+
+  await cdp.send("Runtime.evaluate", {
+    expression: `new Promise((resolve) => {
+      const urls = ${JSON.stringify(syncUrls)};
+      let pending = urls.length;
+      const finish = () => { pending -= 1; if (pending <= 0) resolve(true); };
+      for (const url of urls) {
+        const script = document.createElement('script');
+        const timer = setTimeout(() => { script.remove(); finish(); }, 4000);
+        script.async = true;
+        script.src = url;
+        script.onload = script.onerror = () => { clearTimeout(timer); script.remove(); finish(); };
+        document.head.appendChild(script);
+      }
+    })`,
+    awaitPromise: true,
+    returnByValue: true,
+  }, 10000);
+  responses.clear();
+  await cdp.send("Page.navigate", { url: productUrl }, 10000);
+  await new Promise((resolve) => setTimeout(resolve, 7000));
+  return true;
+}
+
 export function isBuyerShowResponseUrl(value) {
   return /(?:rate|review|comment|evaluate)/i.test(String(value || ""));
 }
@@ -107,10 +203,10 @@ export function isBuyerShowResponseUrl(value) {
 export function shouldCaptureNetworkResponse(response = {}, type = "") {
   const responseUrl = String(response.url || "");
   const mimeType = String(response.mimeType || "");
-  if (isTmallSilentLoginResponse(responseUrl)) return false;
   const relevantUrl = /(?:\/h5\/mtop|mtop\.|detail|promotion|benefit|price|sku|rate|review|comment|evaluate|feed|silentHasLogin)/i.test(responseUrl);
   const dataResponse = /json/i.test(mimeType) || /XHR|Fetch/i.test(type);
-  return relevantUrl && dataResponse && Number(response.status || 0) < 400;
+  const silentLoginBridge = isTmallSilentLoginResponse(responseUrl);
+  return relevantUrl && (dataResponse || silentLoginBridge) && Number(response.status || 0) < 400;
 }
 
 export function canReuseBrowser(runtimeHeadless, requestedHeadless) {
@@ -337,7 +433,7 @@ export function createTaobaoAccessRestrictedError(text = "", now = Date.now()) {
   const until = match
     ? Date.parse(`${match[1]}-${match[2].padStart(2, "0")}-${match[3].padStart(2, "0")}T${match[4].padStart(2, "0")}:${(match[5] || "0").padStart(2, "0")}:00+08:00`)
     : 0;
-  const error = new Error("淘宝已限制当前账号访问，自动抓取已立即停止；请等待页面提示恢复后再检测，期间不要重复抓取或重新授权。");
+  const error = new Error("淘宝已限制当前账号访问，本次抓取已停止；全局自动监控保持原设置。请按页面提示恢复后再抓取，避免连续重试或重复授权。");
   error.code = "TAOBAO_ACCESS_RESTRICTED";
   error.status = 423;
   error.retryAfterMs = Number.isFinite(until) && until > now ? until - now + 5 * 60_000 : 24 * 60 * 60_000;
@@ -863,7 +959,8 @@ export async function getRenderedHtml(url, authSession = {}, renderOptions = {})
     const priceResponses = new Map();
     const buyerShowResponses = new Map();
     const buyerShowInteractions = [];
-    let pcdetailResponseCount = 0;
+    const captureRunId = randomUUID();
+    let pcdetailResponseSequence = 0;
     const requestedSelections = Array.isArray(renderOptions.selectSkus) ? renderOptions.selectSkus : [];
     if (requestedSelections.length && !preserveCache) await cdp.send("Network.clearBrowserCache");
     const priceResponseLimit = requestedSelections.length || Array.isArray(renderOptions.selectSkuNames) ? 240 : 60;
@@ -874,9 +971,16 @@ export async function getRenderedHtml(url, authSession = {}, renderOptions = {})
       if (!shouldCaptureNetworkResponse(response, type)) return;
       const target = buyerShowUrl ? buyerShowResponses : priceResponses;
       const limit = buyerShowUrl ? 80 : priceResponseLimit;
+      const isPcdetailResponse = /mtop\.taobao\.pcdetail\.data\.adjust/i.test(responseUrl);
+      const responseSequence = isPcdetailResponse ? ++pcdetailResponseSequence : null;
       if (target.size < limit) {
-        target.set(requestId, { url: responseUrl, mimeType, responseKind: buyerShowUrl ? "buyer-show" : "price" });
-        if (/mtop\.taobao\.pcdetail\.data\.adjust/i.test(responseUrl)) pcdetailResponseCount += 1;
+        target.set(requestId, {
+          url: responseUrl,
+          mimeType,
+          responseKind: buyerShowUrl ? "buyer-show" : "price",
+          captureRunId,
+          ...(responseSequence ? { responseSequence } : {}),
+        });
       }
     });
     await cdp.send("Runtime.enable");
@@ -893,6 +997,8 @@ export async function getRenderedHtml(url, authSession = {}, renderOptions = {})
     await cdp.send("Page.navigate", { url });
     await new Promise((resolve) => setTimeout(resolve, 7000));
     await assertNoAccessRestriction();
+    await refreshTmallSsoFromCapturedLogin(cdp, priceResponses, url);
+    await assertNoAccessRestriction();
     const selectSkuNames = Array.isArray(renderOptions.selectSkuNames)
       ? renderOptions.selectSkuNames.filter(Boolean)
       : renderOptions.selectSkuName ? [renderOptions.selectSkuName] : [];
@@ -900,11 +1006,19 @@ export async function getRenderedHtml(url, authSession = {}, renderOptions = {})
     for (const selection of requestedSelections) {
       const skuId = String(selection?.skuId || "");
       const valueIds = Array.from(new Set((selection?.valueIds || []).map(String).filter(Boolean)));
+      const responseSequenceStartExclusive = pcdetailResponseSequence;
       if (!skuId || !valueIds.length) {
-        selectionResults.push({ skuId, selected: false, responseReceivedAfterSelection: false, reason: "missing-selection-ids" });
+        selectionResults.push({
+          skuId,
+          selected: false,
+          responseReceivedAfterSelection: false,
+          captureRunId,
+          responseSequenceStartExclusive,
+          responseSequenceEndInclusive: pcdetailResponseSequence,
+          reason: "missing-selection-ids",
+        });
         continue;
       }
-      const responseCountBeforeSelection = pcdetailResponseCount;
       const selectionResult = await cdp.send("Runtime.evaluate", {
         expression: `(async () => {
           const valueIds = ${JSON.stringify(valueIds)};
@@ -929,19 +1043,22 @@ export async function getRenderedHtml(url, authSession = {}, renderOptions = {})
       let responseReceivedAfterSelection = false;
       if (selectionResult.result?.value?.selected) {
         const deadline = Date.now() + 8000;
-        while (Date.now() < deadline && pcdetailResponseCount <= responseCountBeforeSelection) {
+        while (Date.now() < deadline && pcdetailResponseSequence <= responseSequenceStartExclusive) {
           await new Promise((resolve) => setTimeout(resolve, 100));
         }
-        responseReceivedAfterSelection = pcdetailResponseCount > responseCountBeforeSelection;
+        responseReceivedAfterSelection = pcdetailResponseSequence > responseSequenceStartExclusive;
+        if (responseReceivedAfterSelection) await new Promise((resolve) => setTimeout(resolve, 600));
       }
       selectionResults.push({
         skuId,
         selected: Boolean(selectionResult.result?.value?.selected),
         responseReceivedAfterSelection,
+        captureRunId,
+        responseSequenceStartExclusive,
+        responseSequenceEndInclusive: pcdetailResponseSequence,
         clicked: selectionResult.result?.value?.clicked || [],
         reason: selectionResult.result?.value?.missing ? `missing-value:${selectionResult.result.value.missing}` : responseReceivedAfterSelection ? "response-received" : "response-timeout",
       });
-      if (responseReceivedAfterSelection) await new Promise((resolve) => setTimeout(resolve, 600));
       await assertNoAccessRestriction();
     }
     for (const selectSkuName of selectSkuNames) {

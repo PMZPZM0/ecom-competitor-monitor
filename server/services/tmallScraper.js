@@ -1,8 +1,8 @@
 import * as cheerio from "cheerio";
 import crypto from "node:crypto";
 import { assertMatchingProductId } from "../utils/productUrl.js";
-import { createTaobaoAccessRestrictedError, getRenderedHtml, isTaobaoAccessRestrictedDocument, isTaobaoLoginDocument, isTaobaoLoginUrl, skuIdFromNetworkBody, skuIdFromNetworkUrl } from "./browserService.js";
-import { applyPriceResolution, PRICE_PARSER_VERSION, resolveEmbeddedSkuPriceEvidence, resolveSkuPriceEvidence, selectAuthoritativePriceResolution } from "./priceResolver.js";
+import { createTaobaoAccessRestrictedError, getRenderedHtml, isTaobaoAccessRestrictedDocument, isTaobaoLoginDocument, isTaobaoLoginUrl, isTmallSilentLoginResponse, itemIdFromNetworkBody, itemIdFromNetworkUrl, skuIdFromNetworkBody, skuIdFromNetworkUrl } from "./browserService.js";
+import { applyItemScopedNewCustomerGift, applyPriceResolution, PRICE_PARSER_VERSION, resolveEmbeddedPromotionPriceEvidence, resolveEmbeddedSkuPriceEvidence, resolveSkuPriceEvidence, selectAuthoritativePriceResolution } from "./priceResolver.js";
 
 export const SCRAPER_VERSION = "2.0.7";
 
@@ -440,22 +440,39 @@ function readBalancedValue(source, startIndex) {
   return null;
 }
 
-function extractObjectByKey(html, key) {
+function extractObjectByKey(html, key, accept = () => true) {
   const patterns = [`"${key}"`, `'${key}'`, key];
   for (const pattern of patterns) {
-    const index = html.indexOf(pattern);
-    if (index < 0) continue;
-    const colonIndex = html.indexOf(":", index + pattern.length);
-    if (colonIndex < 0) continue;
-    const raw = readBalancedObject(html, colonIndex + 1);
-    if (!raw) continue;
-    try {
-      return JSON.parse(raw);
-    } catch {
-      // Try the next occurrence/pattern; some inline objects are partial or escaped.
+    let fromIndex = 0;
+    while (fromIndex < html.length) {
+      const index = html.indexOf(pattern, fromIndex);
+      if (index < 0) break;
+      fromIndex = index + pattern.length;
+      const colonIndex = html.indexOf(":", fromIndex);
+      if (colonIndex < 0) break;
+      const raw = readBalancedObject(html, colonIndex + 1);
+      if (!raw) continue;
+      try {
+        const parsed = JSON.parse(raw);
+        if (accept(parsed)) return parsed;
+      } catch {
+        // Inline state can contain an earlier placeholder before the complete object.
+      }
     }
   }
   return null;
+}
+
+export function extractEmbeddedPromotionComponent(html) {
+  const component = extractObjectByKey(
+    String(html || ""),
+    "xsRedPacketParamVO",
+    (candidate) => candidate
+      && typeof candidate === "object"
+      && !Array.isArray(candidate)
+      && (candidate.trackParams != null || candidate.xsRedPocketParams != null),
+  );
+  return component && typeof component === "object" && !Array.isArray(component) ? component : null;
 }
 
 function extractValueByKey(html, key) {
@@ -630,12 +647,16 @@ function collectCommerceImages(value, images = []) {
   return images;
 }
 
-export function extractShopName(html, jsonData, domData, pageUrl = "") {
+function isTmallSupermarketDetailUrl(value) {
   try {
-    if (new URL(pageUrl).hostname.toLowerCase() === "chaoshi.detail.tmall.com") return "天猫超市";
+    return new URL(value).hostname.toLowerCase() === "chaoshi.detail.tmall.com";
   } catch {
-    // Continue with page data when the final URL is unavailable.
+    return false;
   }
+}
+
+export function extractShopName(html, jsonData, domData, pageUrl = "") {
+  if (isTmallSupermarketDetailUrl(pageUrl)) return "天猫超市";
   const patterns = [
     /"seller_nickname"\s*:\s*"([^"]+)"/i,
     /"sellerNickname"\s*:\s*"([^"]+)"/i,
@@ -1580,6 +1601,53 @@ export function hasTmallPriceLoginGate(networkPayloads = [], pageText = "") {
   });
 }
 
+export function shouldRequireTmallPriceAuthorization(networkPayloads = [], embeddedResolutions = []) {
+  if (!hasTmallPriceLoginGate(networkPayloads)) return false;
+  const resolutions = embeddedResolutions instanceof Map
+    ? [...embeddedResolutions.values()]
+    : Array.from(embeddedResolutions || []);
+  return !resolutions.some((resolution) => (
+    resolution?.status === "verified"
+    && resolution?.channels?.normal?.status === "verified"
+  ));
+}
+
+export function gatedSelectionSkuIds(networkPayloads = [], selectionResults = []) {
+  const payloads = Array.from(networkPayloads || []);
+  return Array.from(new Set(Array.from(selectionResults || [])
+    .filter((selection) => (
+      selection?.selected === true
+      && selection?.responseObserved !== true
+      && /^[a-z0-9_-]{1,80}$/i.test(String(selection?.captureRunId || ""))
+      && Number.isSafeInteger(selection?.responseSequenceStartExclusive)
+      && Number.isSafeInteger(selection?.responseSequenceEndInclusive)
+      && payloads.some((payload) => (
+        payload?.captureRunId === selection.captureRunId
+        && Number.isSafeInteger(payload?.responseSequence)
+        && payload.responseSequence > selection.responseSequenceStartExclusive
+        && payload.responseSequence <= selection.responseSequenceEndInclusive
+        && hasTmallPriceLoginGate([payload])
+      ))
+    ))
+    .map((selection) => String(selection.skuId || ""))
+    .filter(Boolean)));
+}
+
+function mergePromotionCaptureRetry(initial, retry) {
+  const retriedSkuIds = new Set((retry.selectionResults || []).map((selection) => String(selection.skuId || "")));
+  return {
+    networkPayloads: [...(initial.networkPayloads || []), ...(retry.networkPayloads || [])],
+    skuNetworkPayloads: {
+      ...(initial.skuNetworkPayloads || {}),
+      ...(retry.skuNetworkPayloads || {}),
+    },
+    selectionResults: [
+      ...(initial.selectionResults || []).filter((selection) => !retriedSkuIds.has(String(selection.skuId || ""))),
+      ...(retry.selectionResults || []),
+    ],
+  };
+}
+
 function tmallPriceAuthRequiredError() {
   const error = new Error("淘宝账号仍在线，但天猫优惠价格授权未同步；本次未保存价格，请在账号授权中重新授权后重试。");
   error.code = "TMALL_PRICE_AUTH_REQUIRED";
@@ -1634,25 +1702,60 @@ export function resolveCaptureAccessMode(authSession, page = {}) {
 }
 
 function compactBrowserPayload(payload) {
+  const captureRunId = String(payload?.captureRunId || "");
+  const responseSequence = Number(payload?.responseSequence);
   return {
     url: String(payload?.url || ""),
     mimeType: String(payload?.mimeType || ""),
     responseKind: payload?.responseKind === "buyer-show" ? "buyer-show" : "price",
     body: String(payload?.body || ""),
+    ...(/^[a-z0-9_-]{1,80}$/i.test(captureRunId) ? { captureRunId } : {}),
+    ...(Number.isSafeInteger(responseSequence) && responseSequence > 0 ? { responseSequence } : {}),
+  };
+}
+
+function compactSelectionResult(selection) {
+  const captureRunId = String(selection?.captureRunId || "");
+  const start = Number(selection?.responseSequenceStartExclusive);
+  const end = Number(selection?.responseSequenceEndInclusive);
+  const validWindow = /^[a-z0-9_-]{1,80}$/i.test(captureRunId)
+    && Number.isSafeInteger(start)
+    && start >= 0
+    && Number.isSafeInteger(end)
+    && end >= start;
+  return {
+    skuId: String(selection?.skuId || ""),
+    selected: selection?.selected === true,
+    responseReceivedAfterSelection: selection?.responseReceivedAfterSelection === true,
+    clicked: Array.isArray(selection?.clicked) ? selection.clicked.map(String) : [],
+    reason: String(selection?.reason || ""),
+    ...(validWindow ? {
+      captureRunId,
+      responseSequenceStartExclusive: start,
+      responseSequenceEndInclusive: end,
+    } : {}),
   };
 }
 
 export function buildBrowserCaptureEvidence({ product, accountType, itemId, page, promotionCapture, capturedAt }) {
   const payloads = [];
   const seen = new Set();
-  for (const raw of [...(page.networkPayloads || []), ...(promotionCapture.networkPayloads || [])]) {
-    const payload = compactBrowserPayload(raw);
-    if (!payload.url || !payload.body) continue;
-    const fingerprint = crypto.createHash("sha256").update(`${payload.url}\n${payload.body}`).digest("hex");
-    if (seen.has(fingerprint)) continue;
-    seen.add(fingerprint);
-    payloads.push(payload);
-  }
+  const appendPayloads = (values) => {
+    for (const raw of values || []) {
+      if (isTmallSilentLoginResponse(raw?.url)) continue;
+      const payload = compactBrowserPayload(raw);
+      if (!payload.url || !payload.body) continue;
+      const fingerprint = crypto.createHash("sha256")
+        .update(`${payload.captureRunId || ""}\n${payload.responseSequence || ""}\n${payload.url}\n${payload.body}`)
+        .digest("hex");
+      if (seen.has(fingerprint)) continue;
+      seen.add(fingerprint);
+      payloads.push(payload);
+    }
+  };
+  // Selection responses win when legacy captures contain an identical page-load response.
+  appendPayloads(promotionCapture.networkPayloads);
+  appendPayloads(page.networkPayloads);
   return {
     captureType: "account-browser-local-source",
     capturedAt,
@@ -1669,36 +1772,52 @@ export function buildBrowserCaptureEvidence({ product, accountType, itemId, page
       accessVerified: resolveCaptureAccessMode({ source: "taobao-browser" }, page) === "authenticated",
       networkPayloads: payloads,
       buyerShowInteractions: Array.isArray(page.buyerShowInteractions) ? page.buyerShowInteractions : [],
-      selectionResults: Array.isArray(promotionCapture.selectionResults) ? promotionCapture.selectionResults.map((selection) => ({
-        skuId: String(selection?.skuId || ""),
-        selected: selection?.selected === true,
-        responseReceivedAfterSelection: selection?.responseReceivedAfterSelection === true,
-        clicked: Array.isArray(selection?.clicked) ? selection.clicked.map(String) : [],
-        reason: String(selection?.reason || ""),
-      })) : [],
+      selectionResults: Array.isArray(promotionCapture.selectionResults)
+        ? promotionCapture.selectionResults.map(compactSelectionResult)
+        : [],
     },
   };
 }
 
 function hydrateBrowserCapturePage(record) {
   const stored = record?.page || {};
+  const expectedItemId = String(record?.itemId || "");
   const networkPayloads = Array.isArray(stored.networkPayloads) ? stored.networkPayloads.map(compactBrowserPayload).map((payload) => {
+    const requestItemId = itemIdFromNetworkUrl(payload.url);
+    const responseItemId = itemIdFromNetworkBody(payload.body);
     const requestSkuId = skuIdFromNetworkUrl(payload.url);
     const responseSkuId = skuIdFromNetworkBody(payload.body);
-    const skuId = requestSkuId && responseSkuId && requestSkuId === responseSkuId ? requestSkuId : "";
-    return { ...payload, requestSkuId, responseSkuId, skuId };
+    const itemMatches = Boolean(expectedItemId && (requestItemId || responseItemId))
+      && (!requestItemId || requestItemId === expectedItemId)
+      && (!responseItemId || responseItemId === expectedItemId);
+    const skuMatches = Boolean(responseSkuId) && (!requestSkuId || requestSkuId === responseSkuId);
+    const skuId = itemMatches && skuMatches ? responseSkuId : "";
+    return { ...payload, requestItemId, responseItemId, requestSkuId, responseSkuId, skuId };
   }) : [];
-  const skuNetworkPayloads = Object.fromEntries(Array.from(new Set(networkPayloads.map((payload) => payload.skuId).filter(Boolean))).map((skuId) => [
+  const allSkuNetworkPayloads = Object.fromEntries(Array.from(new Set(networkPayloads.map((payload) => payload.skuId).filter(Boolean))).map((skuId) => [
     skuId,
     networkPayloads.filter((payload) => payload.skuId === skuId),
   ]));
-  const selectionResults = (Array.isArray(stored.selectionResults) ? stored.selectionResults : []).map((selection) => {
-    const skuId = String(selection?.skuId || "");
-    const responseObserved = selection?.selected === true
-      && selection?.responseReceivedAfterSelection === true
-      && (skuNetworkPayloads[skuId] || []).length > 0;
-    return { ...selection, skuId, responseObserved };
+  const storedSelections = (Array.isArray(stored.selectionResults) ? stored.selectionResults : []).map(compactSelectionResult);
+  const windowedSkuPayloads = new Map();
+  const selectionResults = storedSelections.map((selection) => {
+    const skuId = selection.skuId;
+    const windowPayloads = (allSkuNetworkPayloads[skuId] || []).filter((payload) => (
+      payload.captureRunId === selection.captureRunId
+      && Number.isSafeInteger(payload.responseSequence)
+      && payload.responseSequence > selection.responseSequenceStartExclusive
+      && payload.responseSequence <= selection.responseSequenceEndInclusive
+    ));
+    if (!windowedSkuPayloads.has(skuId)) windowedSkuPayloads.set(skuId, []);
+    windowedSkuPayloads.get(skuId).push(...windowPayloads);
+    const responseObserved = selection.selected === true
+      && selection.responseReceivedAfterSelection === true
+      && windowPayloads.length > 0;
+    return { ...selection, responseObserved };
   });
+  const skuNetworkPayloads = storedSelections.length
+    ? Object.fromEntries([...windowedSkuPayloads].map(([skuId, payloads]) => [skuId, payloads]))
+    : allSkuNetworkPayloads;
   return {
     html: String(stored.html || ""),
     visibleText: String(stored.visibleText || ""),
@@ -1862,6 +1981,15 @@ export async function scrapeTmallProduct(product, authSession, { renderPage = ge
   let mobilePromotionCapture = promotionCaptureSkus.length
     ? await fetchMobilePromotionPayloads(itemId, promotionCaptureSkus, authSession, renderPage, startedAt)
     : { networkPayloads: [], skuNetworkPayloads: {}, selectionResults: [] };
+  const gatedSkuIds = new Set(gatedSelectionSkuIds(
+    mobilePromotionCapture.networkPayloads,
+    mobilePromotionCapture.selectionResults,
+  ));
+  if (gatedSkuIds.size) {
+    const retrySkus = promotionCaptureSkus.filter((sku) => gatedSkuIds.has(String(sku.skuId)));
+    const retryCapture = await fetchMobilePromotionPayloads(itemId, retrySkus, authSession, renderPage, startedAt);
+    mobilePromotionCapture = mergePromotionCaptureRetry(mobilePromotionCapture, retryCapture);
+  }
   const promotionCaptureCompletedAt = Date.now();
   const reloaded = await persistAndReloadBrowserCapture(buildBrowserCaptureEvidence({
     product,
@@ -1879,20 +2007,21 @@ export async function scrapeTmallProduct(product, authSession, { renderPage = ge
   assertMatchingProductId(product.url, extractItemId(page.finalUrl, product.url, html), page.finalUrl);
   if (accessMode !== "authenticated") throw new Error("本地采集文件未通过账号访问校验，已停止解析。");
 
-  if (hasTmallPriceLoginGate([...(page.networkPayloads || []), ...(mobilePromotionCapture.networkPayloads || [])])) {
-    throw tmallPriceAuthRequiredError();
-  }
-
   const jsonData = extractFromJson(parseJsonBlobs(html));
   const domData = extractFromDom(html);
   if (domData.title === "登录" && !/skuCore|skuBase/i.test(html)) {
     throw new Error("当前抓到的是登录页，请在账号授权中重新同步淘宝扫码会话。");
   }
   const structuredSku = extractStructuredSku(html);
+  const embeddedPromotionComponent = extractEmbeddedPromotionComponent(html);
   const embeddedResolutions = new Map(structuredSku.skuPrices.map((sku) => [
     String(sku.skuId),
     resolveEmbeddedSkuPriceEvidence(sku, { itemId, skuId: sku.skuId, accountType, capturedAt: startedAt }),
   ]));
+  const finalPricePayloads = [...(page.networkPayloads || []), ...(mobilePromotionCapture.networkPayloads || [])];
+  if (shouldRequireTmallPriceAuthorization(finalPricePayloads, embeddedResolutions)) {
+    throw tmallPriceAuthRequiredError();
+  }
   const excludedPromotionSkuImages = new Set(structuredSku.skuPrices
     .filter((sku) => isUnselectablePromotionSku(sku, mobilePromotionCapture.selectionResults.find((item) => String(item.skuId) === String(sku.skuId))))
     .map((sku) => sku.image)
@@ -1902,8 +2031,6 @@ export async function scrapeTmallProduct(product, authSession, { renderPage = ge
     mobilePromotionCapture.selectionResults.find((item) => String(item.skuId) === String(sku.skuId)),
   ));
   structuredSku.skuImages = structuredSku.skuImages.filter((image) => !excludedPromotionSkuImages.has(image));
-  const visibleText = page.visibleText || cheerio.load(html)("body").text();
-  const governmentProgramObserved = /政府补贴|国家补贴|国补/.test(visibleText);
   structuredSku.skuPrices = structuredSku.skuPrices.map((sku) => {
     const skuPayloads = [
       ...(page.skuNetworkPayloads?.[sku.skuId] || []),
@@ -1918,8 +2045,21 @@ export async function scrapeTmallProduct(product, authSession, { renderPage = ge
       capturedAt: startedAt,
     });
     const embeddedResolution = embeddedResolutions.get(String(sku.skuId));
-    const authoritativeResolution = selectAuthoritativePriceResolution(resolution, embeddedResolution, { governmentProgramObserved });
-    return applyPriceResolution(sku, authoritativeResolution);
+    const embeddedPromotionResolution = resolveEmbeddedPromotionPriceEvidence(embeddedPromotionComponent, {
+      itemId,
+      skuId: sku.skuId,
+      accountType,
+      capturedAt: startedAt,
+    });
+    const explicitResolution = selectAuthoritativePriceResolution(resolution, embeddedPromotionResolution);
+    const authoritativeResolution = selectAuthoritativePriceResolution(explicitResolution, embeddedResolution);
+    const scopedResolution = applyItemScopedNewCustomerGift(authoritativeResolution, embeddedPromotionComponent, {
+      itemId,
+      skuId: sku.skuId,
+      accountType,
+      capturedAt: startedAt,
+    });
+    return applyPriceResolution(sku, scopedResolution);
   });
   const shopName = extractShopName(html, jsonData, domData, page.finalUrl);
   const shopLogo = extractShopLogo(html, jsonData, domData);
@@ -1958,8 +2098,7 @@ export async function scrapeTmallProduct(product, authSession, { renderPage = ge
   const buyerShowCompletedAt = Date.now();
   media.buyerShows = buyerShowCapture.items;
   const mainImages = media.mainImages;
-  const rawSkuPrices = structuredSku.skuPrices;
-  const skuPrices = rawSkuPrices.map((sku) => sku.resolutionStatus === "verified" ? { ...sku, ...resolveCoinBenefit(sku) } : sku);
+  const skuPrices = structuredSku.skuPrices;
   const observedSkuCount = skuPrices.length;
   const verifiedSkuCount = skuPrices.filter((sku) => sku.resolutionStatus === "verified").length;
   const verifiedPrices = skuPrices

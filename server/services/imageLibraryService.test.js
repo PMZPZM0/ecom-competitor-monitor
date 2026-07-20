@@ -73,6 +73,24 @@ test("generated images persist locally and support favorite, archive, file and d
   await assert.rejects(readGeneratedImageFile(saved.id), (error) => error.status === 404);
 });
 
+test("public image records never expose internal prompt rules from an upstream revised prompt", async () => {
+  const png = await sharp({ create: { width: 16, height: 16, channels: 4, background: "#112233" } }).png().toBuffer();
+  const [saved] = await saveGeneratedImages([generatedImage(png, {
+    revisedPrompt: "Model summary before 基础质量规范：internal rules 以下为服务端硬约束 should stay hidden",
+  })], {
+    prompt: "国庆活动海报",
+    ratio: "1:1",
+    resolution: "1k",
+    quality: "medium",
+    background: "auto",
+    model: "gpt-image-2",
+  });
+
+  assert.equal(saved.revisedPrompt, "");
+  assert.equal((await listGeneratedImages()).find((item) => item.id === saved.id)?.revisedPrompt, "");
+  await deleteGeneratedImage(saved.id);
+});
+
 test("manifest writes retry transient rename failures", async (t) => {
   const originalRename = fs.rename.bind(fs);
   let transientFailures = 0;
@@ -142,12 +160,13 @@ test("a saved source image becomes the first edit image and records transparent 
   assert.ok(submitted instanceof FormData);
   assert.ok(submitted.get("image") instanceof Blob);
   assert.ok(submitted.get("mask") instanceof Blob);
-  assert.match(String(submitted.get("prompt")), /只修改透明蒙版覆盖的区域/);
+  assert.match(String(submitted.get("prompt")), /透明蒙版区域是唯一允许修改的范围/);
   assert.match(String(submitted.get("prompt")), /修改内容：replace the transparent area/);
   assert.equal(generated.appliedOptions.referenceImageCount, 1);
   assert.equal(generated.appliedOptions.maskApplied, true);
 
   let annotationSubmitted;
+  const changed = await sharp({ create: { width: 12, height: 12, channels: 4, background: "#111111" } }).png().toBuffer();
   await generateImages({
     baseUrl: "https://models.example.com/v1",
     imageModel: "gpt-image-2",
@@ -164,15 +183,36 @@ test("a saved source image becomes the first edit image and records transparent 
     sourceImageId: saved.id,
   }, {
     referenceImages: [{ buffer: source, mimetype: "image/png", originalname: "annotation.png" }],
+    maskImage: { buffer: mask, mimetype: "image/png", originalname: "annotation-mask.png" },
     fetchImpl: async (_url, init) => {
       annotationSubmitted = init.body;
-      return new Response(JSON.stringify({ data: [{ b64_json: source.toString("base64") }] }), { status: 200 });
+      return new Response(JSON.stringify({ data: [{ b64_json: changed.toString("base64") }] }), { status: 200 });
     },
   });
   assert.equal(annotationSubmitted.getAll("image[]").length, 2);
+  assert.ok(annotationSubmitted.get("mask") instanceof Blob);
   assert.match(String(annotationSubmitted.get("prompt")), /第一张图片是待编辑原图/);
   assert.match(String(annotationSubmitted.get("prompt")), /最后一张带编号框选或备注点的图片/);
   assert.match(String(annotationSubmitted.get("prompt")), /修改内容：remove the marked copy/);
+  await assert.rejects(generateImages({
+    baseUrl: "https://models.example.com/v1",
+    imageModel: "gpt-image-2",
+    apiKey: "sk-local-test",
+  }, {
+    prompt: "1. 框选区域：文字润色一下",
+    editMode: "annotation",
+    ratio: "1:1",
+    resolution: "1k",
+    quality: "medium",
+    format: "png",
+    background: "auto",
+    count: 1,
+    sourceImageId: saved.id,
+  }, {
+    referenceImages: [{ buffer: source, mimetype: "image/png", originalname: "annotation.png" }],
+    maskImage: { buffer: mask, mimetype: "image/png", originalname: "annotation-mask.png" },
+    fetchImpl: async () => new Response(JSON.stringify({ data: [{ b64_json: source.toString("base64") }] }), { status: 200 }),
+  }), (error) => error.code === "IMAGE_EDIT_NO_VISIBLE_CHANGE" && error.retryable === true);
   await deleteGeneratedImage(saved.id);
 });
 
@@ -209,7 +249,7 @@ test("image edit modes must match their real source, annotation and mask files",
   await assert.rejects(generateImages({ apiKey: "sk-test" }, { prompt: "edit", editMode: "annotation" }, {
     referenceImages: [reference],
     maskImage: { buffer: transparentMask, mimetype: "image/png", originalname: "mask.png" },
-  }), (error) => error.code === "IMAGE_EDIT_MODE_MISMATCH");
+  }), (error) => error.code === "IMAGE_EDIT_ANNOTATION_MISSING");
 });
 
 test("concurrent library writes are serialized without dropping records", async () => {

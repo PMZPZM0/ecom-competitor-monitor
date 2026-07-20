@@ -11,9 +11,10 @@ export const MONITOR_CHANNELS = Object.freeze([
 ]);
 
 const ACCOUNT_CHANNELS = Object.freeze({
-  // Campaign channels are public price evidence and are available from every
-  // authenticated account type. Account-specific channels remain scoped below.
-  normal: Object.freeze(["normal", "billion", "seckill", "government", "surprise", "coin"]),
+  // Gift eligibility is resolved from the exact promotion code upstream. A
+  // verified gift channel can therefore be public new-customer evidence even
+  // on a normal account; restricted gift codes remain unavailable there.
+  normal: Object.freeze(["normal", "billion", "seckill", "government", "surprise", "gift", "coin"]),
   gift: Object.freeze(["normal", "billion", "seckill", "government", "surprise", "gift", "coin"]),
   vip88: Object.freeze(["normal", "billion", "seckill", "government", "surprise", "gift", "vip88", "coin"]),
 });
@@ -37,9 +38,17 @@ function thresholdToCents(value) {
   return Number.isSafeInteger(cents) && cents > 0 ? cents : null;
 }
 
-function verifiedChannelCents(sku, channel) {
+function restrictedFirstOrderGift(sku, accountType) {
+  return accountType !== "vip88" && (sku?.priceResolution?.promotions || [])
+    .some((promotion) => String(promotion?.code || "") === "1");
+}
+
+function verifiedChannelCents(sku, channel, accountType) {
   const resolution = sku?.priceResolution?.channels?.[channel];
-  return resolution?.status === "verified"
+  return sku?.resolutionStatus === "verified"
+    && sku?.priceResolution?.status === "verified"
+    && resolution?.status === "verified"
+    && !(channel === "gift" && restrictedFirstOrderGift(sku, accountType))
     && Number.isSafeInteger(resolution.valueCents)
     && resolution.valueCents > 0
     ? resolution.valueCents
@@ -51,7 +60,7 @@ function resolveMonitorPrice(sku, accountType, channel) {
   if (channel !== "lowest" && !supported.includes(channel)) return null;
 
   const candidates = (channel === "lowest" ? supported : [channel])
-    .map((candidate) => ({ channel: candidate, priceCents: verifiedChannelCents(sku, candidate) }))
+    .map((candidate) => ({ channel: candidate, priceCents: verifiedChannelCents(sku, candidate, accountType) }))
     .filter((candidate) => candidate.priceCents !== null);
   return candidates.reduce((lowest, candidate) => (
     !lowest || candidate.priceCents < lowest.priceCents ? candidate : lowest

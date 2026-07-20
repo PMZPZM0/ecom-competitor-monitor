@@ -3,6 +3,7 @@ import { useEffect, useRef } from 'react'
 import { createPortal } from 'react-dom'
 import { Button } from '../../components/ui/button'
 import type { ImageLibraryItem } from '../../types/domain'
+import { visibleNegativePrompt, visiblePrompt } from '../prompt-studio/promptLayers'
 
 type Props = {
   item: ImageLibraryItem
@@ -30,6 +31,8 @@ const qualityLabel = { low: '快速', medium: '标准', high: '高清' }
 
 export function ImageDetailDialog({ item, src, busy, onClose, onDownload, onDelete, onToggleFavorite, onEdit, photoshopStatus, onPhotoshopOpen, onPhotoshopSync, onViewPhotoshopVersion, onReuse, onCreateFrom }: Props) {
   const dialogRef = useRef<HTMLDivElement>(null)
+  const displayPrompt = visiblePrompt(item.prompt)
+  const displayNegativePrompt = visibleNegativePrompt(item.negativePrompt)
 
   useEffect(() => {
     const previousOverflow = document.body.style.overflow
@@ -89,9 +92,8 @@ export function ImageDetailDialog({ item, src, busy, onClose, onDownload, onDele
               {item.parentImageId && <div className="col-span-2"><dt className="text-xs text-slate-400">版本来源</dt><dd className="mt-1 truncate font-medium text-slate-800">基于 {item.parentImageId} 创作{item.maskApplied ? ' · 蒙版编辑' : ''}</dd></div>}
             </dl>
 
-            <section className="mt-4"><h3 className="text-sm font-medium text-slate-800">正向提示词</h3><p className="mt-2 whitespace-pre-wrap break-words text-sm leading-6 text-slate-600">{item.prompt || '--'}</p></section>
-            {item.negativePrompt && <section className="mt-4"><h3 className="text-sm font-medium text-slate-800">排除要求</h3><p className="mt-2 whitespace-pre-wrap break-words text-sm leading-6 text-slate-600">{item.negativePrompt}</p></section>}
-            {item.revisedPrompt && item.revisedPrompt !== item.prompt && <section className="mt-4 border-t border-slate-100 pt-4"><h3 className="text-sm font-medium text-slate-800">模型改写提示词</h3><p className="mt-2 whitespace-pre-wrap break-words text-sm leading-6 text-slate-500">{item.revisedPrompt}</p></section>}
+            <section className="mt-4"><h3 className="text-sm font-medium text-slate-800">创意方案</h3><p className="mt-2 whitespace-pre-wrap break-words text-sm leading-6 text-slate-600">{displayPrompt || '--'}</p></section>
+            {displayNegativePrompt && <section className="mt-4"><h3 className="text-sm font-medium text-slate-800">排除要求</h3><p className="mt-2 whitespace-pre-wrap break-words text-sm leading-6 text-slate-600">{displayNegativePrompt}</p></section>}
           </aside>
         </div>
       </div>

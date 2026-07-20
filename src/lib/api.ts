@@ -1,5 +1,5 @@
 import type { Analysis, AuthSession, CaptureQueueStatus, ImageGenerationJob, ImageGenerationRequest, ImageGenerationResponse, ImageLibraryItem, LarkCliStatus, LocalEvidenceStatus, LocalImportCommitResult, LocalImportPreview, ModelCatalog, ModelCatalogRequest, ModelConfigPatch, ModelConfigTestPayload, ModelConfigTestResult, MonitorChannel, Overview, PhotoshopOpenResult, PhotoshopSyncResult, Product, RawDataCaptureResult, RunRecord, Snapshot, UpdateInfo } from '../types/domain'
-import type { ProductRecognitionResult, PromptGenerationRequest, PromptGenerationResult, PromptHistoryItem, PromptProductProfile, PromptReferenceFiles, PromptStudioWorkspace, PromptStylePreset, QuickPromptGenerationResult, QuickPromptRequest } from '../features/prompt-studio/types'
+import type { ProductRecognitionResult, PromptEnhancementResult, PromptGenerationRequest, PromptGenerationResult, PromptHistoryItem, PromptProductProfile, PromptReferenceFiles, PromptStudioWorkspace, PromptStylePreset, QuickPromptGenerationResult, QuickPromptRequest } from '../features/prompt-studio/types'
 
 const baseUrl = import.meta.env.VITE_API_BASE || ''
 
@@ -102,6 +102,12 @@ export const api = {
     body.append('request', JSON.stringify(payload))
     files.productReferenceFiles.forEach((file) => body.append('productImages', file, file.name))
     return request<QuickPromptGenerationResult>('/api/prompt-studio/quick-generate', { method: 'POST', body })
+  },
+  enhanceImagePrompt: (payload: QuickPromptRequest, files: PromptReferenceFiles) => {
+    const body = new FormData()
+    body.append('request', JSON.stringify(payload))
+    files.productReferenceFiles.forEach((file) => body.append('productImages', file, file.name))
+    return request<PromptEnhancementResult>('/api/prompt-studio/enhance', { method: 'POST', body })
   },
   createPromptProductProfile: (payload: Omit<PromptProductProfile, 'id' | 'updatedAt'>) =>
     request<PromptProductProfile>('/api/prompt-studio/product-profiles', { method: 'POST', body: JSON.stringify(payload) }),

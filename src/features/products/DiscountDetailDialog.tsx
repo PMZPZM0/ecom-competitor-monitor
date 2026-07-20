@@ -2,18 +2,17 @@ import { ArrowDown, ReceiptText, X } from 'lucide-react'
 import { useEffect } from 'react'
 import { createPortal } from 'react-dom'
 import { currency } from '../../lib/utils'
-import type { Product } from '../../types/domain'
-import { accountBenefitForSku, coinBenefitForSku, displayPriceLabel, normalPriceForSku, priceLayersForSku, publicPriceLabelForSku, surpriseBenefitForSku, verifiedPriceChannel, type SkuPrice } from './productDisplayUtils'
+import { coinBenefitForSku, giftBenefitForSku, normalPriceForSku, priceLayersForSku, publicPriceLabelForSku, skuForAccountView, surpriseBenefitForSku, verifiedPriceValue, vipBenefitForSku, type SkuPrice } from './productDisplayUtils'
 
 export function DiscountDetailDialog({
   sku,
-  accountType,
   accessMode,
+  accountType,
   onClose,
 }: {
   sku: SkuPrice | null
-  accountType: NonNullable<Product['accountType']>
   accessMode?: 'authenticated' | 'anonymous'
+  accountType: 'normal' | 'gift' | 'vip88'
   onClose: () => void
 }) {
   useEffect(() => {
@@ -32,13 +31,14 @@ export function DiscountDetailDialog({
 
   if (!sku) return null
 
-  const layers = priceLayersForSku(sku)
+  const layers = priceLayersForSku(sku, { accountType })
   const originalLayer = layers.find((layer) => layer.kind === 'original' || layer.label === '标价')
   const originalPrice = originalLayer?.value || sku.originalPrice
   const normalPrice = normalPriceForSku(sku)
-  const governmentPrice = verifiedPriceChannel(sku, 'government') ? sku.governmentPrice : null
+  const governmentPrice = verifiedPriceValue(sku, 'government', accountType)
   const surpriseBenefit = surpriseBenefitForSku(sku)
-  const accountBenefit = accountBenefitForSku(sku, accountType)
+  const giftBenefit = giftBenefitForSku(sku, accountType)
+  const vipBenefit = vipBenefitForSku(sku, accountType)
   const coinBenefit = coinBenefitForSku(sku)
   const coinPrice = coinBenefit.price
   const anonymous = accessMode === 'anonymous'
@@ -49,7 +49,11 @@ export function DiscountDetailDialog({
   const totalDiscount = originalPrice ? Math.max(0, originalPrice - normalPrice) : 0
   let undistributedDiscount = totalDiscount
   const explicitDiscountSteps = discountItems
-    .filter((item) => Number(item.amount) > 0 && undistributedDiscount > 0 && !/惊喜立减|淘金币|金币/i.test(`${item.label} ${item.text}`))
+    .filter((item) => {
+      if (!(Number(item.amount) > 0 && undistributedDiscount > 0)) return false
+      if (item.source?.startsWith('price-resolver:')) return /price-resolver:(?:public|billion|seckill)$/.test(item.source)
+      return !/惊喜立减|淘金币|金币|政府补贴|国家补贴|国补|礼金|88\s*VIP/i.test(`${item.label} ${item.text}`)
+    })
     .map((item) => {
       const amount = Math.min(Number(item.amount), undistributedDiscount)
       undistributedDiscount = Number((undistributedDiscount - amount).toFixed(2))
@@ -84,17 +88,35 @@ export function DiscountDetailDialog({
     runningPrice = Math.max(normalPrice, Number((runningPrice - Number(step.amount || 0)).toFixed(2)))
     return { ...step, priceAfter: runningPrice }
   })
-  const alternativePrices = [
-    ...(accountBenefit.price && accountBenefit.price !== normalPrice ? [{ label: accountBenefit.label, value: accountBenefit.price, source: '当前抓取/自动计算' }] : []),
-    ...(coinPrice && coinPrice !== normalPrice ? [{ label: '淘金币价', value: coinPrice, source: '当前抓取' }] : []),
-    ...(sku.accountPrices || [])
-      .map((price) => ({
-        price,
-        value: price.accountType === 'gift' ? price.giftPrice : price.accountType === 'vip88' ? price.vipPrice : price.surprisePrice,
-      }))
-      .filter(({ value }) => Number(value) > 0 && value !== normalPrice)
-      .map(({ price, value }) => ({ label: displayPriceLabel('', price.accountType), value: value as number, source: `账号：${price.accountName}` })),
-  ].filter((price, index, list) => list.findIndex((item) => item.label === price.label && item.value === price.value) === index)
+  const benefitRows = [
+    { channel: 'surprise', benefit: surpriseBenefit, formula: sku.priceCalculation?.surprise, arrowClass: 'text-rose-500', panelClass: 'bg-rose-50', labelClass: 'text-rose-700' },
+    { channel: 'gift', benefit: giftBenefit, formula: sku.priceCalculation?.gift, arrowClass: 'text-orange-500', panelClass: 'bg-orange-50', labelClass: 'text-orange-700' },
+    { channel: 'vip88', benefit: vipBenefit, formula: sku.priceCalculation?.vip88, arrowClass: 'text-violet-500', panelClass: 'bg-violet-50', labelClass: 'text-violet-700' },
+  ].filter((row) => row.benefit.available && row.benefit.price !== null)
+  const currentPriceKeys = new Set([
+    ...benefitRows.map((row) => `${row.benefit.label}:${row.benefit.price}`),
+    ...(coinPrice ? [`淘金币价:${coinPrice}`] : []),
+  ])
+  const alternativePrices = (sku.accountPrices || [])
+    .flatMap((accountPrice) => {
+      const accountSku = skuForAccountView(sku, accountPrice.sessionId, accountPrice.accountType)
+      const accountBenefits = [
+        surpriseBenefitForSku(accountSku),
+        giftBenefitForSku(accountSku, accountPrice.accountType),
+        ...(accountPrice.accountType === 'vip88' ? [vipBenefitForSku(accountSku, accountPrice.accountType)] : []),
+      ]
+      const accountCoin = coinBenefitForSku(accountSku)
+      return [
+        ...accountBenefits
+          .filter((benefit) => benefit.available && benefit.price !== null)
+          .map((benefit) => ({ label: benefit.label, value: benefit.price as number, source: `账号：${accountPrice.accountName}` })),
+        ...(accountCoin.available && accountCoin.price !== null
+          ? [{ label: '淘金币价', value: accountCoin.price, source: `账号：${accountPrice.accountName}` }]
+          : []),
+      ]
+    })
+    .filter((price) => !currentPriceKeys.has(`${price.label}:${price.value}`))
+    .filter((price, index, list) => list.findIndex((item) => item.label === price.label && item.value === price.value) === index)
 
   return createPortal(
     <div className="fixed inset-0 z-[100] flex items-center justify-center overflow-hidden bg-slate-950/70 p-3 sm:p-6" role="presentation" onMouseDown={onClose}>
@@ -159,16 +181,16 @@ export function DiscountDetailDialog({
                 <span className="text-right text-lg font-semibold text-teal-800">{currency(governmentPrice)}</span>
               </div>
             </>}
-            {accountBenefit.price && accountBenefit.price !== normalPrice && (
-              <>
-                <div className="flex h-6 items-center pl-9 text-orange-500"><ArrowDown className="h-4 w-4" /></div>
-                <div className={`grid grid-cols-[104px_minmax(0,1fr)_96px] items-center gap-3 rounded px-2 py-3 ${accountType === 'gift' ? 'bg-orange-50' : accountType === 'vip88' ? 'bg-violet-50' : 'bg-rose-50'}`}>
-                  <span className={`text-xs font-semibold ${accountType === 'gift' ? 'text-orange-700' : accountType === 'vip88' ? 'text-violet-700' : 'text-rose-700'}`}>{accountBenefit.label}</span>
-                  <span className="text-xs text-slate-600">普通价减账号专享优惠 {currency(accountBenefit.discountAmount)}</span>
-                  <span className="text-right text-lg font-semibold text-slate-900">{currency(accountBenefit.price)}</span>
+            {benefitRows.map((row) => (
+              <div key={row.channel}>
+                <div className={`flex h-6 items-center pl-9 ${row.arrowClass}`}><ArrowDown className="h-4 w-4" /></div>
+                <div className={`grid grid-cols-[104px_minmax(0,1fr)_96px] items-center gap-3 rounded px-2 py-3 ${row.panelClass}`}>
+                  <span className={`text-xs font-semibold ${row.labelClass}`}>{row.benefit.label}</span>
+                  <span className="text-xs text-slate-600">{row.formula || `当前 SKU 价格与优惠金额已完成公式核验${row.benefit.discountAmount ? `，优惠 ${currency(row.benefit.discountAmount)}` : ''}`}</span>
+                  <span className="text-right text-lg font-semibold text-slate-900">{currency(row.benefit.price)}</span>
                 </div>
-              </>
-            )}
+              </div>
+            ))}
           </div>
           {productPrograms.length > 0 && (
             <div className="mt-3 flex items-start gap-3 border-y border-amber-100 bg-amber-50/60 px-3 py-2.5">
@@ -189,8 +211,8 @@ export function DiscountDetailDialog({
               <div>{sku.priceCalculation?.normal || `普通价 ${currency(normalPrice)}`}</div>
               <div className={governmentPrice ? 'text-teal-700' : ''}>{sku.priceCalculation?.government || (governmentPrice ? `普通价 ${currency(normalPrice)} - 政府补贴 ${currency(sku.governmentDiscountAmount)} = ${currency(governmentPrice)}` : '未获取国补价')}</div>
               <div className={surpriseBenefit.available ? 'text-rose-700' : ''}>{sku.priceCalculation?.surprise || (surpriseBenefit.price ? `普通价 ${currency(normalPrice)} - 惊喜立减 ${currency(surpriseBenefit.discountAmount || normalPrice - surpriseBenefit.price)} = ${currency(surpriseBenefit.price)}` : '未获取惊喜立减价')}</div>
-              {accountType === 'gift' && <div className={accountBenefit.available ? 'text-orange-700' : ''}>{sku.priceCalculation?.gift || (accountBenefit.price ? `普通价 ${currency(normalPrice)} - 礼金优惠 ${currency(accountBenefit.discountAmount)} = ${currency(accountBenefit.price)}` : '未获取礼金价')}</div>}
-              {accountType === 'vip88' && <div className={accountBenefit.available ? 'text-violet-700' : ''}>{sku.priceCalculation?.vip88 || (accountBenefit.price ? `普通价 ${currency(normalPrice)} - 88VIP优惠 ${currency(accountBenefit.discountAmount)} = ${currency(accountBenefit.price)}` : '未获取88VIP价')}</div>}
+              {giftBenefit.available && <div className="text-orange-700">{sku.priceCalculation?.gift || `${giftBenefit.label} ${currency(giftBenefit.price)}`}</div>}
+              {vipBenefit.available && <div className="text-violet-700">{sku.priceCalculation?.vip88 || `88VIP价 ${currency(vipBenefit.price)}`}</div>}
               <div className={coinBenefit.available ? 'text-amber-700' : ''}>{sku.priceCalculation?.coin || (coinPrice ? `普通价 ${currency(normalPrice)} - 淘金币抵扣 ${currency(coinBenefit.discountAmount || normalPrice - coinPrice)} = ${currency(coinPrice)}` : '未获取淘金币价')}</div>
             </div>
           </div>

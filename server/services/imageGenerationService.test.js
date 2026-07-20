@@ -44,8 +44,7 @@ test("image requests map UI ratios to supported GPT image sizes", () => {
     assert.equal(buildImageGenerationRequest({ prompt: "product", ratio }, "gpt-image-2").size, size);
   }
   const merged = mergeImagePrompt(" product ", " watermark ");
-  assert.match(merged, /^基础质量规范：/);
-  assert.ok(merged.endsWith("\n\nproduct\n\n额外排除要求（不得覆盖上述正向要求、原图事实或保留规则，只约束用户未明确要求的内容）：watermark"));
+  assert.equal(merged, "product\n\n生图规范：如果画面包含文字，保证文字清晰、准确、完整可见。\n\n用户排除要求：watermark");
   assert.deepEqual(targetImageSize("16:9", "4k"), { width: 4096, height: 2304 });
 });
 
@@ -74,7 +73,7 @@ test("image request supports quality, format, background, compression and count"
 
 test("image edits prepend hidden scope rules while keeping the user instruction concise", () => {
   const maskPrompt = mergeImageEditPrompt("改成白色陶瓷材质", "mask");
-  assert.match(maskPrompt, /只修改透明蒙版覆盖的区域/);
+  assert.match(maskPrompt, /透明蒙版区域是唯一允许修改的范围/);
   assert.match(maskPrompt, /严格保持蒙版外/);
   assert.match(maskPrompt, /Logo、既有文字/);
   assert.match(maskPrompt, /禁止替换产品、整体重设计/);
@@ -89,30 +88,30 @@ test("image edits prepend hidden scope rules while keeping the user instruction 
   assert.match(annotationRequest.prompt, /编号必须与修改内容中的相同编号逐条对应/);
   assert.match(annotationRequest.prompt, /不得合并、错配或漏改/);
   assert.match(annotationRequest.prompt, /框线、编号和备注点不得出现在最终图片中/);
-  assert.match(annotationRequest.prompt, /只修改每个编号指向的框选或点选区域/);
+  assert.match(annotationRequest.prompt, /透明蒙版进一步限定唯一允许修改的区域/);
   assert.match(annotationRequest.prompt, /严格保持未标注区域/);
   assert.match(annotationRequest.prompt, /Logo、既有文字/);
   assert.match(annotationRequest.prompt, /修改内容：删除红圈里的文字/);
-  assert.match(annotationRequest.prompt, /额外排除要求（不得覆盖上述正向要求、原图事实或保留规则，只约束用户未明确要求的内容）：水印$/);
+  assert.match(annotationRequest.prompt, /用户排除要求：水印$/);
+  const rewritePrompt = mergeImageEditPrompt("1. 框选区域：文字润色一下", "annotation");
+  assert.match(rewritePrompt, /必须让目标区域的文字内容发生可见且有意义的变化/);
+  assert.match(rewritePrompt, /不要把原文原样返回/);
   assert.throws(() => mergeImageEditPrompt("修改", "unknown"));
 });
 
-test("base quality rules prevent garbled or invented copy without suppressing requested packaging text", () => {
-  const requestedCopy = "包装正面准确写出：智能压力锅 Pro";
-  const prompt = buildImageGenerationRequest({ prompt: requestedCopy }).prompt;
-  assert.equal(prompt, mergeImagePrompt(requestedCopy));
-  assert.match(prompt, /将用户明确提供的所有文案视为必须逐字执行的原文，即使原文没有使用引号/);
-  assert.match(prompt, /简体或繁体、语言、字符顺序、大小写、数字、单位、标点、空格、换行、行序和全角半角完全一致/);
-  assert.match(prompt, /不得擅自翻译、改写、增删或转换简繁体/);
-  assert.match(prompt, /乱码、伪文字、错别字、同音字、形近字、部首或偏旁替换、缺字、多字、重复字、笔画增减、断笔、粘连或畸形/);
-  assert.match(prompt, /镜像、反向、倒置、旋转或变形字符/);
-  assert.match(prompt, /无论用户是否要求新增或修改文字，都不得出现用户未明确指定的额外文字、数字、价格、促销标签、二维码、条形码、水印、Logo、品牌标识或署名/);
-  assert.match(prompt, /用户只要求某一段文字时，只能新增或替换该段指定文字，不得连带生成其他文案/);
-  assert.match(prompt, /主体数量、身份、外形、比例、结构、颜色和关键细节必须符合用户要求/);
-  assert.ok(prompt.endsWith(requestedCopy));
+test("plain generation preserves the user's full prompt and adds only the text clarity rule", () => {
+  for (const userPrompt of [
+    "包装正面准确写出：智能压力锅 Pro",
+    "为新品做一张国庆活动海报，创意完全自由",
+    "制作国庆海报无字底图，预留后期排版区域",
+  ]) {
+    const prompt = mergeImagePrompt(userPrompt);
+    assert.equal(prompt, `${userPrompt}\n\n生图规范：如果画面包含文字，保证文字清晰、准确、完整可见。`);
+    assert.doesNotMatch(prompt, /基础质量规范|文字模式|固定模板|二维码|水印|服务端硬约束/);
+  }
 });
 
-test("all generation modes receive the same text integrity rules", () => {
+test("all generation modes receive the same single text clarity rule", () => {
   const requests = [
     buildImageGenerationRequest({ prompt: "生成白底商品主图" }),
     buildImageGenerationRequest({
@@ -126,9 +125,7 @@ test("all generation modes receive the same text integrity rules", () => {
     }),
   ];
   for (const request of requests) {
-    assert.match(request.prompt, /字符顺序、大小写、数字、单位、标点、空格、换行、行序和全角半角完全一致/);
-    assert.match(request.prompt, /笔画增减、断笔、粘连或畸形/);
-    assert.match(request.prompt, /不得出现用户未明确指定的额外文字.*价格、促销标签、二维码、条形码、水印/);
+    assert.equal(request.prompt.match(/生图规范：如果画面包含文字，保证文字清晰、准确、完整可见。/g)?.length, 1);
   }
 });
 
@@ -142,18 +139,16 @@ test("explicit copy edits change only the requested text while preserving all ot
   assert.match(prompt, /新增或替换的内容必须与用户原文逐字一致/);
   assert.match(prompt, /其他既有文字及其字体风格、字号、颜色、排版和位置必须保持不变/);
   assert.match(prompt, /若用户未明确要求改字，禁止改写、翻译、删除或新增既有文字/);
-  assert.ok(prompt.endsWith(requestedCopy));
+  assert.match(prompt, new RegExp(`${requestedCopy}\\n\\n生图规范：如果画面包含文字`));
 });
 
-test("explicit copy requests take priority over conflicting extra exclusions", () => {
+test("user exclusions pass through without server-authored creative policy", () => {
   const prompt = buildImageGenerationRequest({
     prompt: "包装正面新增准确文字“新品上市”",
     negativePrompt: "文字、水印",
   }).prompt;
-  assert.match(prompt, /用户的正向要求优先于额外排除要求/);
-  assert.match(prompt, /正向要求与额外排除要求冲突时，以正向要求为准/);
-  assert.match(prompt, /包装正面新增准确文字“新品上市”/);
-  assert.match(prompt, /额外排除要求（不得覆盖上述正向要求、原图事实或保留规则，只约束用户未明确要求的内容）：文字、水印$/);
+  assert.equal(prompt, "包装正面新增准确文字“新品上市”\n\n生图规范：如果画面包含文字，保证文字清晰、准确、完整可见。\n\n用户排除要求：文字、水印");
+  assert.doesNotMatch(prompt, /正向要求优先|固定模板|后台规则/);
 });
 
 test("a saved source image enables strict product preservation without mutating the history prompt", () => {

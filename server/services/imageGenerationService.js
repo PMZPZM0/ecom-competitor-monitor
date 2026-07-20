@@ -21,15 +21,16 @@ const RESOLUTION_LONG_EDGES = { "1k": 1024, "2k": 2048, "4k": 4096 };
 const QUALITIES = new Set(["low", "medium", "high"]);
 const FORMATS = new Set(["png", "jpeg", "webp"]);
 const BACKGROUNDS = new Set(["auto", "opaque", "transparent"]);
-const IMAGE_OUTPUT_BASE_PROMPT = "基础质量规范：严格服从用户明确提出的画面内容，用户的正向要求优先于额外排除要求。文字与标识：将用户明确提供的所有文案视为必须逐字执行的原文，即使原文没有使用引号。必须保持用户指定的简体或繁体、语言、字符顺序、大小写、数字、单位、标点、空格、换行、行序和全角半角完全一致，文字清晰可读；不得擅自翻译、改写、增删或转换简繁体。不得出现乱码、伪文字、错别字、同音字、形近字、部首或偏旁替换、缺字、多字、重复字、笔画增减、断笔、粘连或畸形，不得出现镜像、反向、倒置、旋转或变形字符。无论用户是否要求新增或修改文字，都不得出现用户未明确指定的额外文字、数字、价格、促销标签、二维码、条形码、水印、Logo、品牌标识或署名；用户只要求某一段文字时，只能新增或替换该段指定文字，不得连带生成其他文案。正向要求与额外排除要求冲突时，以正向要求为准，额外排除要求只约束用户未明确要求的内容。画面完整性：主体数量、身份、外形、比例、结构、颜色和关键细节必须符合用户要求，主体完整且不畸变，边缘干净，材质与光影自然；不得出现重复部件、缺失部件、穿模、悬浮、拉伸、过度锐化、明显噪点、压缩伪影或无关界面元素。";
+const IMAGE_TEXT_CLARITY_PROMPT = "生图规范：如果画面包含文字，保证文字清晰、准确、完整可见。";
 const IMAGE_REFERENCE_BASE_PROMPTS = {
   source: "严格参考图编辑任务。第一张图片是待编辑原图，也是产品身份和原始画面的唯一事实依据。除用户明确要求修改的项目外，必须保持原图中的产品身份、外形、比例、结构、零部件、按键、Logo、既有文字、材质、颜色、镜头角度、透视、构图、裁切和宽高比不变。若用户明确要求新增、删除或替换原图文字，仅允许修改用户指定的文字和对应区域；新增或替换的内容必须与用户原文逐字一致，其他既有文字及其字体风格、字号、颜色、排版和位置必须保持不变。若用户未明确要求改字，禁止改写、翻译、删除或新增既有文字。若请求的输出尺寸与原图宽高比不同，该尺寸选择视为用户明确要求，仅允许为适配新画布做必要的扩图或裁切，产品本身仍须完整保真。只实施用户明确要求的变化；禁止替换产品、整体重设计、虚构或增删结构以及新增品牌。其余参考图仅用于用户指定的材质、风格或场景参考，不得覆盖第一张原图的产品事实。",
   reference: "普通参考图任务。参考图用于约束用户指定的产品、风格、材质或构图，但不默认把第一张图片视为待编辑原图。若用户未明确要求重新设计，必须保留参考图中核心产品可辨识的身份、外形、比例、结构、按键、Logo、既有文字、材质和颜色。若用户明确要求基于参考图新增、删除或替换文字，仅允许修改用户指定的文字和对应区域；新增或替换的内容必须与用户原文逐字一致，其他既有文字及其字体风格、字号、颜色、排版和位置必须保持不变。若用户未明确要求改字，禁止改写、翻译、删除或新增既有文字。只实施用户明确要求的变化，禁止替换产品、虚构或增删结构以及新增品牌。若用户明确说明参考图只用于风格，则仅提取相关风格，不要求复刻其主体或构图。",
 };
 const IMAGE_EDIT_BASE_PROMPTS = {
-  mask: "局部蒙版编辑任务。第一张图片是待编辑原图，也是产品身份和原始画面的唯一事实依据；其他参考图仅用于用户指定的材质或风格参考。只修改透明蒙版覆盖的区域，并且只实施用户明确要求的变化。若用户明确要求新增、删除或替换文字，只允许在蒙版内修改指定文字；新增或替换的内容必须与用户原文逐字一致，蒙版外和未指定修改的既有文字必须保持不变。严格保持蒙版外的产品身份、外形、比例、结构、零部件、按键、Logo、既有文字、材质、颜色、镜头角度、透视、构图、裁切、宽高比、背景和清晰度不变；禁止替换产品、整体重设计、虚构或增删结构、新增品牌，以及移动、重画、增删或裁切蒙版外内容。修改区域必须与周围自然衔接。",
-  annotation: "局部批注编辑任务。第一张图片是待编辑原图，也是产品身份和原始画面的唯一事实依据；最后一张带编号框选或备注点的图片只用于指示修改位置；中间图片仅作为用户指定的材质或风格参考。最后一张批注图中的编号必须与修改内容中的相同编号逐条对应，按编号分别执行，不得合并、错配或漏改；框线、编号和备注点不得出现在最终图片中。只修改每个编号指向的框选或点选区域，并且只实施该编号明确要求的变化。若某编号明确要求新增、删除或替换文字，只允许在该编号标注区域内修改指定文字；新增或替换的内容必须与该条用户原文逐字一致，其他编号、未标注区域和未指定修改的既有文字必须保持不变。严格保持未标注区域的产品身份、外形、比例、结构、零部件、按键、Logo、既有文字、材质、颜色、镜头角度、透视、构图、裁切、宽高比、背景和清晰度不变；禁止替换产品、整体重设计、虚构或增删结构、新增品牌，以及移动、重画、增删或裁切未标注内容。修改区域必须与周围自然衔接。",
+  mask: "局部蒙版编辑任务。第一张图片是待编辑原图，也是产品身份和原始画面的唯一事实依据；其他参考图仅用于用户指定的材质或风格参考。透明蒙版区域是唯一允许修改的范围，必须在该范围内实质执行用户要求。若用户提供了明确目标文字，必须逐字准确生成；若用户要求润色、改写或优化但没有提供目标文字，必须先读取蒙版内现有文字，在保持核心含义的前提下完成可见的文案改写，不得原样返回。蒙版外和未指定修改的既有文字必须保持不变。严格保持蒙版外的产品身份、外形、比例、结构、零部件、按键、Logo、既有文字、材质、颜色、镜头角度、透视、构图、裁切、宽高比、背景和清晰度不变；禁止替换产品、整体重设计、虚构或增删结构、新增品牌，以及移动、重画、增删或裁切蒙版外内容。修改区域必须与周围自然衔接。",
+  annotation: "局部批注编辑任务。第一张图片是待编辑原图，也是产品身份和原始画面的唯一事实依据；最后一张带编号框选或备注点的图片只用于指示修改位置；透明蒙版进一步限定唯一允许修改的区域。最后一张批注图中的编号必须与修改内容中的相同编号逐条对应，按编号分别执行，不得合并、错配或漏改；框线、编号和备注点不得出现在最终图片中。若某编号提供了明确目标文字，必须在对应区域逐字准确生成；若某编号只要求润色、改写或优化，必须先读取该区域现有文字，在保持核心含义的前提下实质改写，不得原样返回。其他编号、未标注区域和未指定修改的既有文字必须保持不变。严格保持未标注区域的产品身份、外形、比例、结构、零部件、按键、Logo、既有文字、材质、颜色、镜头角度、透视、构图、裁切、宽高比、背景和清晰度不变；禁止替换产品、整体重设计、虚构或增删结构、新增品牌。修改区域必须与周围自然衔接。",
 };
+const COPY_REWRITE_INTENT_PATTERN = /润色|改写|重写|优化|精简|扩写|文案.{0,8}(?:高级|简洁|有力|吸引)|(?:标题|文字).{0,8}(?:高级|简洁|有力|吸引)/i;
 const MIME_BY_FORMAT = { png: "image/png", jpeg: "image/jpeg", webp: "image/webp" };
 const FORMAT_BY_MIME = { "image/png": "png", "image/jpeg": "jpeg", "image/webp": "webp" };
 const IMAGE_ID_PATTERN = /^image_[a-f0-9]{32}$/;
@@ -42,6 +43,7 @@ const MAX_LIBRARY_ITEMS = 200;
 const MANIFEST_VERSION = 1;
 const RENAME_RETRY_DELAYS_MS = [20, 40, 80, 160, 250, 250, 250, 250];
 const TRANSIENT_RENAME_ERRORS = new Set(["EACCES", "EBUSY", "EPERM"]);
+const INTERNAL_REVISED_PROMPT_PATTERN = /生图规范：如果画面包含文字|以下为服务端硬约束|以下为服务端基础排除规则|严格参考图编辑任务|普通参考图任务|局部蒙版编辑任务|局部批注编辑任务/;
 
 let libraryMutationQueue = Promise.resolve();
 
@@ -64,8 +66,10 @@ function oneOf(value, allowed, label, fallback) {
   return normalized;
 }
 
-function imageError(message, { code = "IMAGE_REQUEST_INVALID", status = 400 } = {}) {
-  return new ModelApiError(message, { code, status });
+function imageError(message, { code = "IMAGE_REQUEST_INVALID", status = 400, retryable } = {}) {
+  const error = new ModelApiError(message, { code, status });
+  if (retryable !== undefined) error.retryable = retryable;
+  return error;
 }
 
 export function mergeImagePrompt(prompt, negativePrompt = "", referenceMode) {
@@ -73,14 +77,18 @@ export function mergeImagePrompt(prompt, negativePrompt = "", referenceMode) {
   const negative = optionalText(negativePrompt, "负面提示词", 4_000);
   const reference = referenceMode ? IMAGE_REFERENCE_BASE_PROMPTS[referenceMode] : "";
   if (referenceMode && !reference) throw new Error("参考图方式无效。");
-  const merged = [IMAGE_OUTPUT_BASE_PROMPT, reference, positive].filter(Boolean).join("\n\n");
-  return negative ? `${merged}\n\n额外排除要求（不得覆盖上述正向要求、原图事实或保留规则，只约束用户未明确要求的内容）：${negative}` : merged;
+  const merged = [reference, positive, IMAGE_TEXT_CLARITY_PROMPT].filter(Boolean).join("\n\n");
+  return negative ? `${merged}\n\n用户排除要求：${negative}` : merged;
 }
 
 export function mergeImageEditPrompt(instruction, mode) {
   const base = IMAGE_EDIT_BASE_PROMPTS[mode];
   if (!base) throw new Error("图片编辑方式无效。");
-  return `${base}\n\n修改内容：${requiredText(instruction, "修改内容", 4_000)}`;
+  const requestedChange = requiredText(instruction, "修改内容", 4_000);
+  const copyRule = COPY_REWRITE_INTENT_PATTERN.test(requestedChange)
+    ? "本次包含文案润色或改写要求：必须让目标区域的文字内容发生可见且有意义的变化，同时保持原意、语言风格和版面容纳长度；不要把原文原样返回。只有用户明确给出目标文案时才逐字照写。"
+    : "本次按用户给出的修改内容精确执行；若包含明确目标文案，字符、标点和换行必须与目标文案一致。";
+  return `${base}\n\n${copyRule}\n\n修改内容：${requestedChange}`;
 }
 
 export function targetImageSize(ratio = "1:1", resolution = "1k") {
@@ -427,6 +435,63 @@ async function transformGeneratedImage(image, input, { fetchImpl, signal, remote
   };
 }
 
+async function maskedEditChangeMetrics(sourceBuffer, outputBuffer, maskBuffer) {
+  const metadata = await sharp(sourceBuffer, { limitInputPixels: MAX_INPUT_PIXELS, animated: false }).metadata();
+  const sourceWidth = Number(metadata.autoOrient?.width || metadata.width);
+  const sourceHeight = Number(metadata.autoOrient?.height || metadata.height);
+  if (!sourceWidth || !sourceHeight) throw imageError("无法读取待编辑原图尺寸。", { code: "IMAGE_EDIT_SOURCE_INVALID" });
+  const longEdge = 384;
+  const width = sourceWidth >= sourceHeight ? longEdge : Math.max(1, Math.round(longEdge * sourceWidth / sourceHeight));
+  const height = sourceHeight >= sourceWidth ? longEdge : Math.max(1, Math.round(longEdge * sourceHeight / sourceWidth));
+  const resize = { width, height, fit: "fill", kernel: sharp.kernel.lanczos3 };
+  const [source, output, mask] = await Promise.all([
+    sharp(sourceBuffer, { limitInputPixels: MAX_INPUT_PIXELS, animated: false }).rotate().resize(resize).removeAlpha().raw().toBuffer({ resolveWithObject: true }),
+    sharp(outputBuffer, { limitInputPixels: MAX_INPUT_PIXELS, animated: false }).rotate().resize(resize).removeAlpha().raw().toBuffer({ resolveWithObject: true }),
+    sharp(maskBuffer, { limitInputPixels: MAX_INPUT_PIXELS, animated: false }).rotate().resize(resize).ensureAlpha().raw().toBuffer({ resolveWithObject: true }),
+  ]);
+  let editedPixels = 0;
+  let changedPixels = 0;
+  let totalDelta = 0;
+  for (let index = 0; index < width * height; index += 1) {
+    if (mask.data[index * mask.info.channels + 3] >= 128) continue;
+    editedPixels += 1;
+    const sourceOffset = index * source.info.channels;
+    const outputOffset = index * output.info.channels;
+    const red = Math.abs(source.data[sourceOffset] - output.data[outputOffset]);
+    const green = Math.abs(source.data[sourceOffset + 1] - output.data[outputOffset + 1]);
+    const blue = Math.abs(source.data[sourceOffset + 2] - output.data[outputOffset + 2]);
+    const maxDelta = Math.max(red, green, blue);
+    totalDelta += (red + green + blue) / 3;
+    if (maxDelta >= 12) changedPixels += 1;
+  }
+  return {
+    editedPixels,
+    changedRatio: editedPixels ? changedPixels / editedPixels : 0,
+    meanDelta: editedPixels ? totalDelta / editedPixels : 0,
+  };
+}
+
+async function assertMaskedEditChanged(prepared, images) {
+  if (!prepared.mask || !prepared.references[0] || !images.length) return;
+  for (const image of images) {
+    const metrics = await maskedEditChangeMetrics(prepared.references[0].buffer, image.buffer, prepared.mask.buffer);
+    if (metrics.editedPixels < 16) {
+      throw imageError("框选区域太小，无法确认修改结果，请重新框选后再试。", {
+        code: "IMAGE_EDIT_MASK_TOO_SMALL",
+        status: 422,
+        retryable: true,
+      });
+    }
+    if (metrics.changedRatio < 0.01 && metrics.meanDelta < 3) {
+      throw imageError("模型返回的框选区域几乎没有变化，任务未标记为完成。请调整批注文字后重试。", {
+        code: "IMAGE_EDIT_NO_VISIBLE_CHANGE",
+        status: 422,
+        retryable: true,
+      });
+    }
+  }
+}
+
 function editFormData(body, references, mask) {
   const form = new FormData();
   for (const [key, value] of Object.entries(body)) form.append(key, String(value));
@@ -490,15 +555,15 @@ export async function generateImages(config = {}, input = {}, {
   const resolved = resolveModelConfig(config, { env });
   const prepared = await prepareEditFiles(input, referenceImages, maskImage, sourceImageOverride);
   const edit = prepared.references.length > 0;
-  if (prepared.mask && input.editMode && input.editMode !== "mask") {
-    throw imageError("蒙版文件只能使用蒙版重绘方式。", { code: "IMAGE_EDIT_MODE_MISMATCH" });
+  if (prepared.mask && input.editMode && !["mask", "annotation"].includes(input.editMode)) {
+    throw imageError("蒙版文件与当前图片编辑方式不匹配。", { code: "IMAGE_EDIT_MODE_MISMATCH" });
   }
   const editMode = input.editMode || (prepared.mask ? "mask" : undefined);
   if (editMode === "mask" && !prepared.mask) {
     throw imageError("蒙版重绘缺少有效蒙版文件。", { code: "IMAGE_EDIT_MASK_MISSING" });
   }
-  if (editMode === "annotation" && (!input.sourceImageId || prepared.references.length < 2)) {
-    throw imageError("带批注参考需要待编辑原图和批注图。", { code: "IMAGE_EDIT_ANNOTATION_MISSING" });
+  if (editMode === "annotation" && (!input.sourceImageId || prepared.references.length < 2 || !prepared.mask)) {
+    throw imageError("框选批注需要待编辑原图、批注图和编辑蒙版。", { code: "IMAGE_EDIT_ANNOTATION_MISSING" });
   }
   if (editMode && !edit) throw imageError("图片编辑缺少待编辑原图。", { code: "IMAGE_EDIT_SOURCE_MISSING" });
   const referenceMode = !editMode && edit ? (input.sourceImageId ? "source" : "reference") : undefined;
@@ -522,6 +587,7 @@ export async function generateImages(config = {}, input = {}, {
   const parsed = parseImageGenerationResponse(data, { format: body.output_format });
   const images = [];
   for (const image of parsed) images.push(await transformGeneratedImage(image, input, { fetchImpl, signal, remoteImageTimeoutMs }));
+  if (editMode === "annotation") await assertMaskedEditChanged(prepared, images);
   const output = targetImageSize(input.ratio, input.resolution || "1k");
   return {
     images,
@@ -648,6 +714,7 @@ function publicImageRecord(record) {
   const { filename: _filename, thumbnailFilename: _thumbnailFilename, ...publicRecord } = record;
   return {
     ...publicRecord,
+    revisedPrompt: INTERNAL_REVISED_PROMPT_PATTERN.test(publicRecord.revisedPrompt) ? "" : publicRecord.revisedPrompt,
     src: base,
     thumbnailSrc: `${base}?thumbnail=1`,
   };

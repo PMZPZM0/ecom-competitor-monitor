@@ -56,7 +56,7 @@ const {
   withProtectedBrowserCapture,
 } = await import("./monitorService.js");
 const { updateFeishuConfig } = await import("./feishuService.js");
-const { resetTmallPriceCircuitForTests } = await import("./tmallPriceCircuitService.js");
+const { markTmallPriceGate, resetTmallPriceCircuitForTests } = await import("./tmallPriceCircuitService.js");
 const { readDb, updateDb } = await import("../storage/db.js");
 
 after(async () => {
@@ -330,7 +330,7 @@ test("runProductOnce routes buyer-show work to its isolated scraper without addi
   await clearFinishedCaptureJobs();
 });
 
-test("a material access restriction stops account fallback and blocks the buyer-show lane", async () => {
+test("a material access restriction does not block account fallback or buyer shows", async () => {
   resetTmallPriceCircuitForTests();
   const productId = "cross-lane-restriction-product";
   const itemId = "880003";
@@ -361,13 +361,13 @@ test("a material access restriction stops account fallback and blocks the buyer-
     authSessions: sessions,
     scraper: async () => {
       materialCalls += 1;
-      const error = new Error("淘宝已限制当前账号访问，自动抓取已立即停止。");
+      const error = new Error("淘宝已限制当前账号访问，本次抓取已停止；全局自动监控保持原设置。");
       error.code = "TAOBAO_ACCESS_RESTRICTED";
       error.retryAfterMs = 60_000;
       throw error;
     },
   });
-  assert.equal(materialCalls, 1);
+  assert.equal(materialCalls, 2);
   assert.equal(materials.run.status, "failed");
 
   let buyerShowCalls = 0;
@@ -380,9 +380,8 @@ test("a material access restriction stops account fallback and blocks the buyer-
       return { capture: { status: "complete", items: [] }, items: [], interactions: [] };
     },
   });
-  assert.equal(buyerShowCalls, 0);
-  assert.equal(buyerShow.ok, false);
-  assert.match(buyerShow.capture.failureCode, /淘宝访问限制保护中/);
+  assert.equal(buyerShowCalls, 1);
+  assert.equal(buyerShow.ok, true);
   resetTmallPriceCircuitForTests();
   await clearFinishedCaptureJobs();
 });
@@ -840,13 +839,13 @@ for (const accountType of ["normal", "gift", "vip88"]) {
     assert.match(result.product.lastError, /天猫优惠价格授权未同步/);
     assert.equal(session.loginStatus, "valid");
     assert.equal(session.healthStatus, "degraded");
-    assert.equal(session.tmallPriceStatus, "cooldown");
-    assert.ok(Date.parse(session.tmallPriceCooldownUntil) > Date.now());
+    assert.equal(session.tmallPriceStatus, undefined);
+    assert.equal(session.tmallPriceCooldownUntil, undefined);
     resetTmallPriceCircuitForTests();
   });
 }
 
-test("Tmall price gate stops account fallback and queued capture attempts", async () => {
+test("a Tmall price gate retries the next account on every capture", async () => {
   resetTmallPriceCircuitForTests();
   const sessions = [
     { id: "gate-primary", name: "普通账号 A", accountType: "normal", source: "taobao-browser", browserProfileKey: "gate-profile-a", browserPort: 9517, loginStatus: "valid" },
@@ -865,15 +864,15 @@ test("Tmall price gate stops account fallback and queued capture attempts", asyn
 
   assert.equal(first.snapshot, null);
   assert.equal(second.snapshot, null);
-  assert.equal(scraperCalls, 1);
-  assert.match(second.product.lastError, /价格能力正在冷却/);
+  assert.equal(scraperCalls, 4);
+  assert.match(second.product.lastError, /天猫优惠价格授权未同步/);
   assert.equal(sessions[0].loginStatus, "valid");
-  assert.equal(sessions[0].tmallPriceStatus, "cooldown");
+  assert.equal(sessions[0].tmallPriceStatus, undefined);
   assert.equal(sessions[1].tmallPriceStatus, undefined);
   resetTmallPriceCircuitForTests();
 });
 
-test("an account access restriction stops fallback and every later local capture", async () => {
+test("an account access restriction affects only its current browser attempt", async () => {
   resetTmallPriceCircuitForTests();
   const sessions = [
     { id: "restricted-primary", name: "普通账号 A", accountType: "normal", source: "taobao-browser", browserProfileKey: "restricted-profile-a", browserPort: 9521, loginStatus: "valid" },
@@ -882,7 +881,7 @@ test("an account access restriction stops fallback and every later local capture
   let scraperCalls = 0;
   const restrictedScraper = async () => {
     scraperCalls += 1;
-    const error = new Error("淘宝已限制当前账号访问，自动抓取已立即停止。");
+    const error = new Error("淘宝已限制当前账号访问，本次抓取已停止；全局自动监控保持原设置。");
     error.code = "TAOBAO_ACCESS_RESTRICTED";
     error.retryAfterMs = 60_000;
     throw error;
@@ -893,9 +892,9 @@ test("an account access restriction stops fallback and every later local capture
 
   assert.equal(first.snapshot, null);
   assert.equal(second.snapshot, null);
-  assert.equal(scraperCalls, 1);
-  assert.equal(sessions[0].tmallPriceFailureReason, "TAOBAO_ACCESS_RESTRICTED");
-  assert.match(second.product.lastError, /淘宝访问限制保护中/);
+  assert.equal(scraperCalls, 4);
+  assert.equal(sessions[0].tmallPriceFailureReason, undefined);
+  assert.match(second.product.lastError, /淘宝已限制当前账号访问/);
   assert.equal(sessions[1].tmallPriceStatus, undefined);
   resetTmallPriceCircuitForTests();
 });
@@ -1297,7 +1296,7 @@ test("account capture lock releases the browser after a failed capture", async (
   assert.equal(await withAccountCaptureLock(session, async () => "recovered"), "recovered");
 });
 
-test("protected browser capture serializes different account profiles on one device", async () => {
+test("different account profiles can capture in parallel", async () => {
   resetTmallPriceCircuitForTests();
   const events = [];
   let releaseFirst;
@@ -1314,25 +1313,58 @@ test("protected browser capture serializes different account profiles on one dev
   await ready;
   const second = withProtectedBrowserCapture(secondSession, async () => { events.push("second-start"); });
   await new Promise((resolve) => setImmediate(resolve));
-  assert.deepEqual(events, ["first-start"]);
+  assert.deepEqual(events, ["first-start", "second-start"]);
   releaseFirst();
   await Promise.all([first, second]);
-  assert.deepEqual(events, ["first-start", "first-end", "second-start"]);
+  assert.deepEqual(events, ["first-start", "second-start", "first-end"]);
   resetTmallPriceCircuitForTests();
 });
 
-test("an account access restriction persistently pauses automatic monitoring", async () => {
+test("a stale software price cooldown never blocks a capture", async () => {
+  resetTmallPriceCircuitForTests();
+  const session = { id: "manual-retry", source: "taobao-browser", browserProfileKey: "manual-retry", browserPort: 9234 };
+  markTmallPriceGate(session, { now: Date.now(), accountCooldownMs: 60_000 });
+  let calls = 0;
+  const result = await withProtectedBrowserCapture(session, async () => {
+    calls += 1;
+    return "retried";
+  });
+  assert.equal(result, "retried");
+  assert.equal(calls, 1);
+  resetTmallPriceCircuitForTests();
+});
+
+test("a persisted access-restriction marker never blocks a new browser attempt", async () => {
+  resetTmallPriceCircuitForTests();
+  const session = { id: "restricted-retry", source: "taobao-browser", browserProfileKey: "restricted-retry", browserPort: 9235 };
+  markTmallPriceGate(session, {
+    now: Date.now(),
+    accountCooldownMs: 60_000,
+    deviceCooldownMs: 60_000,
+    reason: "TAOBAO_ACCESS_RESTRICTED",
+  });
+  let calls = 0;
+  await withProtectedBrowserCapture(session, async () => {
+    calls += 1;
+  });
+  assert.equal(calls, 1);
+  resetTmallPriceCircuitForTests();
+});
+
+test("an account access restriction fails only the current capture", async () => {
   resetTmallPriceCircuitForTests();
   const productId = "restriction-pauses-monitor";
   const before = await readDb();
   const previousMonitor = structuredClone(before.monitor);
+  const nextRunAt = new Date(Date.now() + 60_000).toISOString();
+  const nextMonitorAt = new Date(Date.now() + 60_000).toISOString();
   await updateDb((db) => {
-    db.monitor = { ...db.monitor, running: true, nextRunAt: new Date(Date.now() + 60_000).toISOString() };
+    db.monitor = { ...db.monitor, running: true, nextRunAt };
     db.products.push({
       id: productId,
       itemId: "880099",
       enabled: true,
-      nextMonitorAt: new Date(Date.now() + 60_000).toISOString(),
+      nextMonitorAt,
     });
     return db;
   });
@@ -1340,17 +1372,17 @@ test("an account access restriction persistently pauses automatic monitoring", a
   try {
     const session = { id: "restricted-monitor", source: "taobao-browser", browserProfileKey: "restricted-monitor", browserPort: 9233 };
     await assert.rejects(withProtectedBrowserCapture(session, async () => {
-      const error = new Error("淘宝已限制当前账号访问，自动抓取已立即停止。");
+      const error = new Error("淘宝已限制当前账号访问，本次抓取已停止；全局自动监控保持原设置。");
       error.code = "TAOBAO_ACCESS_RESTRICTED";
       error.retryAfterMs = 60_000;
       throw error;
-    }), /自动抓取已立即停止/);
+    }), /本次抓取已停止；全局自动监控保持原设置/);
 
     const after = await readDb();
-    assert.equal(after.monitor.running, false);
-    assert.equal(after.monitor.nextRunAt, null);
+    assert.equal(after.monitor.running, true);
+    assert.equal(after.monitor.nextRunAt, nextRunAt);
     assert.equal(after.products.find((product) => product.id === productId).enabled, true);
-    assert.equal(after.products.find((product) => product.id === productId).nextMonitorAt, null);
+    assert.equal(after.products.find((product) => product.id === productId).nextMonitorAt, nextMonitorAt);
   } finally {
     resetTmallPriceCircuitForTests();
     await updateDb((db) => {

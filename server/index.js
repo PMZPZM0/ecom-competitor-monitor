@@ -41,7 +41,7 @@ import {
 } from "./services/imageJobService.js";
 import { clearPhotoshopWorkfile, openGeneratedImageInPhotoshop, syncPhotoshopWorkfile } from "./services/photoshopService.js";
 import { discoverAvailableModels, MODEL_CHANNEL_IDS, ModelApiError, publicModelConfig, recordModelTestResult, resolveModelConfig, testImageModel, testPromptModel, updateModelConfig } from "./services/modelConfigService.js";
-import { analyzeProductImages, generatePromptSet, generatePromptSetLocally, interpretQuickPrompt, interpretQuickPromptLocally, normalizePromptStudioState, productFactsSchema, promptLibraryTemplateIdSchema, styleSchema, validatePromptStudioInput, validateQuickPromptInput } from "./services/promptStudioService.js";
+import { analyzeProductImages, generatePromptSet, generatePromptSetLocally, interpretQuickPrompt, interpretQuickPromptLocally, normalizePromptStudioState, productFactsSchema, promptLibraryTemplateIdSchema, QUICK_PROMPT_PIPELINE_VERSION, styleSchema, validatePromptStudioInput, validateQuickPromptInput, writeFreeformImagePrompt } from "./services/promptStudioService.js";
 import {
   clearLocalEvidenceFiles,
   createLocalImport,
@@ -56,10 +56,7 @@ import { isAllowedLocalRequest, localCorsOptions } from "./utils/localOrigin.js"
 import { cleanupEvidenceRetention } from "./services/evidenceRetentionService.js";
 import { resumeNotificationOutbox, startNotificationOutboxWorker, stopNotificationOutboxWorker } from "./services/notificationOutboxService.js";
 import {
-  createTmallPriceCooldownError,
   isTmallPriceGateError,
-  refreshTmallPriceCircuit,
-  tmallPriceCircuitOpen,
   TMALL_PRICE_STATUS,
 } from "./services/tmallPriceCircuitService.js";
 
@@ -247,29 +244,13 @@ function publicAuthSession(session) {
     cookie: session.cookie ? "configured" : "",
     // `loginStatus` is the Taobao identity check. Price capability is kept
     // separate and starts unknown until a real, local-evidence price capture.
-    tmallPriceStatus: session.tmallPriceStatus || TMALL_PRICE_STATUS.UNKNOWN,
+    tmallPriceStatus: session.tmallPriceStatus === TMALL_PRICE_STATUS.COOLDOWN
+      ? TMALL_PRICE_STATUS.UNKNOWN
+      : session.tmallPriceStatus || TMALL_PRICE_STATUS.UNKNOWN,
   };
   delete result.cooldownUntil;
   if (result.healthStatus === "cooldown") result.healthStatus = "degraded";
   return result;
-}
-
-function activeTmallPriceProtection(sessions = []) {
-  return sessions.find((session) => session?.source === "taobao-browser" && tmallPriceCircuitOpen(session)) || null;
-}
-
-function protectedAuthCheckResult(session) {
-  const error = createTmallPriceCooldownError(session);
-  return {
-    id: session.id,
-    status: "degraded",
-    loginStatus: session.loginStatus || "valid",
-    tmallPriceStatus: TMALL_PRICE_STATUS.COOLDOWN,
-    checkedAt: session.lastCheckedAt || null,
-    message: `${error.message} 为保护账号，本次只读取本地状态，没有打开淘宝页面。`,
-    retryAfterMs: error.retryAfterMs,
-    session: publicAuthSession(session),
-  };
 }
 
 function tmallPriceStatePatch(session = {}) {
@@ -1050,13 +1031,29 @@ app.post("/api/feishu/document/create", async (_req, res) => {
   res.status(201).json(document);
 });
 
+function lowestVerifiedSnapshotPrice(product, snapshot = product?.lastSnapshot) {
+  const accountType = snapshot?.primaryAccountType || product?.accountType || "normal";
+  return (snapshot?.skuPrices || []).reduce((lowest, sku) => {
+    const effective = effectivePriceForSku(sku, accountType);
+    if (!effective || !Number.isFinite(effective.value) || effective.value <= 0) return lowest;
+    const candidate = {
+      price: effective.value,
+      priceLabel: effective.label || "普通价",
+      skuName: sku.name || "",
+      skuId: sku.skuId,
+    };
+    return !lowest || candidate.price < lowest.price ? candidate : lowest;
+  }, null);
+}
+
 app.post("/api/feishu/test", async (_req, res) => {
   const db = await readDb();
   const product = db.products[0] || { name: "测试商品", shopName: "测试店铺", model: "测试型号", url: "http://localhost:5173" };
   const snapshot = product.lastSnapshot;
-  const price = Number(snapshot?.price) || Number(snapshot?.skuPrices?.[0]?.normalPrice ?? snapshot?.skuPrices?.[0]?.price) || 0;
+  const effective = lowestVerifiedSnapshotPrice(product, snapshot);
+  const price = effective?.price ?? 0;
   try {
-    await sendFeishuNotification(db.feishu, { type: "manual-sync", product, price, threshold: product.monitorPrice ?? null, skuName: "" });
+    await sendFeishuNotification(db.feishu, { type: "manual-sync", product, price, priceLabel: effective?.priceLabel, threshold: product.monitorPrice ?? null, skuName: effective?.skuName || "" });
     const log = createNotificationLog({ productId: product.id || "", type: "test", status: "sent", message: "飞书连接测试消息已发送。", price, threshold: product.monitorPrice ?? null, source: "manual-test" });
     await updateDb((current) => {
       current.feishu.lastTestedAt = log.createdAt;
@@ -1081,11 +1078,7 @@ app.post("/api/products/:id/feishu-sync", async (req, res) => {
   const product = db.products.find((item) => item.id === req.params.id);
   if (!product) return res.status(404).json({ message: "商品不存在。" });
   const snapshot = product.lastSnapshot;
-  const candidates = (snapshot?.skuPrices || []).map((sku) => {
-    const effective = effectivePriceForSku(sku, snapshot?.primaryAccountType || product.accountType || "normal");
-    return { price: effective?.value, priceLabel: effective?.label || "普通价", skuName: sku.name || "", skuId: sku.skuId };
-  }).filter((item) => Number.isFinite(item.price));
-  const current = candidates.sort((left, right) => left.price - right.price)[0] || { price: Number(snapshot?.price) || 0, skuName: "" };
+  const current = lowestVerifiedSnapshotPrice(product, snapshot) || { price: 0, priceLabel: "当前价格", skuName: "" };
   const logs = [];
   if (db.feishu.webhookUrlEncrypted) {
     try {
@@ -1161,8 +1154,6 @@ app.post("/api/products/:id/open", async (req, res) => {
     res.status(409).json({ message: `没有可用的${accountLabel}账号登录态，也没有其他可回退的扫码账号，请先在账号授权页面登录。` });
     return;
   }
-  refreshTmallPriceCircuit(authSession);
-  if (tmallPriceCircuitOpen(authSession)) throw createTmallPriceCooldownError(authSession);
   res.json(await openProductInAccountChrome(product.url, authSession));
 });
 
@@ -1364,7 +1355,7 @@ async function savePromptHistory(input, result, selectedVariantKey = "safe") {
 
 function quickPromptFingerprint(input, productImages) {
   const { clientRequestId: _clientRequestId, ...request } = input;
-  const hash = createHash("sha256").update(JSON.stringify(request));
+  const hash = createHash("sha256").update(JSON.stringify({ pipelineVersion: QUICK_PROMPT_PIPELINE_VERSION, request }));
   for (const file of productImages) {
     hash.update("\0").update(String(file.mimetype || "")).update("\0").update(String(file.size || 0)).update("\0");
     hash.update(file.buffer);
@@ -1381,6 +1372,7 @@ function quickPromptConflict() {
 
 function quickPromptFallbackWarning(error) {
   if (!(error instanceof ModelApiError)) return "";
+  if (error.code === "MODEL_API_KEY_MISSING") return "未配置可用的提示词模型，已使用开放式本地保底生成可编辑版本；配置并检测文字模型后可获得完整 AI 创意策划。";
   if (error.status === 524) return "提示词通道上游响应超时（524），已改用本地规则生成可编辑版本；没有切换通道，也没有再次提交这次超时请求，请检查后继续生图。";
   if (error.code === "MODEL_API_TIMEOUT") return `提示词整理等待超过 ${Math.round(QUICK_PROMPT_STAGE_TIMEOUT_MS / 1_000)} 秒，已停止等待并改用本地规则生成可编辑版本；请检查后继续生图。`;
   if (error.code === "MODEL_API_NETWORK_ERROR") return "提示词通道连接异常，已在同一通道有限重试后改用本地规则生成可编辑版本；请检查后继续生图。";
@@ -1412,22 +1404,24 @@ async function buildQuickPromptResponse(quickInput, productImages) {
   const requestKey = quickInput.clientRequestId || newId("prompt_upstream");
   const signal = AbortSignal.timeout(QUICK_PROMPT_TOTAL_TIMEOUT_MS);
   let interpreted;
-  if (!productImages.length && quickInput.creationMode !== "product") {
-    interpreted = interpretQuickPromptLocally(quickInput);
-  } else {
-    try {
-      interpreted = await interpretQuickPrompt(db.modelConfig, quickInput, {
-        productImages,
-        signal,
-        timeoutMs: QUICK_PROMPT_STAGE_TIMEOUT_MS,
-        idempotencyKey: `${requestKey}.interpret`,
-      });
-    } catch (error) {
+  let interpretationWarning = "";
+  try {
+    interpreted = await interpretQuickPrompt(db.modelConfig, quickInput, {
+      productImages,
+      signal,
+      timeoutMs: QUICK_PROMPT_STAGE_TIMEOUT_MS,
+      idempotencyKey: `${requestKey}.interpret`,
+    });
+  } catch (error) {
+    if (productImages.length || quickInput.creationMode === "product") {
       throw quickPromptInterpretationError(error);
     }
+    interpretationWarning = quickPromptFallbackWarning(error);
+    if (!interpretationWarning) throw error;
+    interpreted = interpretQuickPromptLocally(quickInput);
   }
   let result;
-  const warnings = [...interpreted.warnings];
+  const warnings = [...interpreted.warnings, ...(interpretationWarning ? [interpretationWarning] : [])];
   try {
     result = await generatePromptSet(db.modelConfig, interpreted.input, {
       productImages,
@@ -1463,12 +1457,14 @@ async function persistQuickPromptResponse({ id, fingerprint, response, historyIt
   await updateDb((current) => {
     const state = normalizePromptStudioState(current.promptStudio);
     const existing = id ? state.quickRequests.find((entry) => entry.id === id) : null;
-    if (existing && existing.fingerprint !== fingerprint) throw quickPromptConflict();
-    if (existing) return current;
+    if (existing?.pipelineVersion === QUICK_PROMPT_PIPELINE_VERSION && existing.fingerprint !== fingerprint) throw quickPromptConflict();
+    if (existing?.pipelineVersion === QUICK_PROMPT_PIPELINE_VERSION) return current;
     current.promptStudio = normalizePromptStudioState({
       ...state,
       records: historyItem ? [historyItem, ...state.records] : state.records,
-      quickRequests: id ? [{ id, fingerprint, response, createdAt: new Date().toISOString() }, ...state.quickRequests] : state.quickRequests,
+      quickRequests: id
+        ? [{ id, fingerprint, response, createdAt: new Date().toISOString(), pipelineVersion: QUICK_PROMPT_PIPELINE_VERSION }, ...state.quickRequests.filter((entry) => entry.id !== id)]
+        : state.quickRequests,
     });
     return current;
   });
@@ -1492,7 +1488,7 @@ async function runQuickPromptRequest(quickInput, productImages) {
   const promise = (async () => {
     const state = normalizePromptStudioState((await readDb()).promptStudio);
     const cached = state.quickRequests.find((entry) => entry.id === id);
-    if (cached) {
+    if (cached?.pipelineVersion === QUICK_PROMPT_PIPELINE_VERSION) {
       if (cached.fingerprint !== fingerprint) throw quickPromptConflict();
       return cached.response;
     }
@@ -1512,6 +1508,15 @@ app.post("/api/prompt-studio/quick-generate", parsePromptStudioUpload, async (re
   const quickInput = validateQuickPromptInput(promptStudioMultipartRequest(req));
   const productImages = req.files?.productImages || [];
   res.json(await runQuickPromptRequest(quickInput, productImages));
+});
+
+app.post("/api/prompt-studio/enhance", parsePromptStudioUpload, async (req, res) => {
+  const input = validateQuickPromptInput(promptStudioMultipartRequest(req));
+  const db = await readDb();
+  res.json(await writeFreeformImagePrompt(db.modelConfig, input, {
+    productImages: req.files?.productImages || [],
+    idempotencyKey: input.clientRequestId || "",
+  }));
 });
 
 app.post("/api/prompt-studio/generate", parsePromptStudioUpload, async (req, res) => {
@@ -1769,8 +1774,6 @@ app.post("/api/auth/taobao/scan/start", async (req, res) => {
   const parsed = schema.parse(req.body || {});
   const profileKey = newId("taobao");
   const db = await readDb();
-  const protectedSession = activeTmallPriceProtection(db.authSessions);
-  if (protectedSession) throw createTmallPriceCooldownError(protectedSession);
   const browserPort = await findAvailableBrowserPort([
     ...db.authSessions.map((session) => session.browserPort),
     ...(Array.isArray(db.pendingAuthScans) ? db.pendingAuthScans.map((scan) => scan.browserPort) : []),
@@ -1797,7 +1800,6 @@ app.post("/api/auth/sessions/:id/reauthorize", async (req, res) => {
   if (session.source !== "taobao-browser" || !session.browserProfileKey || !session.browserPort) {
     return res.status(400).json({ message: "手动 Cookie 账号请在左侧重新粘贴 Cookie；只有扫码账号支持重新授权。" });
   }
-  if (tmallPriceCircuitOpen(session)) throw createTmallPriceCooldownError(session);
   await resetTmallSession({ profileKey: session.browserProfileKey, port: session.browserPort });
   const login = await openTmallLogin({ profileKey: session.browserProfileKey, port: session.browserPort });
   await rememberPendingScan({
@@ -1818,8 +1820,6 @@ async function syncPendingScan(profileKey) {
     || (Array.isArray(data.pendingAuthScans) ? data.pendingAuthScans.find((scan) => scan.profileKey === profileKey) : null);
   const existing = data.authSessions.find((session) => session.browserProfileKey === profileKey);
   if (!pending) return existing ? { status: "synced", session: existing } : { status: "expired" };
-  const protectedSession = activeTmallPriceProtection(data.authSessions);
-  if (protectedSession) throw createTmallPriceCooldownError(protectedSession);
   if (existing && !pending.sessionId) {
     await forgetPendingScan(profileKey);
     return { status: "synced", session: existing };
@@ -1906,14 +1906,15 @@ async function checkAuthSession(session) {
   if (session.source !== "taobao-browser" || !session.browserProfileKey || !session.browserPort) {
     return { id: session.id, loginStatus: "manual", message: "手动 Cookie 无法无损检测，请通过实际抓取或重新粘贴 Cookie 更新。" };
   }
-  if (tmallPriceCircuitOpen(session)) return protectedAuthCheckResult(session);
   const state = await checkTaobaoSession({ profileKey: session.browserProfileKey, port: session.browserPort });
   const checkedAt = new Date().toISOString();
   const status = state.status || (state.loggedIn && state.cookie ? "valid" : "degraded");
   const loginStatus = status === "valid" ? "valid" : status === "expired" ? "expired" : session.loginStatus || "valid";
   const tmallPriceStatus = status === "expired"
     ? TMALL_PRICE_STATUS.UNKNOWN
-    : session.tmallPriceStatus || TMALL_PRICE_STATUS.UNKNOWN;
+    : session.tmallPriceStatus === TMALL_PRICE_STATUS.COOLDOWN
+      ? TMALL_PRICE_STATUS.UNKNOWN
+      : session.tmallPriceStatus || TMALL_PRICE_STATUS.UNKNOWN;
   let updated;
   await updateDb((db) => {
     db.authSessions = db.authSessions.map((item) => {
@@ -1929,7 +1930,7 @@ async function checkAuthSession(session) {
           tmallPriceDeviceCooldownUntil: null,
         } : {}),
         lastCheckedAt: checkedAt,
-        healthStatus: status === "valid" && tmallPriceStatus !== TMALL_PRICE_STATUS.COOLDOWN ? "healthy" : "degraded",
+        healthStatus: status === "valid" ? "healthy" : "degraded",
         consecutiveFailures: status === "valid" && tmallPriceStatus === TMALL_PRICE_STATUS.VALID ? 0 : item.consecutiveFailures,
       };
       return updated;
@@ -1939,9 +1940,7 @@ async function checkAuthSession(session) {
   const message = status === "valid"
     ? tmallPriceStatus === TMALL_PRICE_STATUS.VALID
       ? "淘宝登录有效；天猫价格能力已通过真实商品价格响应验证。"
-      : tmallPriceStatus === TMALL_PRICE_STATUS.COOLDOWN
-        ? "淘宝登录有效；天猫价格能力仍在冷却，登录检测不会将其误判为恢复。"
-        : "淘宝登录有效；天猫价格能力尚未验证，需通过真实商品价格响应确认。"
+      : "淘宝登录有效；天猫价格能力尚未验证，需通过真实商品价格响应确认。"
     : status === "expired"
       ? "登录已明确失效，请重新授权。"
       : "账号浏览器仍保留，检测页面暂时异常；本次仅标记为待复检，不会清除登录状态。";

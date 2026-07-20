@@ -1,6 +1,24 @@
 import assert from "node:assert/strict";
+import fs from "node:fs/promises";
 import test from "node:test";
-import { applyAppliedCoinDiscount, applyMediaCapturePreference, applyNetworkPromoData, applyVisibleDiscountItems, applyVisibleSurprisePrice, buildBrowserCaptureEvidence, buyerShowCaptureFromNetwork, buyerShowsFromRateDetail, calculateAccountPriceScenario, calculatePriceScenarios, collectDiscountItems, collectDiscountItemsFromText, collectProductProgramItems, collectVisibleSurprisePrices, extractBuyerShowItems, extractSelectedSkuId, extractShopName, extractStructuredSku, filterProductVideoUrls, hasCurrentSkuPriceData, hasTmallPriceLoginGate, isUnselectablePromotionSku, resolveCaptureAccessMode, resolveCoinBenefit, resolveSkuPrices, scrapeTmallBuyerShows, scrapeTmallProduct, selectGalleryImages, selectSquareMainImage, sellerIdFromProductMedia } from "./tmallScraper.js";
+import { applyAppliedCoinDiscount, applyMediaCapturePreference, applyNetworkPromoData, applyVisibleDiscountItems, applyVisibleSurprisePrice, buildBrowserCaptureEvidence, buyerShowCaptureFromNetwork, buyerShowsFromRateDetail, calculateAccountPriceScenario, calculatePriceScenarios, collectDiscountItems, collectDiscountItemsFromText, collectProductProgramItems, collectVisibleSurprisePrices, extractBuyerShowItems, extractEmbeddedPromotionComponent, extractSelectedSkuId, extractShopName, extractStructuredSku, filterProductVideoUrls, gatedSelectionSkuIds, hasCurrentSkuPriceData, hasTmallPriceLoginGate, isUnselectablePromotionSku, resolveCaptureAccessMode, resolveCoinBenefit, resolveSkuPrices, scrapeTmallBuyerShows, scrapeTmallProduct, selectGalleryImages, selectSquareMainImage, sellerIdFromProductMedia, shouldRequireTmallPriceAuthorization } from "./tmallScraper.js";
+import { resolveEmbeddedSkuPriceEvidence } from "./priceResolver.js";
+
+test("Tmall scraper has no Node-side price fetch escape hatch", async () => {
+  const source = await fs.readFile(new URL("./tmallScraper.js", import.meta.url), "utf8");
+  assert.doesNotMatch(source, /\bfetch\s*\(/, "淘宝/天猫价格只能由账号浏览器采集、脱敏落盘并重读后解析");
+});
+
+test("extractEmbeddedPromotionComponent skips an invalid leading candidate", () => {
+  const expected = {
+    trackParams: { itemId: "613114976305", skuId: "6012220507404", price1: "589", price2: "243" },
+    xsRedPocketParams: { tbShopRedPocket: "{\"umpInfo\":{\"umpPromotionList\":[]}}" },
+  };
+  const html = `<script>window.__PLACEHOLDER__={"xsRedPacketParamVO":{}};</script>
+    <script>window.__DATA__={"xsRedPacketParamVO":${JSON.stringify(expected)}};</script>`;
+
+  assert.deepEqual(extractEmbeddedPromotionComponent(html), expected);
+});
 
 test("browser captures require a verified account identity before prices are trusted", () => {
   const browserSession = { source: "taobao-browser", cookie: "configured" };
@@ -25,6 +43,52 @@ test("price access gate recognizes the real Tmall login prompt only on price res
   assert.equal(hasTmallPriceLoginGate([{ url: "https://h5api.m.tmall.com/h5/mtop.taobao.detail.getdetail/6.0/", body: gatedBody }]), false);
   assert.equal(hasTmallPriceLoginGate([{ url: "https://h5api.m.tmall.com/h5/mtop.taobao.pcdetail.data.adjust/1.0/", body: '{"data":{"price":"139"}}' }]), false);
   assert.equal(hasTmallPriceLoginGate([], "登录查看更多优惠"), true);
+});
+
+test("price login copy does not discard exact current-SKU prices already saved locally", () => {
+  const observed = [
+    ["6206877831711", 705, 378.16],
+    ["6088816047261", 705, 334.90],
+    ["6200494863132", 779, 478.46],
+    ["6036847382373", 669, 339.06],
+    ["6096276240242", 709, 364.65],
+  ];
+  const html = JSON.stringify({
+    skuBase: { props: [], skus: observed.map(([skuId]) => ({ skuId, propPath: "" })) },
+    skuCore: { sku2info: Object.fromEntries(observed.map(([skuId, list, current]) => [skuId, {
+      price: { priceTitle: "优惠前", priceText: String(list) },
+      subPrice: { priceTitle: "平台加补后", priceText: String(current) },
+    }])) },
+  });
+  const skuPrices = extractStructuredSku(html).skuPrices;
+  const resolutions = skuPrices.map((sku) => resolveEmbeddedSkuPriceEvidence(sku, {
+    itemId: "668945261101",
+    skuId: sku.skuId,
+    accountType: "normal",
+    capturedAt: "2026-07-20T06:59:15.842Z",
+  }));
+  const gatedPayloads = [{
+    url: "https://h5api.m.tmall.com/h5/mtop.taobao.pcdetail.data.adjust/1.0/",
+    body: JSON.stringify({ data: { componentsVO: { priceVO: { price: { priceActionText: "登录查看更多优惠" } } } } }),
+  }];
+
+  assert.deepEqual(skuPrices.map((sku) => sku.normalPrice), observed.map(([, , price]) => price));
+  assert.equal(shouldRequireTmallPriceAuthorization(gatedPayloads, resolutions), false);
+  assert.equal(shouldRequireTmallPriceAuthorization(gatedPayloads, []), true);
+});
+
+test("only unresolved SKU selection windows are retried after a price login response", () => {
+  const captureRunId = "capture-run-668";
+  const payloads = [
+    { url: "https://h5api.m.tmall.com/h5/mtop.taobao.pcdetail.data.adjust/1.0/", body: '{"data":{"price":"445"}}', captureRunId, responseSequence: 1 },
+    { url: "https://h5api.m.tmall.com/h5/mtop.taobao.pcdetail.data.adjust/1.0/", body: '{"data":{"priceActionText":"登录查看更多优惠"}}', captureRunId, responseSequence: 2 },
+  ];
+  const selections = [
+    { skuId: "6206877831711", selected: true, responseObserved: true, captureRunId, responseSequenceStartExclusive: 0, responseSequenceEndInclusive: 1 },
+    { skuId: "6096276240242", selected: true, responseObserved: false, captureRunId, responseSequenceStartExclusive: 1, responseSequenceEndInclusive: 2 },
+  ];
+
+  assert.deepEqual(gatedSelectionSkuIds(payloads, selections), ["6096276240242"]);
 });
 
 test("shared scrapers reject every non-browser source before network access", async () => {

@@ -33,21 +33,22 @@ import {
   productVideos,
   skuForAccountView,
   verifiedPriceChannel,
+  verifiedPriceChannelsForAccount,
   type SkuPrice,
 } from './productDisplayUtils'
 
 const SkuPriceTrend = lazy(() => import('./SkuPriceTrend').then((module) => ({ default: module.SkuPriceTrend })))
 const EMPTY_ACCOUNT_CAPTURES: NonNullable<Snapshot['accountCaptures']> = []
-const monitorChannelOptions: Array<{ value: MonitorChannel; label: string; accounts: Array<NonNullable<Product['accountType']>> }> = [
-  { value: 'lowest', label: '最低已验证价', accounts: ['normal', 'gift', 'vip88'] },
-  { value: 'normal', label: '普通价', accounts: ['normal', 'gift', 'vip88'] },
-  { value: 'billion', label: '百亿补贴价', accounts: ['normal', 'gift', 'vip88'] },
-  { value: 'seckill', label: '淘宝秒杀价', accounts: ['normal', 'gift', 'vip88'] },
-  { value: 'government', label: '国补价', accounts: ['normal', 'gift', 'vip88'] },
-  { value: 'surprise', label: '惊喜立减价', accounts: ['normal', 'gift', 'vip88'] },
-  { value: 'gift', label: '礼金价', accounts: ['gift', 'vip88'] },
-  { value: 'vip88', label: '88VIP价', accounts: ['vip88'] },
-  { value: 'coin', label: '淘金币价', accounts: ['normal', 'gift', 'vip88'] },
+const monitorChannelOptions: Array<{ value: MonitorChannel; label: string }> = [
+  { value: 'lowest', label: '最低已验证价' },
+  { value: 'normal', label: '普通价' },
+  { value: 'billion', label: '百亿补贴价' },
+  { value: 'seckill', label: '淘宝秒杀价' },
+  { value: 'government', label: '国补价' },
+  { value: 'surprise', label: '惊喜立减价' },
+  { value: 'gift', label: '礼金价' },
+  { value: 'vip88', label: '88VIP价' },
+  { value: 'coin', label: '淘金币价' },
 ]
 
 type Props = {
@@ -79,6 +80,12 @@ function primaryPriceClass(label: string) {
   if (label === '百亿补贴价') return { label: 'text-indigo-600', value: 'text-indigo-700' }
   if (label === '淘宝秒杀价') return { label: 'text-fuchsia-600', value: 'text-fuchsia-700' }
   return { label: 'text-sky-600', value: 'text-sky-700' }
+}
+
+function benefitPriceClass(label: string) {
+  if (/礼金/.test(label)) return { background: 'bg-orange-50', label: 'text-orange-600', value: 'text-orange-700' }
+  if (/88\s*VIP/i.test(label)) return { background: 'bg-violet-50', label: 'text-violet-600', value: 'text-violet-700' }
+  return { background: 'bg-rose-50', label: 'text-rose-600', value: 'text-rose-700' }
 }
 
 function CaptureStatus({ product }: { product: Product }) {
@@ -124,6 +131,8 @@ function SkuPricePanel({ product, snapshots, showTrend, accountSessionId, accoun
       ? []
       : [skuForAccountView(sku, accountSessionId, accountType)]
   ))
+  const supportedMonitorChannels = new Set<MonitorChannel>(['lowest', ...verifiedPriceChannelsForAccount(primaryAccountType)])
+  const availableMonitorChannels = monitorChannelOptions.filter((option) => supportedMonitorChannels.has(option.value))
 
   async function copySkuId(skuId: string) {
     await navigator.clipboard.writeText(skuId)
@@ -198,12 +207,13 @@ function SkuPricePanel({ product, snapshots, showTrend, accountSessionId, accoun
       {!isPrimaryAccountView && <div className="mb-3 rounded-lg border border-sky-100 bg-sky-50 px-3 py-2 text-xs leading-5 text-sky-800">当前为 {accountName} 的历史查看视角，不修改监控规则。切回带“监控”标记的账号视角后可设置监控价。</div>}
       <div className="grid gap-3" style={{ gridTemplateColumns: 'repeat(auto-fit, minmax(min(100%, 440px), 1fr))' }}>
         {skuPrices.map((sku) => {
-          const allLayers = priceLayersForSku(sku)
+          const allLayers = priceLayersForSku(sku, { accountType })
           const originalLayer = allLayers.find((layer) => layer.kind === 'original' || layer.label === '标价')
-          const priceLayers = priceLayersForSku(sku, { includeOriginal: false })
-          const normalVerified = verifiedPriceChannel(sku, 'normal')
+          const priceLayers = priceLayersForSku(sku, { includeOriginal: false, accountType })
+          const normalVerified = verifiedPriceChannel(sku, 'normal', accountType)
           const normalPrice = normalVerified ? normalPriceForSku(sku) : null
           const accountBenefit = accountBenefitForSku(sku, accountType)
+          const accountBenefitClass = benefitPriceClass(accountBenefit.label)
           const coinBenefit = coinBenefitForSku(sku)
           const coinPrice = coinPriceForSku(sku)
           const coinPriceLabel = anonymous ? '淘金币需登录' : coinPrice ? '淘金币价' : coinBenefit.available ? '淘金币抵扣' : '无淘金币'
@@ -220,10 +230,10 @@ function SkuPricePanel({ product, snapshots, showTrend, accountSessionId, accoun
             if (price.kind === 'discount') return false
             if (price.label === primaryLabel || price.label === '淘金币价') return false
             if (price.label === '普通价' && (primaryLabel === '淘宝秒杀价' || primaryLabel === '百亿补贴价')) return false
-            if (price.label === '国补价' && !verifiedPriceChannel(sku, 'government')) return false
-            if (price.label === '惊喜立减价' && !verifiedPriceChannel(sku, 'surprise')) return false
-            if (price.label === '礼金价' && !verifiedPriceChannel(sku, 'gift')) return false
-            if (price.label === '88VIP价' && !verifiedPriceChannel(sku, 'vip88')) return false
+            if (price.label === '国补价' && !verifiedPriceChannel(sku, 'government', accountType)) return false
+            if (price.label === '惊喜立减价' && !verifiedPriceChannel(sku, 'surprise', accountType)) return false
+            if (/首单|礼金/.test(price.label) && !verifiedPriceChannel(sku, 'gift', accountType)) return false
+            if (price.label === '88VIP价' && !verifiedPriceChannel(sku, 'vip88', accountType)) return false
             const key = `${price.label}:${price.value.toFixed(2)}`
             if (seenPrices.has(key)) return false
             seenPrices.add(key)
@@ -232,7 +242,6 @@ function SkuPricePanel({ product, snapshots, showTrend, accountSessionId, accoun
           const monitorChannel = monitorChannels[sku.skuId] || 'lowest'
           const monitorKey = monitorDraftKey(sku.skuId, monitorChannel)
           const monitorPriceStatus = monitorPriceStatuses[monitorKey]
-          const availableMonitorChannels = monitorChannelOptions.filter((option) => option.accounts.includes(primaryAccountType))
           const stalePrices = Object.entries(sku.stalePrices || {}).filter((entry): entry is [Exclude<MonitorChannel, 'lowest'>, NonNullable<typeof entry[1]>] => Boolean(entry[1]))
           return (
           <div key={sku.skuId} className="rounded-xl border border-slate-200/70 bg-white p-3 shadow-[0_4px_14px_rgba(15,23,42,0.05)] transition-[border-color,box-shadow,transform] duration-200 hover:-translate-y-px hover:border-sky-200 hover:shadow-[0_8px_20px_rgba(15,23,42,0.08)]">
@@ -278,14 +287,14 @@ function SkuPricePanel({ product, snapshots, showTrend, accountSessionId, accoun
                 <span className={`text-xs font-medium leading-4 ${primaryClass.label}`}>{primaryLabel}</span>
                 <span className={`whitespace-nowrap text-sm font-semibold leading-none ${primaryClass.value}`}>{currency(normalPrice)}</span>
               </div>
-              <div className={`flex min-h-12 min-w-0 flex-col items-start justify-center gap-1 rounded px-2 py-1.5 ${!anonymous && accountBenefit.available ? accountType === 'gift' ? 'bg-orange-50' : accountType === 'vip88' ? 'bg-violet-50' : 'bg-rose-50' : 'bg-slate-50'}`}>
-                  <span className={`text-xs font-medium leading-4 ${!anonymous && accountBenefit.available ? accountType === 'gift' ? 'text-orange-600' : accountType === 'vip88' ? 'text-violet-600' : 'text-rose-600' : 'text-slate-400'}`}>
+              <div className={`flex min-h-12 min-w-0 flex-col items-start justify-center gap-1 rounded px-2 py-1.5 ${!anonymous && accountBenefit.available ? accountBenefitClass.background : 'bg-slate-50'}`}>
+                  <span className={`text-xs font-medium leading-4 ${!anonymous && accountBenefit.available ? accountBenefitClass.label : 'text-slate-400'}`}>
                     {!normalVerified ? '等待明确证据' : anonymous ? `${accountBenefit.label}需登录` : accountBenefit.available ? accountBenefit.label : `未获取${accountBenefit.label}`}
                   </span>
                   {anonymous ? (
                     <span className="whitespace-nowrap text-xs text-slate-400">个性价不可用</span>
                   ) : accountBenefit.price ? (
-                    <span className={`whitespace-nowrap text-sm font-semibold leading-none ${accountType === 'gift' ? 'text-orange-700' : accountType === 'vip88' ? 'text-violet-700' : 'text-rose-700'}`}>{currency(accountBenefit.price)}</span>
+                    <span className={`whitespace-nowrap text-sm font-semibold leading-none ${accountBenefitClass.value}`}>{currency(accountBenefit.price)}</span>
                   ) : (
                     <span className="whitespace-nowrap text-xs text-slate-400">当前 SKU 无</span>
                   )}
@@ -327,8 +336,8 @@ function SkuPricePanel({ product, snapshots, showTrend, accountSessionId, accoun
       </div>
       <DiscountDetailDialog
         sku={detailSku}
-        accountType={accountType}
         accessMode={snapshot?.accessMode}
+        accountType={accountType}
         onClose={() => setDetailSku(null)}
       />
     </div>

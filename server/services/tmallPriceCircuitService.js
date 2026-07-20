@@ -11,6 +11,7 @@ export const TMALL_PRICE_STATUS = Object.freeze({
 const DEFAULT_ACCOUNT_COOLDOWN_MS = 15 * 60 * 1000;
 const DEFAULT_DEVICE_COOLDOWN_MS = 5 * 60 * 1000;
 const LOCAL_DEVICE_KEY = "local-device";
+const ACCESS_RESTRICTION_REASON = "TAOBAO_ACCESS_RESTRICTED";
 
 const deviceCooldowns = new Map();
 const deviceCooldownReasons = new Map();
@@ -35,15 +36,11 @@ function rememberPersistedCooldown(session, now) {
   const key = tmallPriceDeviceKey(session);
   if (!key) return 0;
   const persisted = timestamp(session.tmallPriceDeviceCooldownUntil);
-  if (persisted > now) {
+  const reason = session.tmallPriceFailureReason || "";
+  if (persisted > now && reason === ACCESS_RESTRICTION_REASON) {
     const current = deviceCooldowns.get(key) || 0;
-    const reason = session.tmallPriceFailureReason || "TMALL_PRICE_AUTH_REQUIRED";
     deviceCooldowns.set(key, Math.max(current, persisted));
-    if (!deviceCooldownReasons.has(key)
-      || reason === "TAOBAO_ACCESS_RESTRICTED"
-      || deviceCooldownReasons.get(key) !== "TAOBAO_ACCESS_RESTRICTED") {
-      deviceCooldownReasons.set(key, session.tmallPriceFailureReason || "TMALL_PRICE_AUTH_REQUIRED");
-    }
+    deviceCooldownReasons.set(key, reason);
   }
   return deviceCooldowns.get(key) || 0;
 }
@@ -76,10 +73,16 @@ export function tmallPriceCircuitOpen(session = {}, now = Date.now()) {
   return remaining > 0;
 }
 
+export function tmallAccessRestrictionOpen(session = {}, now = Date.now()) {
+  const device = activeDeviceCooldown(session, now);
+  return (device.until > now && device.reason === ACCESS_RESTRICTION_REASON)
+    || (session.tmallPriceFailureReason === ACCESS_RESTRICTION_REASON
+      && timestamp(session.tmallPriceCooldownUntil) > now);
+}
+
 export function createTmallPriceCooldownError(session = {}, now = Date.now()) {
   const remaining = tmallPriceCooldownRemaining(session, now);
-  const restricted = session.tmallPriceFailureReason === "TAOBAO_ACCESS_RESTRICTED"
-    || activeDeviceCooldown(session, now).reason === "TAOBAO_ACCESS_RESTRICTED";
+  const restricted = tmallAccessRestrictionOpen(session, now);
   const error = new Error(remaining > 0
     ? restricted
       ? `淘宝访问限制保护中，请等待 ${Math.ceil(remaining / 60_000)} 分钟后再检测；期间已阻止所有账号自动抓取。`
@@ -108,20 +111,19 @@ export function markTmallPriceGate(session, {
   reason = "TMALL_PRICE_AUTH_REQUIRED",
 } = {}) {
   const accountUntil = now + Math.max(1_000, finitePositive(accountCooldownMs) || DEFAULT_ACCOUNT_COOLDOWN_MS);
-  const deviceUntil = now + Math.max(1_000, finitePositive(deviceCooldownMs) || DEFAULT_DEVICE_COOLDOWN_MS);
+  const restricted = reason === ACCESS_RESTRICTION_REASON;
+  const deviceUntil = restricted
+    ? now + Math.max(1_000, finitePositive(deviceCooldownMs) || DEFAULT_DEVICE_COOLDOWN_MS)
+    : 0;
   const key = tmallPriceDeviceKey(session);
-  if (key) {
+  if (key && restricted) {
     const current = deviceCooldowns.get(key) || 0;
     deviceCooldowns.set(key, Math.max(current, deviceUntil));
-    if (!deviceCooldownReasons.has(key)
-      || reason === "TAOBAO_ACCESS_RESTRICTED"
-      || deviceCooldownReasons.get(key) !== "TAOBAO_ACCESS_RESTRICTED") {
-      deviceCooldownReasons.set(key, reason);
-    }
+    deviceCooldownReasons.set(key, reason);
   }
   session.tmallPriceStatus = TMALL_PRICE_STATUS.COOLDOWN;
   session.tmallPriceCooldownUntil = new Date(accountUntil).toISOString();
-  session.tmallPriceDeviceCooldownUntil = new Date(deviceUntil).toISOString();
+  session.tmallPriceDeviceCooldownUntil = deviceUntil ? new Date(deviceUntil).toISOString() : null;
   session.tmallPriceLastFailureAt = new Date(now).toISOString();
   session.tmallPriceFailureCount = Number(session.tmallPriceFailureCount || 0) + 1;
   session.tmallPriceFailureReason = reason;

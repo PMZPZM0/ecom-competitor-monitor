@@ -149,14 +149,14 @@ function downloadBlob(blob: Blob, filename: string) {
 
 function compilePrompt(annotations: Annotation[]) {
   const instructions = annotations.map((annotation, index) => `${index + 1}. ${annotation.kind === 'rectangle' ? '框选区域' : '点击位置'}：${annotation.note.trim()}`)
-  return `这是严格局部编辑任务。只按照批注图中的编号逐项修改对应位置，编号与修改要求一一对应。除各编号明确要求修改的内容外，未标注区域、产品身份、结构比例、颜色材质、品牌文字、视角与构图必须保持原图不变，不要整体重绘。若某编号要求新增、删除或替换文字，只修改该编号指定区域和指定文字；新增或替换的文字必须与该条原文逐字一致，其他文字保持不变。\n${instructions.join('\n')}`
+  return instructions.join('\n')
 }
 
 type Props = {
   item: ImageLibraryItem
   src: string
   onClose: () => void
-  onSubmit: (blob: Blob, mode: AnnotationExportMode, prompt: string) => Promise<void>
+  onSubmit: (blob: Blob, mode: AnnotationExportMode, prompt: string, maskBlob?: Blob) => Promise<void>
 }
 
 export function ImageAnnotationDialog({ item, src, onClose, onSubmit }: Props) {
@@ -401,6 +401,40 @@ export function ImageAnnotationDialog({ item, src, onClose, onSubmit }: Props) {
     return output
   }
 
+  async function buildEditMask() {
+    const canvas = canvasRef.current
+    const image = baseImageRef.current
+    if (!canvas || !image) throw new Error('批注画布尚未就绪。')
+    const output = document.createElement('canvas')
+    output.width = image.naturalWidth
+    output.height = image.naturalHeight
+    const context = output.getContext('2d')
+    if (!context) throw new Error('无法创建批注蒙版。')
+    context.fillStyle = '#000000'
+    context.fillRect(0, 0, output.width, output.height)
+    context.globalCompositeOperation = 'destination-out'
+    const scaleX = output.width / canvas.width
+    const scaleY = output.height / canvas.height
+    const shortSide = Math.min(output.width, output.height)
+    const padding = Math.max(8, Math.round(shortSide * 0.012))
+    for (const annotation of annotationsRef.current) {
+      if (annotation.kind === 'rectangle') {
+        const x = Math.max(0, annotation.x * scaleX - padding)
+        const y = Math.max(0, annotation.y * scaleY - padding)
+        const width = Math.min(output.width - x, annotation.width * scaleX + padding * 2)
+        const height = Math.min(output.height - y, annotation.height * scaleY + padding * 2)
+        context.fillRect(x, y, width, height)
+      } else {
+        const radius = Math.max(32, shortSide * 0.065)
+        context.beginPath()
+        context.arc(annotation.x * scaleX, annotation.y * scaleY, radius, 0, Math.PI * 2)
+        context.fill()
+      }
+    }
+    context.globalCompositeOperation = 'source-over'
+    return canvasBlob(output)
+  }
+
   async function exportImage() {
     if (!annotations.length) return
     setBusy('export')
@@ -426,9 +460,13 @@ export function ImageAnnotationDialog({ item, src, onClose, onSubmit }: Props) {
     setBusy('submit')
     setError('')
     try {
-      const blob = await uploadBlob(await buildExport())
+      const [blob, maskBlob] = await Promise.all([
+        uploadBlob(await buildExport()),
+        buildEditMask(),
+      ])
       if (blob.size > MAX_UPLOAD_BYTES) throw new Error('批注文件超过 8 MB，请换用较低分辨率原图后重试。')
-      await onSubmit(blob, 'annotation', compilePrompt(annotations))
+      if (maskBlob.size > MAX_UPLOAD_BYTES) throw new Error('批注蒙版超过 8 MB，请缩小框选范围后重试。')
+      await onSubmit(blob, 'annotation', compilePrompt(annotations), maskBlob)
       onClose()
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : '提交批注失败。')

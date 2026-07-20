@@ -21,20 +21,14 @@ import { recordPriceEngineShadowRound } from "./priceEngineShadowService.js";
 import { drainNotificationOutbox, enqueuePostCommitNotifications } from "./notificationOutboxService.js";
 import { applySkuVerificationHistory, updateSkuLifecycle } from "./skuStateService.js";
 import {
-  createTmallPriceCooldownError,
-  hydrateTmallPriceCircuits,
   isTmallPriceCooldownError,
   isTmallPriceGateError,
-  markTmallPriceGate,
   markTmallPriceSuccess,
-  refreshTmallPriceCircuit,
-  tmallPriceCircuitOpen,
 } from "./tmallPriceCircuitService.js";
 
 let timer = null;
 const captureQueueTails = new Map();
 let captureAdmissionTail = Promise.resolve();
-let protectedBrowserCaptureTail = Promise.resolve();
 const accountCaptureTails = new Map();
 const queueJobPatchTails = new Map();
 const scheduledCaptureJobIds = new Set();
@@ -354,41 +348,9 @@ export async function withAccountCaptureLock(session, operation) {
   }
 }
 
-async function pauseAutomaticMonitoringForAccessRestriction() {
-  stopScheduler();
-  await updateDb((current) => {
-    current.monitor = { ...current.monitor, running: false, nextRunAt: null };
-    current.products = scheduleProducts(current.products, current.monitor, { reset: true });
-    return current;
-  });
-}
-
 export async function withProtectedBrowserCapture(session, operation) {
-  const execute = async () => {
-    if (session?.source === "taobao-browser") {
-      refreshTmallPriceCircuit(session);
-      if (tmallPriceCircuitOpen(session)) throw createTmallPriceCooldownError(session);
-    }
-    try {
-      if (session) session.lastUsedAt = new Date().toISOString();
-      return await withAccountCaptureLock(session, operation);
-    } catch (error) {
-      if (session?.source === "taobao-browser" && isTmallPriceGateError(error)) {
-        const accessRestricted = error?.code === "TAOBAO_ACCESS_RESTRICTED";
-        const cooldownMs = accessRestricted ? Math.max(60_000, Number(error.retryAfterMs) || 24 * 60 * 60_000) : null;
-        markTmallPriceGate(session, accessRestricted ? {
-          accountCooldownMs: cooldownMs,
-          deviceCooldownMs: cooldownMs,
-          reason: error.code,
-        } : { reason: error?.code || "TMALL_PRICE_AUTH_REQUIRED" });
-        if (accessRestricted) await pauseAutomaticMonitoringForAccessRestriction();
-      }
-      throw error;
-    }
-  };
-  const current = protectedBrowserCaptureTail.catch(() => undefined).then(execute);
-  protectedBrowserCaptureTail = current.then(() => undefined, () => undefined);
-  return current;
+  if (session) session.lastUsedAt = new Date().toISOString();
+  return withAccountCaptureLock(session, operation);
 }
 
 function persistSessionHealth(current, sessions) {
@@ -1290,7 +1252,6 @@ export async function captureProduct(product, authSessions = [], { scraper = scr
     }
     const targetAccountType = product.accountType || "normal";
     const sessions = [...authSessions].filter((session) => (session.accountType || "normal") === targetAccountType || accountMode === "all");
-    hydrateTmallPriceCircuits(sessions);
     const primarySessions = sessions.filter((session) => (session.accountType || "normal") === targetAccountType);
     if (!primarySessions.length) {
       const accountLabel = targetAccountType === "gift" ? "礼金" : targetAccountType === "vip88" ? "88VIP" : "普通";
@@ -1303,7 +1264,6 @@ export async function captureProduct(product, authSessions = [], { scraper = scr
       : [targetAccountType];
     const sessionGroups = groupOrder.map((type) => sessions.filter((session) => (session.accountType || "normal") === type)).filter((group) => group.length);
     for (const group of sessionGroups) {
-      let groupCircuitOpened = false;
       const captureCandidate = snapshots.length === 0
         ? product
         : { ...product, captureBuyerShows: false, captureMediaAssets: false };
@@ -1339,24 +1299,19 @@ export async function captureProduct(product, authSessions = [], { scraper = scr
             if (shouldDegradeSessionForCaptureError(error.message)) session.healthStatus = "degraded";
             if (tmallGate) {
               session.healthStatus = "degraded";
-              groupCircuitOpened = true;
             } else if (!tmallCooldown) {
               sessionExpired = await confirmSessionExpiry(session, error.message);
               if (sessionExpired) session.loginStatus = "expired";
-            } else {
-              groupCircuitOpened = true;
             }
           }
           const message = isExplicitLoginExpiryError(error.message) && !sessionExpired
             ? "商品页临时跳转登录/验证，但账号检测仍有效，本次未保存价格。"
             : tmallGate
-              ? `${error.message} 已暂停该账号浏览器的连续重试，进入价格能力冷却。`
+              ? `${error.message} 本次抓取已停止，可立即重新授权或再次抓取。`
               : error.message;
           accountErrors.push({ sessionId: session.id, accountName: session.name || "已授权账号", attempt: attempt + 1, message });
-          if (tmallGate || tmallCooldown) break;
         }
       }
-      if (!snapshots.length && groupCircuitOpened) break;
       if (!snapshots.length) break;
     }
     if (!snapshots.length) throw new Error(accountErrors.map((error) => `${error.accountName}：${error.message}`).join("；"));
@@ -1455,7 +1410,10 @@ async function runMonitorUnlocked({ source = "manual", productIds = null, includ
     const accountType = product.accountType || "normal";
     const productSessions = sessionsForProduct(activeSessions, accountType, productIndex, accountMode, product.primaryAccountSessionId);
     try {
-      return await attachLocalPriceEvidence(await captureProduct(captureCandidate, productSessions, { accountMode, scraper }), source);
+      return await attachLocalPriceEvidence(await captureProduct(captureCandidate, productSessions, {
+        accountMode,
+        scraper,
+      }), source);
     } finally {
       if (queueJob) {
         activeProductIds.delete(product.id);
@@ -1688,7 +1646,6 @@ async function runMaterialUnlocked(productId, { source = "manual-materials", scr
       session.lastFailureAt = new Date().toISOString();
       if (await confirmSessionExpiry(session, failureMessage)) session.loginStatus = "expired";
       else if (shouldDegradeSessionForCaptureError(failureMessage)) session.healthStatus = "degraded";
-      if (isTmallPriceGateError(error) || isTmallPriceCooldownError(error)) break;
     }
   }
 
@@ -1864,11 +1821,9 @@ async function runBuyerShowUnlocked(productId, { source = "manual-buyer-show", s
   let result = null;
   for (let attempt = 0; attempt < 2; attempt += 1) {
     const session = sessionCandidates[attempt % sessionCandidates.length];
-    let attemptError = null;
     try {
       result = await withProtectedBrowserCapture(session, () => scraper(product, session));
     } catch (error) {
-      attemptError = error;
       result = {
         capture: {
           status: "failed",
@@ -1890,7 +1845,6 @@ async function runBuyerShowUnlocked(productId, { source = "manual-buyer-show", s
     captures.push(result.capture);
     interactions.push(...(result.interactions || []).map((interaction) => ({ ...interaction, retryAttempt: attempt + 1 })));
     if (result.capture.status !== "failed") break;
-    if (isTmallPriceGateError(attemptError) || isTmallPriceCooldownError(attemptError)) break;
     if (attempt === 0) await delay(800);
   }
   result.capture.attempts = captures.flatMap((capture) => capture.attempts || []);

@@ -118,50 +118,64 @@ export function accountPriceContext(product, snapshot = product?.lastSnapshot ||
   return { accountType, account, accountName: capture?.accountName || "" };
 }
 
+function restrictedFirstOrderGift(sku, accountType) {
+  return accountType !== "vip88" && (sku?.priceResolution?.promotions || [])
+    .some((promotion) => String(promotion?.code || "") === "1");
+}
+
+function resolvedChannelForAccount(sku, channel, accountType = "normal") {
+  const resolved = sku?.priceResolution?.channels?.[channel];
+  if (sku?.resolutionStatus !== "verified"
+    || sku?.priceResolution?.status !== "verified"
+    || resolved?.status !== "verified"
+    || !Number.isSafeInteger(resolved.valueCents)
+    || resolved.valueCents <= 0) return null;
+  if (channel === "gift" && restrictedFirstOrderGift(sku, accountType)) return null;
+  if (channel === "vip88" && accountType !== "vip88") return null;
+  return resolved;
+}
+
 export function effectivePriceForSku(sku, accountType = "normal") {
-  const verified = (kind) => sku?.resolutionStatus === "verified" && sku?.priceResolution?.channels?.[kind]?.status === "verified";
-  const channelFields = [
+  const channelsInPriorityOrder = [
     // Campaign channels precede the public baseline so an alias value emitted
     // by the resolver is still reported with its explicit campaign label.
-    ["seckill", "淘宝秒杀价", "seckillPrice"],
-    ["billion", "百亿补贴价", "billionPrice"],
-    ["normal", "普通价", "normalPrice"],
-    ["government", "国补价", "governmentPrice"],
-    ["surprise", "惊喜立减价", "surprisePrice"],
-    ...(accountType === "gift" || accountType === "vip88" ? [["gift", "礼金价", "giftPrice"]] : []),
-    ...(accountType === "vip88" ? [["vip88", "88VIP价", "vipPrice"]] : []),
-    ["coin", "淘金币价", "coinPrice"],
+    ["seckill", "淘宝秒杀价"],
+    ["billion", "百亿补贴价"],
+    ["normal", "普通价"],
+    ["government", "国补价"],
+    ["surprise", "惊喜立减价"],
+    ["gift", channelDisplayLabel(sku, "gift", accountType)],
+    ...(accountType === "vip88" ? [["vip88", "88VIP价"]] : []),
+    ["coin", "淘金币价"],
   ];
-  const options = channelFields.map(([kind, label, field]) => verified(kind) ? { label, value: Number(sku[field]) } : null)
-    .filter((item) => item && Number.isFinite(item.value) && item.value > 0);
+  const options = channelsInPriorityOrder.map(([kind, label]) => {
+    const resolved = resolvedChannelForAccount(sku, kind, accountType);
+    return resolved ? { label, value: resolved.valueCents / 100 } : null;
+  }).filter(Boolean);
   return options.reduce((lowest, item) => (!lowest || item.value < lowest.value ? item : lowest), null);
 }
 
 function accountSupportsChannel(accountType, channel) {
-  if (["normal", "billion", "seckill", "government", "surprise", "coin"].includes(channel)) return true;
-  if (channel === "gift") return accountType === "gift" || accountType === "vip88";
+  if (["normal", "billion", "seckill", "government", "surprise", "gift", "coin"].includes(channel)) return true;
   return channel === "vip88" && accountType === "vip88";
+}
+
+function channelDisplayLabel(sku, channel, accountType = "normal") {
+  const configured = String(resolvedChannelForAccount(sku, channel, accountType)?.label || "").trim();
+  return configured.slice(0, 40) || channelLabels[channel]?.benefit || channel;
 }
 
 function channelValue(sku, channel, { anonymous, accountType }) {
   if (anonymous) return "需登录";
   const kind = channel === "normal" ? "normal" : channel === "gift" ? "gift" : channel === "vip88" ? "vip88" : channel;
-  if (sku?.resolutionStatus !== "verified" || sku?.priceResolution?.channels?.[kind]?.status !== "verified") {
+  const resolvedChannel = sku?.priceResolution?.channels?.[kind];
+  const verifiedChannel = resolvedChannelForAccount(sku, kind, accountType);
+  if (!verifiedChannel) {
+    if ((kind === "gift" && restrictedFirstOrderGift(sku, accountType)) || /^different-account-/.test(String(resolvedChannel?.reason || ""))) return "不适用";
     if (!accountSupportsChannel(accountType, channel)) return "不适用";
     return "本次未验证";
   }
-  if (channel === "coin") {
-    if (Number.isFinite(Number(sku.coinPrice)) && Number(sku.coinPrice) > 0) return priceText(Number(sku.coinPrice));
-    if (Number(sku.coinDiscountAmount) > 0) return `抵扣 ${priceText(Number(sku.coinDiscountAmount))}`;
-    return sku.coinStatus === "none" ? "无淘金币" : "未获取";
-  }
-  const channelInfo = channelLabels[channel];
-  const value = channel === "normal" ? Number(sku.normalPrice ?? sku.price) : Number(sku[channelInfo?.field || channel]);
-  if (Number.isFinite(value) && value > 0) return priceText(value);
-  if (!accountSupportsChannel(accountType, channel)) return "不适用";
-  const status = channel === "normal" ? "available" : sku[channelInfo?.status || `${channel}Status`];
-  if (status === "none") return channel === "normal" ? "无普通价" : `无${channelInfo?.benefit || "优惠"}`;
-  return "未获取";
+  return priceText(verifiedChannel.valueCents / 100);
 }
 
 function priceColumn(label, value) {
@@ -170,7 +184,7 @@ function priceColumn(label, value) {
     width: "weighted",
     weight: 1,
     vertical_align: "center",
-    elements: [{ tag: "markdown", content: `**${label}**\n${value}` }],
+    elements: [{ tag: "markdown", content: `**${escapeMarkdown(label)}**\n${value}` }],
   };
 }
 
@@ -228,7 +242,7 @@ export function buildPriceCard({ type, product, price, threshold, skuName, trigg
         priceColumn("淘金币价", channelValue(sku, "coin", { anonymous, accountType })),
       ] },
       { tag: "column_set", flex_mode: "none", horizontal_spacing: "small", columns: [
-        priceColumn("礼金价", channelValue(sku, "gift", { anonymous, accountType })),
+        priceColumn(channelDisplayLabel(sku, "gift", accountType), channelValue(sku, "gift", { anonymous, accountType })),
         priceColumn("88VIP价", channelValue(sku, "vip88", { anonymous, accountType })),
       ] },
       { tag: "markdown", content: `**监控规则** ${monitorRulesText(product, sku.skuId)}` },
@@ -240,7 +254,7 @@ export function buildPriceCard({ type, product, price, threshold, skuName, trigg
       const prefix = triggered.has(sku.skuId) ? "🔔" : "▫️";
       return [
         `${prefix} **${index + gridSkus.length + 1}. ${escapeMarkdown(sku.name || sku.skuId)}**`,
-        `普通价 ${channelValue(sku, "normal", { anonymous, accountType })}　淘宝秒杀价 ${channelValue(sku, "seckill", { anonymous, accountType })}　百亿补贴价 ${channelValue(sku, "billion", { anonymous, accountType })}　国补价 ${channelValue(sku, "government", { anonymous, accountType })}　惊喜立减价 ${channelValue(sku, "surprise", { anonymous, accountType })}　礼金价 ${channelValue(sku, "gift", { anonymous, accountType })}　88VIP价 ${channelValue(sku, "vip88", { anonymous, accountType })}　淘金币价 ${channelValue(sku, "coin", { anonymous, accountType })}　监控规则 ${monitorRulesText(product, sku.skuId)}`,
+        `普通价 ${channelValue(sku, "normal", { anonymous, accountType })}　淘宝秒杀价 ${channelValue(sku, "seckill", { anonymous, accountType })}　百亿补贴价 ${channelValue(sku, "billion", { anonymous, accountType })}　国补价 ${channelValue(sku, "government", { anonymous, accountType })}　惊喜立减价 ${channelValue(sku, "surprise", { anonymous, accountType })}　${escapeMarkdown(channelDisplayLabel(sku, "gift", accountType))} ${channelValue(sku, "gift", { anonymous, accountType })}　88VIP价 ${channelValue(sku, "vip88", { anonymous, accountType })}　淘金币价 ${channelValue(sku, "coin", { anonymous, accountType })}　监控规则 ${monitorRulesText(product, sku.skuId)}`,
       ].join("\n");
     });
     skuElements.push({ tag: "hr" }, { tag: "markdown", content: `**更多 SKU**\n${compactLines.join("\n\n")}` });

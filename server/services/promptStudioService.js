@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { explicitlyRequestsNoText, extractExplicitPosterCopy, hasPosterIntent } from "../utils/promptIntent.js";
 import { ModelApiError, requestModelApiJson, resolveModelConfig } from "./modelConfigService.js";
 
 export const PROMPT_STUDIO_CATEGORIES = Object.freeze([
@@ -25,11 +26,14 @@ export const PROMPT_STUDIO_OUTPUT_LIMITS = Object.freeze({
 });
 
 const FINAL_PROMPT_SEPARATOR = "\n\n";
+const NEGATIVE_PROMPT_RULES_MARKER = "以下为服务端基础排除规则（自动执行，无需编辑）：";
 const MODEL_NEGATIVE_PROMPT_LIMIT = 1_600;
 const LOCAL_FALLBACK_MODEL = "本地规则保底";
 const PROMPT_RETRYABLE_STATUSES = new Set([502, 503, 504]);
+const FREEFORM_PROMPT_RETRYABLE_STATUSES = new Set([...PROMPT_RETRYABLE_STATUSES, 524]);
 const PROMPT_RETRY_MIN_DELAY_MS = 180;
 const PROMPT_RETRY_JITTER_MS = 220;
+export const QUICK_PROMPT_PIPELINE_VERSION = 2;
 
 const CATEGORY_RULES = Object.freeze({
   "white-background": "使用纯净白底，主体完整清晰、边缘自然，保留合理接触阴影；不得增加场景道具、促销贴纸或无关装饰。",
@@ -253,6 +257,7 @@ const quickPromptRequestStorageSchema = z.object({
   fingerprint: z.string().regex(/^[a-f0-9]{64}$/),
   response: z.record(z.string(), z.unknown()),
   createdAt: storedTimestampSchema,
+  pipelineVersion: z.number().int().min(1).max(100).default(1),
 }).strict();
 
 function promptError(message, { code = "PROMPT_STUDIO_INVALID", status = 400 } = {}) {
@@ -277,6 +282,12 @@ export function validateQuickPromptInput(input) {
 
 function outputText(data) {
   if (typeof data?.output_text === "string" && data.output_text.trim()) return data.output_text.trim();
+  const chatContent = data?.choices?.[0]?.message?.content;
+  if (typeof chatContent === "string" && chatContent.trim()) return chatContent.trim();
+  if (Array.isArray(chatContent)) {
+    const chatText = chatContent.map((item) => typeof item?.text === "string" ? item.text : "").filter(Boolean).join("\n").trim();
+    if (chatText) return chatText;
+  }
   const text = Array.isArray(data?.output)
     ? data.output.flatMap((item) => Array.isArray(item?.content) ? item.content : [])
       .map((item) => typeof item?.text === "string" ? item.text : "")
@@ -327,6 +338,7 @@ function promptRequestFetch(fetchImpl, idempotencyKey) {
 async function requestPromptModelApiJson(url, options, {
   idempotencyKey = "",
   random = Math.random,
+  retryableStatuses = PROMPT_RETRYABLE_STATUSES,
   sleep = (delayMs) => new Promise((resolve) => setTimeout(resolve, delayMs)),
 } = {}) {
   const requestFetch = promptRequestFetch(options.fetchImpl || globalThis.fetch, idempotencyKey);
@@ -337,7 +349,7 @@ async function requestPromptModelApiJson(url, options, {
     const retryable = requestFetch.key
       && error instanceof ModelApiError
       && error.code !== "MODEL_API_TIMEOUT"
-      && (error.code === "MODEL_API_NETWORK_ERROR" || PROMPT_RETRYABLE_STATUSES.has(error.status));
+      && (error.code === "MODEL_API_NETWORK_ERROR" || retryableStatuses.has(error.status));
     if (!retryable) throw error;
     const jitter = Math.floor(Math.max(0, Math.min(1, Number(random()) || 0)) * PROMPT_RETRY_JITTER_MS);
     await sleep(PROMPT_RETRY_MIN_DELAY_MS + jitter);
@@ -526,6 +538,46 @@ export async function analyzeProductImages(modelConfig = {}, input = {}, imageFi
   return { ...result, model: resolved.model, analyzedAt: now() };
 }
 
+export async function writeFreeformImagePrompt(modelConfig = {}, input = {}, {
+  env = process.env,
+  fetchImpl = globalThis.fetch,
+  productImages = [],
+  signal,
+  timeoutMs = 90_000,
+  idempotencyKey = "",
+  random = Math.random,
+  sleep,
+} = {}) {
+  const requestInput = validateQuickPromptInput(input);
+  const images = imageDataUrls(productImages, { label: "参考图" });
+  validateImageTotal([images]);
+  const resolved = resolveModelConfig(modelConfig, { env });
+  const content = [{ type: "text", text: `用户需求：${requestInput.userRequest}` }];
+  if (images.length) content.push(
+    { type: "text", text: "用户同时提供了参考图，请结合参考图理解需求。" },
+    ...images.map((image) => ({ type: "image_url", image_url: { url: image.url } })),
+  );
+  const data = await requestPromptModelApiJson(`${resolved.baseUrl}/chat/completions`, {
+    apiKey: resolved.apiKey,
+    fetchImpl,
+    label: "AI 自由帮写",
+    signal,
+    timeoutMs,
+    body: {
+      model: resolved.model,
+      messages: [{
+        role: "system",
+        content: "根据用户需求自由发挥，写出你认为最好的生图提示词。",
+      }, { role: "user", content: images.length ? content : content[0].text }],
+    },
+  }, { idempotencyKey, random, retryableStatuses: FREEFORM_PROMPT_RETRYABLE_STATUSES, ...(sleep ? { sleep } : {}) });
+  const parsed = boundedText(PROMPT_STUDIO_OUTPUT_LIMITS.prompt, { required: true }).safeParse(outputText(data));
+  if (!parsed.success) {
+    throw promptError("AI 自由帮写模型没有返回可用提示词。", { code: "PROMPT_MODEL_EMPTY_RESPONSE", status: 502 });
+  }
+  return { prompt: parsed.data, model: resolved.model };
+}
+
 export async function interpretQuickPrompt(modelConfig = {}, input = {}, {
   env = process.env,
   fetchImpl = globalThis.fetch,
@@ -553,14 +605,15 @@ export async function interpretQuickPrompt(modelConfig = {}, input = {}, {
     ? "当前为商品生图模式：参考图是产品身份、结构、颜色、Logo 和原有文字的唯一事实依据，必须优先保持产品一致，不得把参考图只当作风格图。"
     : requestInput.creationMode === "free"
       ? "当前为自由生图模式：允许没有产品参考图；无参考图时只能根据用户原话构建画面，不得虚构用户未提供的品牌、型号、价格、活动、功效或准确文字。"
-      : "当前未指定创作模式，沿用旧版快捷提示词规则：有参考图时锁定产品事实，无参考图时只根据用户原话生成。";
+      : "当前未指定创作模式：有参考图时锁定产品事实，无参考图时只根据用户原话自由设计。";
+  const copyRequirement = "文案由你根据用户目标自由策划，不要套用固定口号、固定节日文案、固定配色或固定版式。海报、活动图和详情图在用户没有明确要求无字时，通常应主动提出一组与主题相符、简洁有记忆点的可编辑中文文案；文案的数量、层级、句式和摆放位置由你判断，不必凑齐任何字段。将最终要出现在画面里的每条文案逐条放入 copy 的文本字段，这些字段只是传输容器，不代表固定的标题层级。用户明确提供的文字必须逐字保留。只有用户明确说无字、不要文字、只要底图或交给后期排版时，才使用 reserved。";
   const modelInput = {
     userRequest: requestInput.userRequest,
     parameters: requestInput.parameters,
   };
   const content = [{
     type: "input_text",
-    text: `把用户的一句话需求解释成完整、可校验的电商生图任务。${modeRequirement}只根据用户原话和参考图填写事实，不得虚构品牌、型号、功效、价格或活动；无法确认的产品细节使用中性的保真描述，并写入 warnings。准确文案必须逐字保留。局部改图和换背景必须给出明确的目标、改动和保留区域。用户原始输入：${JSON.stringify(modelInput)}`,
+    text: `把用户的一句话需求解释成完整、可执行的电商生图任务。${modeRequirement}${copyRequirement}围绕用户目标自由发挥，优先给出视觉效果最好的方案；不要复用历史模板或空泛的营销套话。用户明确提供的文案必须逐字保留。局部改图和换背景必须给出明确的目标、改动和保留区域。用户原始输入：${JSON.stringify(modelInput)}`,
   }];
   if (images.length) content.push(
     { type: "input_text", text: "以下均为同一产品的参考图，只用于识别和锁定产品身份、结构、颜色、Logo 及原有文字。" },
@@ -578,13 +631,33 @@ export async function interpretQuickPrompt(modelConfig = {}, input = {}, {
         role: "system",
         content: [{
           type: "input_text",
-          text: "你是电商生图需求分析师。用户只说需求，你负责选择最合适的任务类目，并补全严格的产品事实、视觉风格、文字模式和修改边界。优先忠实、可执行和不变形；没有依据时不猜测，输出必须符合指定 JSON Schema。",
+          text: `你是电商视觉策划与生图需求分析师。用户只说需求，你负责选择最合适的任务类目，并补全产品事实、视觉风格、文字方案和修改边界。${copyRequirement}大胆设计构图、光影、材质、色彩、空间层次和版式，直接给出你认为效果最好的方案。不要输出模板说明、字段解释或后台规则。输出必须符合指定 JSON Schema。`,
         }],
       }, { role: "user", content }],
       text: { format: { type: "json_schema", name: "quick_prompt_interpretation", strict: true, schema: quickPromptJsonSchema } },
     },
   }, { idempotencyKey, random, ...(sleep ? { sleep } : {}) });
   const interpreted = parseModelResult(data, quickPromptResultSchema, "快捷提示词理解模型");
+  if (["campaign-poster", "detail-page"].includes(interpreted.category)) {
+    const explicitCopy = extractExplicitPosterCopy(requestInput.userRequest);
+    if (explicitlyRequestsNoText(requestInput.userRequest)) {
+      interpreted.copy = emptyCopy("reserved");
+    } else {
+      if (interpreted.copy.mode === "reserved") interpreted.copy = emptyCopy("none");
+      if (explicitCopy.hasCopy) {
+        interpreted.copy = {
+          ...interpreted.copy,
+          mode: "exact",
+          title: explicitCopy.title || interpreted.copy.title,
+          subtitle: explicitCopy.subtitle || interpreted.copy.subtitle,
+          sellingPoints: explicitCopy.sellingPoints.length ? explicitCopy.sellingPoints : interpreted.copy.sellingPoints,
+          price: explicitCopy.price || interpreted.copy.price,
+          campaignInfo: explicitCopy.campaignInfo || interpreted.copy.campaignInfo,
+          additionalText: explicitCopy.additionalText.length ? explicitCopy.additionalText : interpreted.copy.additionalText,
+        };
+      }
+    }
+  }
   if (["local-edit", "background-swap"].includes(interpreted.category) && !images.length) {
     throw promptError("局部改图或换背景必须上传至少一张产品参考图。", {
       code: "PROMPT_EDIT_IMAGE_REQUIRED",
@@ -613,59 +686,52 @@ function localQuickCategory(userRequest) {
   if (/(白底|纯白背景|白色背景|商品主图)/i.test(text)) return "white-background";
   if (/(详情页|详情图|卖点图|功能图)/i.test(text)) return "detail-page";
   if (/(精修|修图|质感|去污|清理反光|清晰度)/i.test(text)) return "product-retouch";
-  if (/(海报|促销|活动|大促|国庆|中秋|春节|618|双\s*11|双十一|年货节|开学季|节日)/i.test(text)) return "campaign-poster";
+  if (hasPosterIntent(text)) return "campaign-poster";
   return "product-scene";
+}
+
+function emptyCopy(mode = "none") {
+  return { mode, title: "", subtitle: "", sellingPoints: [], price: "", campaignInfo: "", additionalText: [] };
 }
 
 function localQuickCopy(userRequest, category) {
   const text = String(userRequest || "");
-  const quoted = [...text.matchAll(/[“‘"']([^”’"'\r\n]{1,120})[”’"']/g)]
-    .map((match) => match[1].trim())
-    .filter(Boolean);
-  const labeledTitle = text.match(/(?:标题|主标题|文案)(?:必须)?(?:写|为|是|：|:)\s*([^，。；;\r\n]{1,120})/i)?.[1]?.trim() || "";
-  const title = quoted[0] || labeledTitle;
-  if (title) {
+  if (["campaign-poster", "detail-page"].includes(category) && explicitlyRequestsNoText(text)) {
+    return emptyCopy("reserved");
+  }
+  const explicitCopy = extractExplicitPosterCopy(text);
+  if (explicitCopy.hasCopy) {
     return {
       mode: "exact",
-      title,
-      subtitle: "",
-      sellingPoints: [],
-      price: "",
-      campaignInfo: "",
-      additionalText: quoted.slice(1, 6),
+      title: explicitCopy.title,
+      subtitle: explicitCopy.subtitle,
+      sellingPoints: explicitCopy.sellingPoints,
+      price: explicitCopy.price,
+      campaignInfo: explicitCopy.campaignInfo,
+      additionalText: explicitCopy.additionalText,
     };
   }
-  return {
-    mode: ["campaign-poster", "detail-page"].includes(category) ? "reserved" : "none",
-    title: "",
-    subtitle: "",
-    sellingPoints: [],
-    price: "",
-    campaignInfo: "",
-    additionalText: [],
-  };
+  return emptyCopy("none");
 }
 
 function localQuickStyle(userRequest, category) {
   const summary = String(userRequest || "").replace(/\s+/g, " ").trim().slice(0, 300);
-  const palette = /国庆/.test(summary)
-    ? "红色、金色与白色为主，保持克制、清晰和节日质感"
-    : /中秋/.test(summary)
-      ? "深蓝、月光白与少量金色，保持清晰的节日层次"
-      : /春节|年货/.test(summary)
-        ? "红色与金色为主，避免大面积高饱和造成廉价感"
-        : category === "white-background"
-          ? "纯白与中性灰，产品颜色保持真实"
-          : "遵循用户主题的克制商业配色，保证主体与背景有清晰对比";
-  const presets = {
-    "white-background": ["专业白底商品摄影", "纯净白底、自然接触阴影、主体边缘清楚", "柔和均匀的棚拍光", "主体居中完整，四周保留安全边距", "平视商业产品镜头"],
-    "campaign-poster": ["电商活动海报", `围绕“${summary}”建立清晰的节日或活动视觉层级，并保留安全文案区`, "明快有层次的商业海报光线", "核心视觉集中，标题区、主体区和信息区层级明确", "正面主视觉，适合电商海报裁切"],
-    "detail-page": ["电商详情页配图", `围绕“${summary}”呈现单一明确卖点，信息层级便于快速浏览`, "清晰均匀的商业光线", "主体与卖点说明区分离，留出稳定的信息区域", "平视或轻微俯视的说明型镜头"],
-    "product-retouch": ["产品商业精修", `按“${summary}”提升清晰度、材质和光泽，保持原有结构与颜色定义`, "柔和轮廓光与受控高光", "主体完整居中，突出材质细节", "平视近景商业产品镜头"],
-    "product-scene": ["真实产品场景", `围绕“${summary}”建立符合真实使用逻辑的场景，主体是第一视觉`, "自然且方向一致的商业光线", "主体清晰，场景道具只辅助叙事并保留安全边距", "符合真实观察高度的商业摄影镜头"],
+  const labels = {
+    "white-background": "白底商品视觉",
+    "campaign-poster": "主题海报视觉",
+    "detail-page": "详情页视觉",
+    "product-retouch": "产品精修视觉",
+    "product-scene": "产品场景视觉",
   };
-  const [name, description, lighting, composition, camera] = presets[category];
-  return { name, description, lighting, composition, palette, camera, forbidden: ["杂乱背景", "低清晰度", "无关装饰抢占主体"] };
+  return {
+    name: labels[category] || "开放式创意方向",
+    description: `围绕“${summary || "用户提出的主题"}”自由选择最能服务目标的视觉语言。先识别画面真正的主体和受众，再决定叙事、构图、空间层次与信息密度；不预设节日配色、固定版式或套话。`,
+    lighting: "根据主体材质、场景情绪和传播目的自由设计有方向性的光线，确保主体清楚、层次自然。",
+    composition: "根据用户目标和画面比例自由安排视觉重心、留白、节奏与阅读路径，避免机械套用分区模板。",
+    palette: "根据主题、主体和受众自由决定色彩关系，保证对比、可读性与整体审美，不强行使用某一种节日配色。",
+    camera: "根据主体与用途自由选择最有表现力的观察角度、景别和镜头语言。",
+    forbidden: ["与主题无关的固定模板", "空泛或重复的营销套话", "杂乱背景、低清晰度、无关装饰抢占主体"],
+  };
 }
 
 export function interpretQuickPromptLocally(input = {}, { reason = "" } = {}) {
@@ -720,6 +786,14 @@ function exactCopyEntries(copy) {
   ].filter(([, value]) => value);
 }
 
+function buildVisibleCopyPlan(input) {
+  if (input.copy.mode !== "exact") return "";
+  return [
+    "【文案原文（可编辑）】",
+    ...exactCopyEntries(input.copy).map(([, value], index) => `${index + 1}. ${value}`),
+  ].join("\n");
+}
+
 function listLine(label, values) {
   return `${label}：${values.length ? values.join("；") : "无额外要求"}`;
 }
@@ -735,13 +809,14 @@ function buildHardRequirements(input, { productImageCount = 0, styleImageCount =
     : `第 ${styleImageStart} 至 ${styleImageEnd} 张`;
   const copyLines = input.copy.mode === "exact"
     ? [
-        "文字模式：直接生成准确文字。以下每项均为不可改写的原文，字符顺序、简繁体、大小写、数字、单位、标点、空格和换行必须完全一致：",
-        ...exactCopyEntries(input.copy).map(([label, value]) => `${label}：${value}`),
-        "禁止翻译、润色、缩写、补写或猜测任何文案；除上述原文及产品原有文字外，不得增加任何字符。",
+        "文字模式：直接生成创意方案中【文案原文（可编辑）】逐条列明的文字。该区域是本次最终文字原文，字符顺序、简繁体、大小写、数字、单位、标点、空格和换行必须完全一致。",
+        "禁止翻译、润色、缩写、补写或猜测任何文案；除创意方案明确列明的文字及产品原有文字外，不得增加任何字符。文案的视觉层级、字体、位置和编排由创意方案自行决定，不得把清单序号渲染到画面中。",
       ]
     : input.copy.mode === "reserved"
       ? ["文字模式：只生成无字底图并预留清晰文案区域；不得生成伪文字、占位文字、价格、促销词或任意新字符，产品原有文字仍须逐字保留。"]
-      : ["文字模式：不得新增任何文字、数字、价格、促销标签或伪文字；产品原有文字仍须逐字保留。"];
+      : hasPosterIntent(input.userRequest)
+        ? ["文字模式：根据用户需求自然决定文案内容、数量和视觉层级，不套用固定标题、副标题或卖点模板；不得擅自添加用户未要求的价格、折扣、优惠规则或其他促销事实。"]
+        : ["文字模式：用户未要求新增文字时，不得擅自添加标题、价格、促销词或其他字符；产品原有文字仍须逐字保留。"];
   const boundary = input.editBoundary;
   return [
     "以下为服务端硬约束，优先级高于前文的创意描述，不得省略、改写或冲突：",
@@ -773,26 +848,49 @@ function buildHardRequirements(input, { productImageCount = 0, styleImageCount =
     listLine("只允许修改", boundary.targetAreas),
     listLine("具体改动", boundary.changes),
     listLine("必须保持不变", boundary.preserveAreas),
-    "【输出参数】",
-    `画面比例：${input.parameters.ratio}；输出分辨率：${input.parameters.resolution}；生成质量：${input.parameters.quality}；背景方式：${input.parameters.background}。`,
-    "输出前逐项核对产品身份、结构、文字、修改边界、风格和参数；任何创意都不能突破上述事实和边界。",
+    "输出前逐项核对产品身份、结构、文字和修改边界；任何创意都不能突破上述事实和边界。画面比例、分辨率、质量和背景由结构化生成参数控制，不得在图中渲染成文字。",
   ].join("\n");
 }
 
 function promptAssemblyContext(requestInput, { productImageCount = 0, styleImageCount = 0 } = {}) {
   const hardRequirements = buildHardRequirements(requestInput, { productImageCount, styleImageCount });
-  const corePromptLimit = PROMPT_STUDIO_OUTPUT_LIMITS.prompt - hardRequirements.length - FINAL_PROMPT_SEPARATOR.length;
+  const visibleCopyPlan = buildVisibleCopyPlan(requestInput);
+  const separatorLength = FINAL_PROMPT_SEPARATOR.length * (visibleCopyPlan ? 2 : 1);
+  const corePromptLimit = PROMPT_STUDIO_OUTPUT_LIMITS.prompt - hardRequirements.length - visibleCopyPlan.length - separatorLength;
   if (corePromptLimit < 1) {
     throw promptError(
       `已确认的产品事实、准确文字和修改边界共占用 ${hardRequirements.length} 个字符，超过 AI 生图 ${PROMPT_STUDIO_OUTPUT_LIMITS.prompt} 字符上限。硬约束未被截断，请精简产品档案或文案后重试。`,
       { code: "PROMPT_HARD_REQUIREMENTS_TOO_LONG", status: 400 },
     );
   }
-  return { hardRequirements, corePromptLimit };
+  return { hardRequirements, visibleCopyPlan, corePromptLimit };
 }
 
 function normalized(value) {
   return String(value || "").toLowerCase().replace(/\s+/g, "");
+}
+
+// A bare artifact word is an explicit request, but a nearby negative phrase is
+// an exclusion. Keeping this distinction here prevents "不要二维码" from
+// disabling the default QR-code guard while still allowing "加一个二维码".
+function explicitlyRequestsArtifact(value, term) {
+  const text = String(value || "");
+  const target = String(term || "");
+  if (!text || !target) return false;
+  const negativeIntents = new Set(["不要", "不需要", "无需", "不含", "不带", "不加", "不放", "不显示", "不生成", "不保留", "去掉", "去除", "删除", "移除", "禁止", "避免", "排除", "无", "没有", "不得", "不能", "不可", "别"]);
+  const intentPattern = /(不需要|不显示|不生成|不保留|不要|无需|不含|不带|不加|不放|去掉|去除|删除|移除|禁止|避免|排除|没有|不得|不能|不可|别|无|需要|添加|加上|加入|生成|保留|显示|展示|放置|包含|带上|带有|允许|要)/gi;
+  const negationAfter = /^(?:\s*.{0,4})?(?:不要|不需要|无需|不含|不带|不加|不放|不显示|不生成|不保留|去掉|去除|删除|移除|禁止|避免|排除|不得|不能|不可|别)/i;
+  let offset = 0;
+  while (offset < text.length) {
+    const index = text.toLowerCase().indexOf(target.toLowerCase(), offset);
+    if (index < 0) return false;
+    const clause = text.slice(0, index).split(/[。；;！？!?\r\n]/).at(-1) || "";
+    const latestIntent = [...clause.matchAll(intentPattern)].at(-1)?.[0] || "";
+    const after = text.slice(index + target.length, index + target.length + 14);
+    if (!negativeIntents.has(latestIntent) && !negationAfter.test(after)) return true;
+    offset = index + target.length;
+  }
+  return false;
 }
 
 function negativeConflict(segment, input) {
@@ -829,26 +927,33 @@ function negativeConflict(segment, input) {
 
 function sanitizeNegativePrompt(value, input) {
   const modelSegments = String(value || "").split(/[,，;；\n]+/).map((item) => item.trim()).filter(Boolean);
+  const explicitTextArtifacts = [input.userRequest, ...exactCopyEntries(input.copy).map(([, text]) => text)];
+  const explicitlyRequests = (term) => explicitTextArtifacts.some((text) => explicitlyRequestsArtifact(text, term));
   const base = [
     "低清晰度", "模糊", "产品变形", "错误结构", "多余零部件", "乱码", "错别字", "伪文字", "镜像文字",
     "额外品牌", "额外 Logo",
-    ...(![...input.productFacts.existingText, ...input.productFacts.mustPreserve].some((item) => /二维码/i.test(item)) ? ["二维码"] : []),
-    ...(![...input.productFacts.existingText, ...input.productFacts.mustPreserve].some((item) => /条形码/i.test(item)) ? ["条形码"] : []),
-    ...(![...input.productFacts.existingText, ...input.productFacts.mustPreserve].some((item) => /水印/i.test(item)) ? ["水印"] : []),
-    "签名",
+    ...(!explicitlyRequests("二维码") && ![...input.productFacts.existingText, ...input.productFacts.mustPreserve].some((item) => /二维码/i.test(item)) ? ["二维码"] : []),
+    ...(!explicitlyRequests("条形码") && ![...input.productFacts.existingText, ...input.productFacts.mustPreserve].some((item) => /条形码/i.test(item)) ? ["条形码"] : []),
+    ...(!explicitlyRequests("水印") && ![...input.productFacts.existingText, ...input.productFacts.mustPreserve].some((item) => /水印/i.test(item)) ? ["水印"] : []),
+    ...(explicitlyRequests("签名") || explicitlyRequests("署名") ? [] : ["签名"]),
     ...(input.category === "white-background" ? ["复杂背景"] : []),
     ...(input.copy.mode === "exact" ? ["文案缺失", "文案改写", "文案增删"] : []),
   ];
   const baseSegments = [...new Set(base)];
   const baseSet = new Set(baseSegments);
+  const internalRules = `${NEGATIVE_PROMPT_RULES_MARKER}\n${baseSegments.join("，")}`;
   const accepted = [];
   for (const segment of new Set(modelSegments.filter((item) => !negativeConflict(item, input)))) {
     if (baseSet.has(segment)) continue;
-    if ([...accepted, segment, ...baseSegments].join("，").length <= PROMPT_STUDIO_OUTPUT_LIMITS.negativePrompt) {
+    const visible = [...accepted, segment].join("，");
+    if ([visible, internalRules].filter(Boolean).join(FINAL_PROMPT_SEPARATOR).length <= PROMPT_STUDIO_OUTPUT_LIMITS.negativePrompt) {
       accepted.push(segment);
     }
   }
-  const result = [...accepted, ...baseSegments].join("，");
+  const result = [
+    accepted.join("，"),
+    internalRules,
+  ].filter(Boolean).join(FINAL_PROMPT_SEPARATOR);
   if (result.length > PROMPT_STUDIO_OUTPUT_LIMITS.negativePrompt) {
     throw promptError("服务端基础排除规则超过 AI 生图长度上限，未截断规则，请联系管理员。", {
       code: "PROMPT_NEGATIVE_REQUIREMENTS_TOO_LONG",
@@ -858,7 +963,31 @@ function sanitizeNegativePrompt(value, input) {
   return result;
 }
 
-function mergeFinalPrompt(corePrompt, hardRequirements, corePromptLimit) {
+const VISIBLE_CONTROL_CLAUSE_PATTERN = /(?:不得|禁止|不虚构|不允许|不可|不能|硬约束|安全规则|服务端规则|后台规则|保真规则|防错规则|不引入任何新事实|不要(?:编造|改动|新增|改变))/i;
+
+function visibleCreativeText(value) {
+  return String(value || "")
+    .split(/[，,；;。！？!?\r\n]+/)
+    .map((segment) => segment.trim())
+    .filter((segment) => segment && !VISIBLE_CONTROL_CLAUSE_PATTERN.test(segment))
+    .join("，");
+}
+
+function creativeCorePrompts(input) {
+  const summary = visibleCreativeText(input.userRequest).slice(0, 320) || "本次创作主题";
+  return {
+    safe: `围绕“${summary}”完成一套清晰、可执行的视觉方案。优先让主体、用途和情绪一眼可懂，使用真实可观察的材质、光线和空间关系，保持画面克制、完整、易于落地。`,
+    commercial: `以“${summary}”为核心，设计一套有商业质感和记忆点的视觉方案。通过有方向的布光、材质细节、视觉重心、留白与阅读节奏提升传播效果；色彩和版式由主题决定，不套用现成活动模板。`,
+    creative: `把“${summary}”发展成一套有独特视觉观点的创意方案。可以大胆选择隐喻、视角、空间关系、材质对比或叙事方式，但必须让主体清楚、内容可信、画面可执行，并避免无关炫技。`,
+  };
+}
+
+function sanitizeVisibleCreativePrompt(value, fallback) {
+  const visible = visibleCreativeText(value);
+  return visible ? `${visible}。` : fallback;
+}
+
+function mergeFinalPrompt(corePrompt, visibleCopyPlan, hardRequirements, corePromptLimit) {
   const core = String(corePrompt || "").trim();
   if (core.length > corePromptLimit) {
     throw promptError(
@@ -866,7 +995,7 @@ function mergeFinalPrompt(corePrompt, hardRequirements, corePromptLimit) {
       { code: "PROMPT_MODEL_OUTPUT_TOO_LONG", status: 502 },
     );
   }
-  return `${core}${FINAL_PROMPT_SEPARATOR}${hardRequirements}`;
+  return [core, visibleCopyPlan, hardRequirements].filter(Boolean).join(FINAL_PROMPT_SEPARATOR);
 }
 
 function variantValues(promptSet) {
@@ -894,13 +1023,14 @@ export function runPromptRiskChecks(input, variants) {
   const boundaryPassed = !boundaryRequired || boundaryValues.every(promptIncludes);
   const styleValues = [input.style.description, input.style.lighting, input.style.composition, input.style.palette, input.style.camera].filter(Boolean);
   const stylePassed = styleValues.every(promptIncludes);
-  const parameterPassed = [input.parameters.ratio, input.parameters.resolution, input.parameters.quality, input.parameters.background].every(promptIncludes);
+  const parameterPassed = values.every((variant) => Object.entries(input.parameters)
+    .every(([key, value]) => variant.recommendedParameters?.[key] === value));
   return [
     { id: "product-consistency", label: "产品一致性", status: productPassed ? "pass" : "error", message: productPassed ? "三套提示词均锁定了产品事实。" : "存在未写入最终提示词的产品事实。" },
     { id: "text-integrity", label: "文字准确性", status: textPassed ? "pass" : "error", message: textPassed ? "精确文字和防乱码规则已写入，排除词无冲突。" : "文字原文缺失或排除词与正向文字冲突。" },
     { id: "edit-boundary", label: "修改边界", status: boundaryPassed ? "pass" : "error", message: boundaryPassed ? (boundaryRequired ? "目标、改动和保留区域均已锁定。" : "该类目无需强制局部修改边界。") : "最终提示词未完整保留修改边界。" },
     { id: "style-consistency", label: "风格一致性", status: stylePassed ? "pass" : "error", message: stylePassed ? "三套提示词均继承了同一风格方案。" : "存在未写入最终提示词的风格规则。" },
-    { id: "parameters", label: "生成参数", status: parameterPassed ? "pass" : "error", message: parameterPassed ? "比例、分辨率、质量和背景参数完整。" : "最终提示词缺少生成参数。" },
+    { id: "parameters", label: "生成参数", status: parameterPassed ? "pass" : "error", message: parameterPassed ? "比例、分辨率、质量和背景通过结构化字段传递。" : "生成方案缺少结构化输出参数。" },
   ];
 }
 
@@ -920,14 +1050,14 @@ export async function generatePromptSet(modelConfig = {}, input = {}, {
   const productImageData = imageDataUrls(productImages, { label: "产品参考图" });
   const styleImageData = imageDataUrls(styleImages, { label: "风格参考图" });
   validateImageTotal([productImageData, styleImageData]);
-  const { hardRequirements, corePromptLimit } = promptAssemblyContext(requestInput, {
+  const { hardRequirements, visibleCopyPlan, corePromptLimit } = promptAssemblyContext(requestInput, {
     productImageCount: productImageData.length,
     styleImageCount: styleImageData.length,
   });
   const resolved = resolveModelConfig(modelConfig, { env });
   const content = [{
     type: "input_text",
-    text: `基于以下已确认输入分别生成稳妥执行、商业增强、创意方案三套核心画面描述。每套 prompt 不得超过 ${corePromptLimit} 个字符，每套 negativePrompt 不得超过 ${MODEL_NEGATIVE_PROMPT_LIMIT} 个字符。不得改写产品事实、准确文案和修改边界；负面提示词不得否定正向要求。只输出指定 JSON。\n${JSON.stringify(requestInput)}`,
+    text: `基于以下已确认输入分别生成稳妥执行、商业增强、创意方案三套核心画面描述。每套 prompt 不得超过 ${corePromptLimit} 个字符，每套 negativePrompt 不得超过 ${MODEL_NEGATIVE_PROMPT_LIMIT} 个字符。产品事实和修改边界由服务端另行锁定；当 copy.mode 为 exact 时，文案原文也由服务端锁定，核心描述负责把文案自然融入最合适的视觉层级。当 copy.mode 不是 exact 而用户需求属于海报、活动图或详情图时，请在核心描述中自由策划真正要呈现的文字及其版式，不要让画面变成无字底图，除非用户明确要求无字。核心描述只负责真正影响画面效果的构图、主体关系、光影、色彩、空间层次、氛围、材质和版式；不要复述后台规则，不要使用固定节日口号或固定分区模板。负面提示词不得否定正向要求。只输出指定 JSON。\n${JSON.stringify(requestInput)}`,
   }];
   if (productImageData.length) content.push(
     { type: "input_text", text: "以下是产品参考图：只用于保持产品身份、结构、颜色、Logo 和原有文字。" },
@@ -949,16 +1079,17 @@ export async function generatePromptSet(modelConfig = {}, input = {}, {
         role: "system",
         content: [{
           type: "input_text",
-          text: "你是电商视觉提示词导演。只生成三套有实质差异、可直接执行的核心画面描述，不重复输入中的硬约束，不添加未提供的产品事实、文案、价格、品牌、功能或参数。safe 最保守，commercial 强化商业质感，creative 只在不改变产品和边界的前提下增强构图创意。输出必须符合指定 JSON Schema。",
+          text: "你是电商视觉提示词导演。只生成三套真正有差异、可直接执行的创意方案，不复述后台规则，不套用固定海报骨架、固定节日配色或固定营销套话。safe 注重清晰、稳定和可落地；commercial 注重材质、布光、视觉焦点和传播效率；creative 可以大胆探索叙事、隐喻、视角、空间关系和版式，但不能牺牲主体辨识度、文字可读性或事实准确性。需要文字时，写出与你当前主题真正相关的文字，不要为了填字段生成空泛口号。创意不能改动产品事实，也不能编造价格、品牌、功能、功效或活动规则。输出必须符合指定 JSON Schema。",
         }],
       }, { role: "user", content }],
       text: { format: { type: "json_schema", name: "prompt_set", strict: true, schema: promptSetJsonSchema } },
     },
   }, { idempotencyKey, random, ...(sleep ? { sleep } : {}) });
   const modelVariants = parseModelResult(data, modelPromptSetSchema, "AI 提示词模型");
+  const fallbackCores = creativeCorePrompts(requestInput);
   const variants = Object.fromEntries(Object.entries(modelVariants).map(([id, variant]) => [id, {
     title: VARIANT_TITLES[id],
-    prompt: mergeFinalPrompt(variant.prompt, hardRequirements, corePromptLimit),
+    prompt: mergeFinalPrompt(sanitizeVisibleCreativePrompt(variant.prompt, fallbackCores[id]), visibleCopyPlan, hardRequirements, corePromptLimit),
     negativePrompt: sanitizeNegativePrompt(variant.negativePrompt, requestInput),
     rationale: variant.rationale,
     recommendedParameters: { ...requestInput.parameters },
@@ -978,30 +1109,16 @@ export function generatePromptSetLocally(input = {}, {
   styleImageCount = 0,
 } = {}) {
   const requestInput = validatePromptStudioInput(input);
-  const { hardRequirements, corePromptLimit } = promptAssemblyContext(requestInput, { productImageCount, styleImageCount });
-  const summary = requestInput.userRequest.replace(/\s+/g, " ").trim().slice(0, 320);
-  const categoryDirection = {
-    "white-background": "使用纯净白底和自然接触阴影，完整呈现主体并保持边缘干净",
-    "product-scene": "建立符合真实使用逻辑的场景，让主体成为第一视觉并控制辅助道具",
-    "campaign-poster": "建立清楚的活动海报层级，保留标题与信息安全区，不虚构促销内容",
-    "detail-page": "围绕单一卖点组织说明型画面，主体、细节和信息区层级清楚",
-    "local-edit": "只执行已指定的局部修改，未指定区域保持原样",
-    "background-swap": "只替换背景并重建自然接触阴影，产品主体保持原样",
-    "product-retouch": "提升清晰度、材质与受控高光，不改变产品结构和颜色定义",
-  }[requestInput.category];
-  const cores = {
-    safe: `${categoryDirection}。忠实执行用户要求“${summary}”，采用稳定、清晰、易核对的构图。`,
-    commercial: `${categoryDirection}。忠实执行用户要求“${summary}”，强化商业布光、材质层次和视觉焦点，同时保持信息克制。`,
-    creative: `${categoryDirection}。忠实执行用户要求“${summary}”，在事实和修改边界内增加景深、节奏或留白变化，不引入新事实。`,
-  };
+  const { hardRequirements, visibleCopyPlan, corePromptLimit } = promptAssemblyContext(requestInput, { productImageCount, styleImageCount });
+  const cores = creativeCorePrompts(requestInput);
   const rationales = {
     safe: "优先保证需求准确、主体清楚和结果可控。",
     commercial: "在不增加虚构信息的前提下增强电商质感。",
-    creative: "只在既有事实和边界内提供更有变化的构图。",
+    creative: "在事实边界内释放构图、色彩、光影和版式创意。",
   };
   const variants = Object.fromEntries(Object.entries(cores).map(([id, corePrompt]) => [id, {
     title: VARIANT_TITLES[id],
-    prompt: mergeFinalPrompt(corePrompt, hardRequirements, corePromptLimit),
+    prompt: mergeFinalPrompt(corePrompt, visibleCopyPlan, hardRequirements, corePromptLimit),
     negativePrompt: sanitizeNegativePrompt("", requestInput),
     rationale: rationales[id],
     recommendedParameters: { ...requestInput.parameters },

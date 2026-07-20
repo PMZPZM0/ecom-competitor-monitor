@@ -29,6 +29,12 @@ import { loadPromptDraft, loadReferenceGroups, savePromptDraft, saveReferenceGro
 import { PromptLibraryPanel } from './PromptLibraryPanel'
 import type { PromptGardenPrompt } from './promptGarden'
 import type { PromptLibraryTemplate } from './promptLibrary'
+import {
+  composeNegativePromptWithHidden,
+  composePromptWithHidden,
+  visibleNegativePrompt,
+  visiblePrompt,
+} from './promptLayers'
 import type {
   ProductRecognitionResult,
   PromptCategory,
@@ -57,7 +63,7 @@ const categories: Array<{
 }> = [
   { id: 'white-background', label: '白底主图', description: '干净背景、主体居中与真实阴影', icon: Images },
   { id: 'product-scene', label: '产品场景图', description: '场景、道具、光线与镜头语言', icon: Palette },
-  { id: 'campaign-poster', label: '活动海报', description: '无字底图优先，原文严格受控', icon: FileText },
+  { id: 'campaign-poster', label: '活动海报', description: 'AI 自由策划主题、文案与视觉层级', icon: FileText },
   { id: 'detail-page', label: '详情页配图', description: '卖点拆解与功能演示画面', icon: Sparkles },
   { id: 'local-edit', label: '局部改图', description: '只修改指定区域，其余完全保留', icon: Pencil },
   { id: 'background-swap', label: '换背景', description: '边缘融合、接触阴影与环境一致', icon: RefreshCw },
@@ -140,7 +146,7 @@ const defaultDraft: PromptStudioDraft = {
   productFacts: emptyFacts,
   style: emptyStyle,
   copy: {
-    mode: 'reserved',
+    mode: 'none',
     title: '',
     subtitle: '',
     sellingPoints: [],
@@ -185,6 +191,49 @@ function textLines(value: string[]) {
   return value.join('\n')
 }
 
+function copyValues(copy: PromptStudioDraft['copy']) {
+  return [copy.title, copy.subtitle, ...copy.sellingPoints, copy.price, copy.campaignInfo, ...copy.additionalText]
+    .map((item) => item.trim())
+    .filter(Boolean)
+}
+
+function copyText(copy: PromptStudioDraft['copy']) {
+  return copyValues(copy).join('\n')
+}
+
+function copyWithText(copy: PromptStudioDraft['copy'], value: string) {
+  return {
+    ...copy,
+    title: '',
+    subtitle: '',
+    sellingPoints: [],
+    price: '',
+    campaignInfo: '',
+    additionalText: lines(value),
+  }
+}
+
+function copyForMode(copy: PromptStudioDraft['copy'], mode: PromptStudioDraft['copy']['mode']) {
+  if (mode === 'exact') return { ...copy, mode }
+  return {
+    mode,
+    title: '',
+    subtitle: '',
+    sellingPoints: [],
+    price: '',
+    campaignInfo: '',
+    additionalText: [],
+  }
+}
+
+function variantsForEditing(variants: Record<PromptVariantKey, PromptVariant>) {
+  return Object.fromEntries(Object.entries(variants).map(([key, variant]) => [key, {
+    ...variant,
+    prompt: visiblePrompt(variant.prompt),
+    negativePrompt: visibleNegativePrompt(variant.negativePrompt),
+  }])) as Record<PromptVariantKey, PromptVariant>
+}
+
 function gardenPromptCategory(prompt: PromptGardenPrompt): PromptCategory {
   const text = [prompt.title, prompt.summary, ...prompt.tags, ...prompt.categoryPath].join(' ').toLocaleLowerCase('zh-CN')
   if (/局部|修改|替换|编辑|inpaint|local edit/.test(text)) return 'local-edit'
@@ -218,7 +267,7 @@ function buildRequest(draft: PromptStudioDraft): PromptGenerationRequest {
     userRequest: [draft.userRequest.trim(), ...details].filter(Boolean).join('\n'),
     productFacts: draft.productFacts,
     style: draft.style,
-    copy: draft.category === 'campaign-poster'
+    copy: ['campaign-poster', 'detail-page'].includes(draft.category)
       ? draft.copy
       : { ...draft.copy, mode: 'none', title: '', subtitle: '', sellingPoints: [], price: '', campaignInfo: '', additionalText: [] },
     parameters: draft.parameters,
@@ -378,7 +427,10 @@ export function PromptWorkbench({
   }
 
   function selectCategory(category: PromptCategory) {
-    updateDraft({ category })
+    setDraft((current) => ({
+      ...current,
+      category,
+    }))
     setFeedback({ tone: 'neutral', message: `已切换到“${categories.find((item) => item.id === category)?.label}”，当前草稿已自动保存。` })
   }
 
@@ -533,7 +585,7 @@ export function PromptWorkbench({
       const generated = await onQuickGenerate({ userRequest, parameters: draft.parameters }, referenceSnapshot)
       setQuickResult(generated)
       setResult(generated)
-      setEditableVariants(generated.variants)
+      setEditableVariants(variantsForEditing(generated.variants))
       setSelectedVariant(generated.recommendedVariantKey)
       setResultDirty(false)
       setResultReferenceFiles({
@@ -580,8 +632,8 @@ export function PromptWorkbench({
       setFeedback({ tone: 'error', message: '请填写整体风格，或先选择一个已保存的风格方案。' })
       return
     }
-    if (draft.category === 'campaign-poster' && draft.copy.mode === 'exact' && !draft.copy.title.trim()) {
-      setFeedback({ tone: 'error', message: '直接生成文字模式至少要填写主标题；空字段不会让 AI 猜测。' })
+    if (['campaign-poster', 'detail-page'].includes(draft.category) && draft.copy.mode === 'exact' && !copyValues(draft.copy).length) {
+      setFeedback({ tone: 'error', message: '直接生成文字模式至少要填写一条准确文案；不需要固定标题格式。' })
       return
     }
     if (draft.category === 'local-edit' && (!request.editBoundary.targetAreas.length || !request.editBoundary.changes.length || !request.editBoundary.preserveAreas.length)) {
@@ -604,7 +656,7 @@ export function PromptWorkbench({
         styleReferenceFiles: [...referenceSnapshot.styleReferenceFiles],
       })
       setResultDirty(false)
-      setEditableVariants(generated.variants)
+      setEditableVariants(variantsForEditing(generated.variants))
       setSelectedVariant('safe')
       setRightView('result')
       if (generated.historyItem) setWorkspace((current) => ({ ...current, history: updatedList(current.history, generated.historyItem!) }))
@@ -626,8 +678,8 @@ export function PromptWorkbench({
     const variant = editableVariants?.[selectedVariant]
     if (!variant) return
     try {
-      await navigator.clipboard.writeText(`正向提示词\n${variant.prompt}\n\n排除要求\n${variant.negativePrompt}`)
-      setFeedback({ tone: 'success', message: '当前方案已复制到剪贴板。' })
+      await navigator.clipboard.writeText([`创意方案\n${variant.prompt}`, variant.negativePrompt ? `排除要求\n${variant.negativePrompt}` : ''].filter(Boolean).join('\n\n'))
+      setFeedback({ tone: 'success', message: '当前创意方案已复制到剪贴板。' })
     } catch {
       setFeedback({ tone: 'error', message: '剪贴板写入失败，请手动选择文字复制。' })
     }
@@ -648,8 +700,8 @@ export function PromptWorkbench({
     onSyncToImageWorkbench({
       category: draft.category,
       variantKey: selectedVariant,
-      prompt: variant.prompt,
-      negativePrompt: variant.negativePrompt,
+      prompt: composePromptWithHidden(variant.prompt, result?.variants[selectedVariant]?.prompt),
+      negativePrompt: composeNegativePromptWithHidden(variant.negativePrompt, result?.variants[selectedVariant]?.negativePrompt),
       ratio: parameters.ratio,
       resolution: parameters.resolution,
       quality: parameters.quality,
@@ -683,27 +735,27 @@ export function PromptWorkbench({
     if (!confirmTemplateReplacement(template.name)) return
 
     setAssetBusy(`apply-template-${template.id}`)
-    setDraft((current) => ({
-      ...current,
-      category: template.category,
-      stylePresetId: '',
-      userRequest: template.userRequest,
-      taskFields: { ...(template.taskFields || {}) },
-      style: {
-        name: template.style?.name || template.name,
-        description: template.style?.description || template.summary,
-        lighting: template.style?.lighting || '',
-        composition: template.style?.composition || '',
-        palette: template.style?.palette || '',
-        camera: template.style?.camera || '',
-        forbidden: [...(template.style?.forbidden || [])],
-      },
-      copy: {
-        ...current.copy,
-        mode: template.copyMode || (template.category === 'campaign-poster' || template.category === 'detail-page' ? 'reserved' : 'none'),
-      },
-      parameters: { ...current.parameters, ...template.parameters },
-    }))
+    setDraft((current) => {
+      const copyMode = template.copyMode || (copyValues(current.copy).length ? 'exact' : 'none')
+      return {
+        ...current,
+        category: template.category,
+        stylePresetId: '',
+        userRequest: template.userRequest,
+        taskFields: { ...(template.taskFields || {}) },
+        style: {
+          name: template.style?.name || template.name,
+          description: template.style?.description || template.summary,
+          lighting: template.style?.lighting || '',
+          composition: template.style?.composition || '',
+          palette: template.style?.palette || '',
+          camera: template.style?.camera || '',
+          forbidden: [...(template.style?.forbidden || [])],
+        },
+        copy: copyForMode(current.copy, copyMode),
+        parameters: { ...current.parameters, ...template.parameters },
+      }
+    })
     clearGeneratedResult()
     setFeedback({ tone: 'success', message: `已套用“${template.name}”。产品事实与参考图保持不变，请补充本次细节后生成提示词。` })
     setAssetBusy('')
@@ -714,26 +766,26 @@ export function PromptWorkbench({
     if (!confirmTemplateReplacement(prompt.title)) return false
 
     const category = gardenPromptCategory(prompt)
-    setDraft((current) => ({
-      ...current,
-      category,
-      stylePresetId: '',
-      userRequest: prompt.text,
-      taskFields: {},
-      style: {
-        name: prompt.title,
-        description: prompt.summary || '按套用的公开模板执行，保持主体、构图与画面要求一致。',
-        lighting: '',
-        composition: '',
-        palette: '',
-        camera: '',
-        forbidden: [],
-      },
-      copy: {
-        ...current.copy,
-        mode: category === 'campaign-poster' || category === 'detail-page' ? 'reserved' : 'none',
-      },
-    }))
+    setDraft((current) => {
+      const copyMode = copyValues(current.copy).length ? 'exact' : 'none'
+      return {
+        ...current,
+        category,
+        stylePresetId: '',
+        userRequest: prompt.text,
+        taskFields: {},
+        style: {
+          name: prompt.title,
+          description: prompt.summary || '按套用的公开模板执行，保持主体、构图与画面要求一致。',
+          lighting: '',
+          composition: '',
+          palette: '',
+          camera: '',
+          forbidden: [],
+        },
+        copy: copyForMode(current.copy, copyMode),
+      }
+    })
     clearGeneratedResult()
     const variables = prompt.variables.map((variable) => `{{${variable.name}}}`).join('、')
     setFeedback({
@@ -772,7 +824,7 @@ export function PromptWorkbench({
       taskFields: {},
       factsConfirmed: true,
     })
-    setEditableVariants(item.variants)
+    setEditableVariants(variantsForEditing(item.variants))
     setSelectedVariant(item.selectedVariantKey)
     setResult({ variants: item.variants, riskChecks: item.riskChecks, createdAt: item.createdAt, model: item.model })
     setQuickResult(null)
@@ -889,7 +941,7 @@ export function PromptWorkbench({
                 {[
                   '做成干净的白底主图，产品保持原样',
                   '换成明亮的厨房场景，产品不要变形',
-                  '做一张有促销氛围的活动海报底图',
+                  '做一张有主题、有信息层次的活动海报，文字清晰有设计感',
                   '精修产品质感，清理杂乱反光和污渍',
                 ].map((example) => <button key={example} type="button" onClick={() => setQuickUserRequest(example)} className="rounded-md bg-slate-100 px-3 py-2 text-left text-xs text-slate-600 transition hover:bg-blue-50 hover:text-blue-700">{example}</button>)}
               </div>
@@ -915,7 +967,7 @@ export function PromptWorkbench({
           <section className="min-w-0 overflow-hidden rounded-md border border-slate-200 bg-white shadow-sm" aria-labelledby="quick-result-title">
             <div className="flex items-center justify-between gap-3 border-b border-slate-100 px-5 py-4">
               <div>
-                <h3 id="quick-result-title" className="text-base font-semibold text-slate-950">AI 推荐提示词</h3>
+                <h3 id="quick-result-title" className="text-base font-semibold text-slate-950">AI 推荐方案</h3>
                 {currentVariant && <p className="mt-1 text-xs text-slate-500">{activeCategory.label} · {variantMeta[selectedVariant].label} · {result?.model}</p>}
               </div>
               {currentVariant && <button type="button" onClick={() => void copyVariant()} className="inline-flex h-9 items-center gap-2 rounded-md border border-slate-200 px-3 text-xs font-medium text-slate-600 hover:bg-slate-50 hover:text-slate-900"><Copy className="h-3.5 w-3.5" />复制</button>}
@@ -930,11 +982,11 @@ export function PromptWorkbench({
             ) : (
               <div className="grid gap-4 p-5">
                 <label className="grid gap-2 text-sm font-medium text-slate-800">
-                  提示词（可以直接修改）
+                  创意方案（可以直接修改）
                   <Textarea value={currentVariant.prompt} onChange={(event) => updateVariant({ prompt: event.target.value })} className="min-h-64 resize-y text-sm leading-6" />
                 </label>
                 <div className="grid gap-2 sm:grid-cols-2">
-                  <Button type="button" variant="secondary" onClick={() => void copyVariant()} className="h-11"><Copy className="h-4 w-4" />复制提示词</Button>
+                  <Button type="button" variant="secondary" onClick={() => void copyVariant()} className="h-11"><Copy className="h-4 w-4" />复制方案</Button>
                   <Button type="button" onClick={syncVariant} className="h-11"><WandSparkles className="h-4 w-4" />同步到 AI 创作</Button>
                 </div>
 
@@ -1053,7 +1105,37 @@ export function PromptWorkbench({
               {taskFields[draft.category].map((field) => <Field key={field.key} label={field.label} value={draft.taskFields[field.key] || ''} onChange={(value) => updateTaskField(field.key, value)} placeholder={field.placeholder} multiline={field.multiline} />)}
             </div>
 
-            {draft.category === 'campaign-poster' && <section className="border-t border-slate-100 pt-4"><SectionTitle title="海报文字方式" note="默认先生成无字底图，文字可在 PS 中准确排版。" /><div className="mt-3 grid grid-cols-2 gap-2 rounded-md bg-slate-100 p-1"><button type="button" onClick={() => setDraft((current) => ({ ...current, copy: { ...current.copy, mode: 'reserved' } }))} className={`min-h-12 rounded-md px-3 py-2 text-sm font-medium ${draft.copy.mode !== 'exact' ? 'bg-white text-blue-700 shadow-sm' : 'text-slate-600 hover:text-slate-900'}`}>无字底图（推荐）<span className="mt-0.5 block text-[11px] font-normal text-slate-500">只预留排版区域</span></button><button type="button" onClick={() => setDraft((current) => ({ ...current, copy: { ...current.copy, mode: 'exact' } }))} className={`min-h-12 rounded-md px-3 py-2 text-sm font-medium ${draft.copy.mode === 'exact' ? 'bg-white text-blue-700 shadow-sm' : 'text-slate-600 hover:text-slate-900'}`}>直接生成文字<span className="mt-0.5 block text-[11px] font-normal text-slate-500">存在模型文字误差</span></button></div>{draft.copy.mode === 'exact' && <div className="mt-3 grid gap-3 sm:grid-cols-2"><Field label="主标题" value={draft.copy.title} onChange={(value) => setDraft((current) => ({ ...current, copy: { ...current.copy, title: value } }))} placeholder="严格按原文生成" /><Field label="副标题" value={draft.copy.subtitle} onChange={(value) => setDraft((current) => ({ ...current, copy: { ...current.copy, subtitle: value } }))} /><Field label="核心卖点（每行一项）" value={textLines(draft.copy.sellingPoints)} onChange={(value) => setDraft((current) => ({ ...current, copy: { ...current.copy, sellingPoints: lines(value) } }))} multiline /><Field label="价格" value={draft.copy.price} onChange={(value) => setDraft((current) => ({ ...current, copy: { ...current.copy, price: value } }))} placeholder="例如：到手价 ¥459" /><Field label="活动信息" value={draft.copy.campaignInfo} onChange={(value) => setDraft((current) => ({ ...current, copy: { ...current.copy, campaignInfo: value } }))} multiline /><Field label="补充文字（每行一项）" value={textLines(draft.copy.additionalText)} onChange={(value) => setDraft((current) => ({ ...current, copy: { ...current.copy, additionalText: lines(value) } }))} multiline /><p className="sm:col-span-2 rounded-md bg-amber-50 px-3 py-2 text-xs leading-5 text-amber-800">空字段绝不生成；AI 不会猜测品牌、价格或促销信息。生成后仍需人工核对每个字。</p></div>}</section>}
+            {['campaign-poster', 'detail-page'].includes(draft.category) && (
+              <section className="border-t border-slate-100 pt-4">
+                <SectionTitle title="画面文字" note="AI 会先自由策划；只有必须逐字固定的文字才需要在这里填写。" />
+                <div className="mt-3 grid gap-2 rounded-md bg-slate-100 p-1 sm:grid-cols-3">
+                  <button type="button" aria-pressed={draft.copy.mode === 'none'} onClick={() => setDraft((current) => ({ ...current, copy: copyForMode(current.copy, 'none') }))} className={`min-h-12 rounded-md px-3 py-2 text-left text-sm font-medium ${draft.copy.mode === 'none' ? 'bg-white text-blue-700 shadow-sm' : 'text-slate-600 hover:text-slate-900'}`}>
+                    AI 自由策划
+                    <span className="mt-0.5 block text-[11px] font-normal text-slate-500">根据主题决定文案与层级</span>
+                  </button>
+                  <button type="button" aria-pressed={draft.copy.mode === 'exact'} onClick={() => setDraft((current) => ({ ...current, copy: copyForMode(current.copy, 'exact') }))} className={`min-h-12 rounded-md px-3 py-2 text-left text-sm font-medium ${draft.copy.mode === 'exact' ? 'bg-white text-blue-700 shadow-sm' : 'text-slate-600 hover:text-slate-900'}`}>
+                    固定准确文字
+                    <span className="mt-0.5 block text-[11px] font-normal text-slate-500">每行一条，逐字执行</span>
+                  </button>
+                  <button type="button" aria-pressed={draft.copy.mode === 'reserved'} onClick={() => setDraft((current) => ({ ...current, copy: copyForMode(current.copy, 'reserved') }))} className={`min-h-12 rounded-md px-3 py-2 text-left text-sm font-medium ${draft.copy.mode === 'reserved' ? 'bg-white text-blue-700 shadow-sm' : 'text-slate-600 hover:text-slate-900'}`}>
+                    无字底图
+                    <span className="mt-0.5 block text-[11px] font-normal text-slate-500">只留后期排版区域</span>
+                  </button>
+                </div>
+                {draft.copy.mode === 'exact' && (
+                  <div className="mt-3 grid gap-3">
+                    <Field
+                      label="需要逐字生成的文案（每行一条）"
+                      value={copyText(draft.copy)}
+                      onChange={(value) => setDraft((current) => ({ ...current, copy: copyWithText(current.copy, value) }))}
+                      placeholder={'例如：\n夏日轻享\n清爽一刻，自然发生\n到手价 ¥459'}
+                      multiline
+                    />
+                    <p className="rounded-md bg-amber-50 px-3 py-2 text-xs leading-5 text-amber-800">只把必须准确出现的文字放进来。AI 会自行决定每条文字的大小、层级和位置；价格、品牌、活动规则和功效仍需你确认真实。</p>
+                  </div>
+                )}
+              </section>
+            )}
 
             <section className="border-t border-slate-100 pt-4"><SectionTitle title="推荐输出参数" note="同步到生图页后仍可调整，不会在这里直接产生费用。" /><div className="mt-3 grid grid-cols-2 gap-3 sm:grid-cols-4"><label className="grid gap-1.5 text-xs font-medium text-slate-600">画面比例<select value={draft.parameters.ratio} onChange={(event) => setDraft((current) => ({ ...current, parameters: { ...current.parameters, ratio: event.target.value as typeof current.parameters.ratio } }))} className="h-10 rounded-md border border-slate-200 bg-white px-2 text-sm text-slate-800"><option>1:1</option><option>3:4</option><option>4:3</option><option>16:9</option></select></label><label className="grid gap-1.5 text-xs font-medium text-slate-600">分辨率<select value={draft.parameters.resolution} onChange={(event) => setDraft((current) => ({ ...current, parameters: { ...current.parameters, resolution: event.target.value as typeof current.parameters.resolution } }))} className="h-10 rounded-md border border-slate-200 bg-white px-2 text-sm text-slate-800"><option value="1k">1K</option><option value="2k">2K</option><option value="4k">4K</option></select></label><label className="grid gap-1.5 text-xs font-medium text-slate-600">质量<select value={draft.parameters.quality} onChange={(event) => setDraft((current) => ({ ...current, parameters: { ...current.parameters, quality: event.target.value as typeof current.parameters.quality } }))} className="h-10 rounded-md border border-slate-200 bg-white px-2 text-sm text-slate-800"><option value="low">快速</option><option value="medium">标准</option><option value="high">精细</option></select></label><label className="grid gap-1.5 text-xs font-medium text-slate-600">背景<select value={draft.parameters.background} onChange={(event) => setDraft((current) => ({ ...current, parameters: { ...current.parameters, background: event.target.value as typeof current.parameters.background } }))} className="h-10 rounded-md border border-slate-200 bg-white px-2 text-sm text-slate-800"><option value="auto">自动</option><option value="opaque">不透明</option><option value="transparent">透明</option></select></label></div></section>
 
@@ -1072,7 +1154,7 @@ export function PromptWorkbench({
             </div>
             {!currentVariant ? <div className="flex min-h-96 flex-col items-center justify-center px-6 text-center"><span className="inline-flex h-12 w-12 items-center justify-center rounded-md bg-blue-50 text-blue-600"><Sparkles className="h-6 w-6" /></span><h3 className="mt-4 text-sm font-semibold text-slate-900">等待生成提示词</h3><p className="mt-2 max-w-xs text-xs leading-5 text-slate-500">确认产品事实并填写本次要求后，系统会生成稳妥、商业增强和创意三套方案。</p></div> : <div className="grid gap-4 p-4">
               <div className="flex items-start justify-between gap-3"><div><h3 className="text-sm font-semibold text-slate-900">{currentVariant.title || variantMeta[selectedVariant].label}</h3><p className="mt-1 text-xs leading-5 text-slate-500">{currentVariant.rationale}</p></div><button type="button" onClick={() => void copyVariant()} className="inline-flex h-9 w-9 shrink-0 items-center justify-center rounded-md border border-slate-200 text-slate-500 hover:bg-slate-50 hover:text-slate-800" title="复制当前方案" aria-label="复制当前方案"><Copy className="h-4 w-4" /></button></div>
-              <Field label="正向提示词（可修改）" value={currentVariant.prompt} onChange={(value) => updateVariant({ prompt: value })} multiline />
+              <Field label="创意方案（可修改）" value={currentVariant.prompt} onChange={(value) => updateVariant({ prompt: value })} multiline />
               <Field label="排除要求（可修改）" value={currentVariant.negativePrompt} onChange={(value) => updateVariant({ negativePrompt: value })} multiline />
               {currentVariant.recommendedParameters && <button type="button" onClick={() => setDraft((current) => ({ ...current, parameters: { ...current.parameters, ...currentVariant.recommendedParameters } }))} className="rounded-md border border-blue-100 bg-blue-50 px-3 py-2 text-left text-xs text-blue-800 hover:border-blue-200"><span className="font-semibold">应用本方案建议参数</span><span className="mt-0.5 block text-blue-600">{Object.entries(currentVariant.recommendedParameters).map(([key, value]) => `${key}: ${value}`).join(' · ')}</span></button>}
               <section className="border-t border-slate-100 pt-4"><div className="flex items-center justify-between gap-3"><SectionTitle title="规则检查" note={result ? `${result.model} · ${formatDate(result.createdAt)}` : undefined} />{result && <span className={`rounded-md px-2 py-1 text-[11px] font-medium ${resultDirty ? 'bg-amber-50 text-amber-800' : result.riskChecks.some((item) => item.status === 'error') ? 'bg-red-50 text-red-700' : result.riskChecks.some((item) => item.status === 'warning') ? 'bg-amber-50 text-amber-700' : 'bg-emerald-50 text-emerald-700'}`}>{resultDirty ? '检查已失效' : result.riskChecks.filter((item) => item.status !== 'pass').length ? `${result.riskChecks.filter((item) => item.status !== 'pass').length} 项待确认` : '全部通过'}</span>}</div><div className="mt-3 grid gap-2">{resultDirty ? <div className="flex items-start gap-2 rounded-md bg-amber-50 px-3 py-2 text-xs leading-5 text-amber-800" role="alert"><CircleAlert className="mt-0.5 h-3.5 w-3.5 shrink-0" /><span><strong>内容已修改：</strong>原规则检查只适用于生成时的文字，现已失效。重新生成可获得新检查；直接同步时系统会要求你再次人工确认。</span></div> : result?.riskChecks.map((item) => <div key={item.id} className={`flex items-start gap-2 rounded-md px-3 py-2 text-xs leading-5 ${item.status === 'error' ? 'bg-red-50 text-red-700' : item.status === 'warning' ? 'bg-amber-50 text-amber-800' : 'bg-emerald-50 text-emerald-700'}`}>{item.status === 'pass' ? <Check className="mt-0.5 h-3.5 w-3.5 shrink-0" /> : <CircleAlert className="mt-0.5 h-3.5 w-3.5 shrink-0" />}<span><strong>{item.label}：</strong>{item.message}</span></div>)}</div></section>

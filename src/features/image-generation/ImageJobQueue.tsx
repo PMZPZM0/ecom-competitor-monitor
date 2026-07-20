@@ -15,6 +15,7 @@ import {
 import { Button } from '../../components/ui/button'
 import { api } from '../../lib/api'
 import type { ImageGenerationJob, ImageGenerationJobStatus, ImageLibraryItem } from '../../types/domain'
+import { visiblePrompt } from '../prompt-studio/promptLayers'
 
 type Props = {
   jobs: ImageGenerationJob[]
@@ -113,7 +114,7 @@ export function ImageJobQueue({ jobs, loading, error, busyJobId, onRefresh, onRe
               <div className="min-w-0">
                 <div className="flex min-w-0 items-center gap-2">
                   <span className={`inline-flex shrink-0 items-center gap-1 rounded px-1.5 py-0.5 text-[11px] font-semibold ${meta.className}`}><StatusIcon className={`h-3 w-3 ${job.status === 'running' ? 'animate-spin' : ''}`} />{meta.label}</span>
-                  <span className="truncate text-sm font-medium text-slate-800" title={job.request.prompt}>{job.request.prompt || '未命名生图任务'}</span>
+                  <span className="truncate text-sm font-medium text-slate-800" title={visiblePrompt(job.request.prompt)}>{visiblePrompt(job.request.prompt) || '未命名生图任务'}</span>
                 </div>
                 <div className="mt-1 flex flex-wrap items-center gap-x-2 gap-y-1 text-[11px] text-slate-500">
                   <span>{job.request.ratio}</span><span>{job.request.resolution.toUpperCase()}</span><span>{job.request.count} 张</span>{job.referenceImageCount > 0 && <span>{job.referenceImageCount} 张参考图</span>}<span>{jobSummary(job, now)}</span>{job.attempt > 1 && <span>第 {job.attempt} 次</span>}

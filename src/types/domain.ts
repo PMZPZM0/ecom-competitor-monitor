@@ -53,6 +53,7 @@ export type PriceResolutionStatus = 'verified' | 'partial' | 'ambiguous' | 'unav
 export type PriceChannelResolution = {
   status: 'verified' | 'ambiguous' | 'unavailable' | 'stale'
   valueCents: number | null
+  label?: string
   formula?: string
   reason?: string
   evidenceIds: string[]

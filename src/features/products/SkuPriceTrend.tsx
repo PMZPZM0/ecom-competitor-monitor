@@ -13,7 +13,7 @@ import {
 import { TrendingUp } from 'lucide-react'
 import { currency } from '../../lib/utils'
 import type { MonitorChannel, Product, Snapshot } from '../../types/domain'
-import { accountPriceViewForSku, skuForAccountView, verifiedPriceValue } from './productDisplayUtils'
+import { accountPriceViewForSku, lowestVerifiedPriceForSku, skuForAccountView, verifiedPriceChannelsForAccount, verifiedPriceValue } from './productDisplayUtils'
 
 const lineColors = ['#0284c7', '#ea580c', '#7c3aed', '#059669', '#d97706', '#db2777', '#0891b2', '#4f46e5']
 
@@ -45,17 +45,9 @@ const monitorChannelForMode: Record<PriceMode, MonitorChannel> = {
 }
 
 function priceForMode(sku: Snapshot['skuPrices'][number], mode: PriceMode, accountType: NonNullable<Product['accountType']>) {
-  if (mode === 'lowest') {
-    const supported: PriceChannel[] = accountType === 'vip88'
-      ? ['normal', 'billion', 'seckill', 'government', 'surprise', 'gift', 'vip88', 'coin']
-      : accountType === 'gift'
-        ? ['normal', 'billion', 'seckill', 'government', 'surprise', 'gift', 'coin']
-        : ['normal', 'billion', 'seckill', 'government', 'surprise', 'coin']
-    const values = supported.map((channel) => sku.priceResolution?.channels?.[channel]).filter((resolution) => resolution?.status === 'verified' && typeof resolution.valueCents === 'number').map((resolution) => resolution!.valueCents! / 100)
-    return values.length ? Math.min(...values) : null
-  }
+  if (mode === 'lowest') return lowestVerifiedPriceForSku(sku, accountType)
   const channel = monitorChannelForMode[mode] as PriceChannel
-  return verifiedPriceValue(sku, channel)
+  return verifiedPriceValue(sku, channel, accountType)
 }
 
 export function SkuPriceTrend({ snapshots, product, accountSessionId, accountType, accountName, showMonitorThresholds = true }: { snapshots: Snapshot[]; product: Product; accountSessionId: string; accountType: NonNullable<Product['accountType']>; accountName: string; showMonitorThresholds?: boolean }) {
@@ -65,6 +57,10 @@ export function SkuPriceTrend({ snapshots, product, accountSessionId, accountTyp
     () => [...snapshots].sort((left, right) => new Date(left.capturedAt).getTime() - new Date(right.capturedAt).getTime()),
     [snapshots],
   )
+  const supportedPriceModes = useMemo(() => {
+    const supportedChannels = new Set<MonitorChannel>(['lowest', ...verifiedPriceChannelsForAccount(accountType)])
+    return priceModes.filter((mode) => supportedChannels.has(monitorChannelForMode[mode.value]))
+  }, [accountType])
   const skuOptions = useMemo(() => {
     const options = new Map<string, string>()
     for (const snapshot of [...orderedSnapshots].reverse()) {
@@ -83,6 +79,10 @@ export function SkuPriceTrend({ snapshots, product, accountSessionId, accountTyp
     }
     if (!skuOptions.some((sku) => sku.id === selectedSku)) setSelectedSku('group:0')
   }, [selectedSku, skuOptions])
+
+  useEffect(() => {
+    if (!supportedPriceModes.some((mode) => mode.value === priceMode)) setPriceMode('normalPrice')
+  }, [priceMode, supportedPriceModes])
 
   const skuGroups = useMemo(() => Array.from({ length: Math.ceil(skuOptions.length / 8) }, (_, index) => skuOptions.slice(index * 8, index * 8 + 8)), [skuOptions])
   const selectedGroup = selectedSku.startsWith('group:') ? Number(selectedSku.slice(6)) || 0 : -1
@@ -117,7 +117,7 @@ export function SkuPriceTrend({ snapshots, product, accountSessionId, accountTyp
         </div>
         <div className="flex w-full min-w-0 flex-col items-stretch gap-2 sm:w-auto sm:flex-row sm:items-center">
           <select value={priceMode} onChange={(event) => setPriceMode(event.target.value as PriceMode)} className="h-9 w-full rounded-md border border-slate-200 bg-white px-2 text-sm text-slate-700 outline-none focus:border-sky-400 sm:w-[145px]" aria-label="选择价格口径">
-            {priceModes.map((mode) => <option key={mode.value} value={mode.value}>{mode.label}</option>)}
+            {supportedPriceModes.map((mode) => <option key={mode.value} value={mode.value}>{mode.label}</option>)}
           </select>
           <select
             value={selectedSku}

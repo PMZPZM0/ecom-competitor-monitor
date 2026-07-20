@@ -3,13 +3,15 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import { dbRuntimeInfo, readDb } from "../storage/db.js";
 import {
+  applyItemScopedNewCustomerGift,
   applyPriceResolution,
   PRICE_PARSER_VERSION,
+  resolveEmbeddedPromotionPriceEvidence,
   resolveEmbeddedSkuPriceEvidence,
   resolveSkuPriceEvidence,
   selectAuthoritativePriceResolution,
 } from "./priceResolver.js";
-import { extractStructuredSku } from "./tmallScraper.js";
+import { extractEmbeddedPromotionComponent, extractStructuredSku } from "./tmallScraper.js";
 
 export const LOCAL_IMPORT_MAX_BYTES = 8 * 1024 * 1024;
 export const LOCAL_IMPORT_MAX_FILES = 200;
@@ -31,11 +33,14 @@ const skuIdPattern = /^\d{1,30}$/;
 const discardedSourceKeyPattern = /^(?:body|content|rawContent|networkPayloads|payloads)$/i;
 const identitySourceKeys = new Set([
   "nick", "nickname", "userid", "uid", "accountid", "loginid", "openid", "unionid",
-  "unb", "munb", "wkunb", "wkcookie2", "tmsc", "opi", "pacc", "tracknick", "lgc", "login",
+  "unb", "munb", "wkunb", "wkcookie2", "tmsc", "opi", "pacc", "tracknick", "lgc", "login", "miid",
+  "addresslist", "addressid", "areaid", "briefaddress", "detailaddress", "tel", "username", "displaynick",
 ]);
-const sensitiveTextKeySource = String.raw`api[_-]?key|authorization|cookie|password|passwd|secret|sign|signature|token|x5sec|_?m[_-]?h5[_-]?tk(?:[_-]?enc)?|_?tb[_-]?token_?|x[_-]?sign|x[_-]?sgext|x[_-]?mini[_-]?wua|nick|nickname|user[_-]?id|uid|account[_-]?id|login[_-]?id|open[_-]?id|union[_-]?id|munb|unb|wk[_-]?unb|wk[_-]?cookie2|tmsc|opi|pacc|tracknick|lgc|login`;
+const sensitiveTextKeySource = String.raw`api[_-]?key|authorization|cookie|password|passwd|secret|sign|signature|token|x5sec|_?m[_-]?h5[_-]?tk(?:[_-]?enc)?|_?tb[_-]?token_?|x[_-]?sign|x[_-]?sgext|x[_-]?mini[_-]?wua|nick|nickname|user[_-]?id|uid|account[_-]?id|login[_-]?id|open[_-]?id|union[_-]?id|mi[_-]?id|munb|unb|wk[_-]?unb|wk[_-]?cookie2|tmsc|opi|pacc|tracknick|lgc|login|address[_-]?id|area[_-]?id|brief[_-]?address|detail[_-]?address|tel|user[_-]?name|display[_-]?nick`;
 const sensitiveQueryPattern = new RegExp(`((?:[?&]|&amp;)(?:${sensitiveTextKeySource})=)[^&#\\s"'<>]*`, "gi");
 const sensitiveAssignmentPattern = new RegExp(`((?:^|[\\s,{;])["']?(?:${sensitiveTextKeySource})["']?\\s*[:=]\\s*)(?:"(?:\\\\.|[^"])*"|'(?:\\\\.|[^'])*'|[^\\r\\n,;}]+)`, "gim");
+const sensitiveEscapedStringAssignmentPattern = new RegExp(`((?:\\\\["'])(?:${sensitiveTextKeySource})(?:\\\\["'])\\s*:\\s*\\\\["'])(.*?)(\\\\["'])`, "gi");
+const sensitiveEscapedScalarAssignmentPattern = new RegExp(`((?:\\\\["'])(?:${sensitiveTextKeySource})(?:\\\\["'])\\s*:\\s*)(-?\\d+(?:\\.\\d+)?|true|false|null)`, "gi");
 const encodedCredentialQueryPattern = /((?:[?&]|&amp;)(?:data|ex[_-]?params)=)[^&#\s"'<>]*/gi;
 
 function fail(code, message) {
@@ -158,12 +163,18 @@ function sanitizeBrowserCaptureShape(capture) {
       ...page,
       finalUrl: safeProductEvidenceUrl(page.finalUrl, itemId),
       networkPayloads: Array.isArray(page.networkPayloads)
-        ? page.networkPayloads.map((payload) => ({
-          url: safeNetworkEvidenceUrl(payload?.url),
-          mimeType: String(payload?.mimeType || ""),
-          responseKind: payload?.responseKind === "buyer-show" ? "buyer-show" : "price",
-          body: String(payload?.body || ""),
-        }))
+        ? page.networkPayloads.map((payload) => {
+          const captureRunId = String(payload?.captureRunId || "");
+          const responseSequence = Number(payload?.responseSequence);
+          return {
+            url: safeNetworkEvidenceUrl(payload?.url),
+            mimeType: String(payload?.mimeType || ""),
+            responseKind: payload?.responseKind === "buyer-show" ? "buyer-show" : "price",
+            body: String(payload?.body || ""),
+            ...(/^[a-z0-9_-]{1,80}$/i.test(captureRunId) ? { captureRunId } : {}),
+            ...(Number.isSafeInteger(responseSequence) && responseSequence > 0 ? { responseSequence } : {}),
+          };
+        })
         : [],
     },
   });
@@ -341,9 +352,10 @@ function metadataFrom(parsed, content) {
 }
 
 function buildSnapshot({ content, parsed, itemId, accountType, capturedAt }) {
+  const evidenceHtml = typeof parsed?.page?.html === "string" ? parsed.page.html : content;
   let structured = { skuPrices: [], skuImages: [], displayPrice: null };
   try {
-    structured = extractStructuredSku(content);
+    structured = extractStructuredSku(evidenceHtml);
   } catch {
     // A malformed embedded SKU object must not block valid imported API evidence.
   }
@@ -356,8 +368,9 @@ function buildSnapshot({ content, parsed, itemId, accountType, capturedAt }) {
     payloadsBySku.set(entry.skuId, entries);
   }
   const structuredBySku = new Map(structured.skuPrices.map((sku) => [String(sku.skuId), sku]));
+  const embeddedPromotionComponent = extractEmbeddedPromotionComponent(evidenceHtml);
   const skuIds = new Set([...structuredBySku.keys(), ...normalizedPayloads.map((entry) => entry.skuId)]);
-  const governmentProgramObserved = /政府补贴|国家补贴|国补/.test(content);
+  const allowEmbeddedFallback = /https?:\/\/chaoshi\.detail\.tmall\.com(?:[/:?#]|$)/i.test(content);
   const skuPrices = [...skuIds].map((skuId) => {
     const sku = {
       ...(structuredBySku.get(skuId) || {
@@ -377,8 +390,16 @@ function buildSnapshot({ content, parsed, itemId, accountType, capturedAt }) {
       capturedAt,
     });
     const embeddedResolution = resolveEmbeddedSkuPriceEvidence(sku, { itemId, skuId, accountType, capturedAt });
-    const resolution = selectAuthoritativePriceResolution(networkResolution, embeddedResolution, { governmentProgramObserved });
-    return { ...applyPriceResolution(sku, resolution), accountType };
+    const embeddedPromotionResolution = resolveEmbeddedPromotionPriceEvidence(embeddedPromotionComponent, { itemId, skuId, accountType, capturedAt });
+    const explicitResolution = selectAuthoritativePriceResolution(networkResolution, embeddedPromotionResolution);
+    const resolution = selectAuthoritativePriceResolution(explicitResolution, embeddedResolution, { allowEmbeddedFallback });
+    const scopedResolution = applyItemScopedNewCustomerGift(resolution, embeddedPromotionComponent, {
+      itemId,
+      skuId,
+      accountType,
+      capturedAt,
+    });
+    return { ...applyPriceResolution(sku, scopedResolution), accountType };
   });
   const observedSkuCount = skuIds.size;
   const verifiedSkuCount = skuPrices.filter((sku) => sku.resolutionStatus === "verified").length;
@@ -455,7 +476,9 @@ function redactDeep(value) {
 function redactSensitiveText(value) {
   return String(value)
     .replace(sensitiveQueryPattern, "$1[REDACTED]")
-    .replace(sensitiveAssignmentPattern, "$1\"[REDACTED]\"");
+    .replace(sensitiveAssignmentPattern, "$1\"[REDACTED]\"")
+    .replace(sensitiveEscapedStringAssignmentPattern, "$1[REDACTED]$3")
+    .replace(sensitiveEscapedScalarAssignmentPattern, "$1\"[REDACTED]\"");
 }
 
 function sanitizeLocalSourceValue(value, depth = 0) {
@@ -500,6 +523,7 @@ function safePriceResolution(resolution) {
     channels[kind] = {
       status: ["verified", "ambiguous", "unavailable", "stale"].includes(channel.status) ? channel.status : "unavailable",
       valueCents: Number.isSafeInteger(channel.valueCents) && channel.valueCents > 0 ? channel.valueCents : null,
+      ...(typeof channel.label === "string" ? { label: safeText(channel.label, 80) } : {}),
       ...(typeof channel.formula === "string" ? { formula: safeText(channel.formula, 500) } : {}),
       ...(typeof channel.reason === "string" ? { reason: safeText(channel.reason, 200) } : {}),
       evidenceIds: Array.isArray(channel.evidenceIds) ? channel.evidenceIds.map((id) => safeText(id, 80)).filter(Boolean).slice(0, 30) : [],
@@ -896,6 +920,40 @@ export async function readBrowserCaptureSource(captureId) {
     ...record,
     sourceFile: samePath(path.dirname(file), defaultLocalEvidenceDirectory()) ? `capture-evidence/${filename}` : file,
     localFirst: { sourceSaved: true, sourceSanitized: true, parsedFromDisk: true, networkAccessedAfterCapture: false },
+  };
+}
+
+export async function reparseBrowserCaptureSource(captureId, options = {}) {
+  const { accountType, itemIdHint } = validateLocalImportOptions(options);
+  const capture = await readBrowserCaptureSource(captureId);
+  const itemId = String(capture?.itemId || "").trim();
+  if (!itemIdPattern.test(itemId)) {
+    throw fail("INVALID_CAPTURE_ITEM_ID", "浏览器证据缺少已核验的商品 ID，无法重新解析。");
+  }
+  if (itemIdHint && String(itemIdHint) !== itemId) {
+    throw fail("CAPTURE_ITEM_MISMATCH", "浏览器证据与目标商品 ID 不一致，已停止解析。");
+  }
+
+  const capturedAt = safeText(capture.capturedAt, 40) || new Date().toISOString();
+  const content = JSON.stringify(capture);
+  const snapshot = {
+    ...buildSnapshot({ content, parsed: capture, itemId, accountType, capturedAt }),
+    source: "browser",
+    browserEvidenceId: captureId,
+    browserEvidenceFile: capture.sourceFile || "",
+    localFirst: { ...capture.localFirst },
+  };
+  const observedSkuCount = Number(snapshot.rawSignals?.observedSkuCount || 0);
+  const outputSkuCount = Number(snapshot.rawSignals?.outputSkuCount || 0);
+  const verifiedPriceSkuCount = Number(snapshot.rawSignals?.verifiedPriceSkuCount || 0);
+  if (!observedSkuCount || observedSkuCount !== outputSkuCount || outputSkuCount !== verifiedPriceSkuCount) {
+    throw fail("INCOMPLETE_CAPTURE_REPARSE", "浏览器证据重解析后 SKU 价格不完整，未生成可展示快照。");
+  }
+
+  return {
+    snapshot,
+    sourceFile: capture.sourceFile || "",
+    localFirst: { ...capture.localFirst },
   };
 }
 
