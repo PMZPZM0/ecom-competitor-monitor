@@ -8,7 +8,7 @@
   "scripts": {
     "dev": "concurrently \"npm:dev:server\" \"npm:dev:web\"",
     "dev:web": "vite",
-    "dev:server": "node server/index.js",
+    "dev:server": "node --watch --watch-preserve-output server/index.js",
     "dev:desktop": "concurrently \"npm:dev:web\" \"wait-on http://127.0.0.1:5173 && electron electron/main.mjs --dev\"",
     "dev:browser": "concurrently \"npm:dev:web\" \"wait-on http://127.0.0.1:5173 && electron electron/main.mjs --dev --launch-mode=web\"",
     "dev:launcher": "concurrently \"npm:dev:web\" \"wait-on http://127.0.0.1:5173 && electron electron/main.mjs --dev --choose-launch-mode --reset-launch-mode\"",
