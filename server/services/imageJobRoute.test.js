@@ -12,6 +12,7 @@ process.env.ECOM_MONITOR_EAGER_BROWSER_WARMUP = "0";
 process.env.MODEL_STABLE_API_KEY = "sk-image-job-test";
 
 const { startServer, stopServer } = await import("../index.js");
+const { waitForImageJobQueueIdle } = await import("./imageJobService.js");
 
 const request = {
   prompt: "generate a clean product image",
@@ -448,7 +449,7 @@ test("persistent image job routes enqueue immediately, serialize work, recover a
     });
     const copyOnWriteJob = await enqueueJson(nativeFetch, baseUrl, "copy-on-write remains stable");
     await waitForJob(nativeFetch, baseUrl, copyOnWriteJob.id, (job) => job.status === "failed");
-    await new Promise((resolve) => setTimeout(resolve, 50));
+    await waitForImageJobQueueIdle();
     const manifestPath = path.join(dataDir, "image-jobs", "manifest.json");
     const beforeFailureDisk = JSON.parse(await fs.readFile(manifestPath, "utf8"));
     const beforeFailureInputs = await fs.readdir(path.join(dataDir, "image-jobs", "inputs"));
@@ -483,6 +484,7 @@ test("persistent image job routes enqueue immediately, serialize work, recover a
   } finally {
     globalThis.fetch = nativeFetch;
     await stopServer(server);
-    await fs.rm(dataDir, { recursive: true, force: true });
+    await new Promise((resolve) => setTimeout(resolve, 250));
+    await fs.rm(dataDir, { recursive: true, force: true, maxRetries: 8, retryDelay: 50 });
   }
 });

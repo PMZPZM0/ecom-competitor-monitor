@@ -862,6 +862,24 @@ export async function stopImageJobQueue() {
   pendingFinalizations.clear();
 }
 
+export async function waitForImageJobQueueIdle({ timeoutMs = 5_000 } = {}) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const activeWorker = workerPromise;
+    if (activeWorker) await activeWorker.catch(() => undefined);
+    await stateMutation;
+
+    // Let scheduleWorker's queued microtask and its final state read become visible.
+    await new Promise((resolve) => setImmediate(resolve));
+    await stateMutation;
+
+    const hasActiveJobs = manifest?.jobs.some((job) => ["queued", "running", "saving"].includes(job.status));
+    if (!workerPromise && !workerRetryTimer && !currentExecution && !hasActiveJobs) return;
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  throw new Error(`Timed out waiting for the image job queue to become idle after ${timeoutMs}ms.`);
+}
+
 export async function enqueueImageJob(request, { referenceImages = [], maskImage = null } = {}) {
   if (!queueActive) {
     throw jobError("生图队列尚未启动或正在关闭，请稍后重试。", {
