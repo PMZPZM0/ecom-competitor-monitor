@@ -30,6 +30,7 @@ import {
 } from "./services/imageGenerationService.js";
 import {
   cancelImageJob,
+  clearImageJobs,
   enqueueImageJob,
   getImageJob,
   listImageJobs,
@@ -1748,6 +1749,10 @@ app.post("/api/image-jobs", parseImageGenerationUpload, async (req, res) => {
 
 app.get("/api/image-jobs", async (_req, res) => {
   res.json(await listImageJobs());
+});
+
+app.delete("/api/image-jobs", async (_req, res) => {
+  res.json(await clearImageJobs());
 });
 
 app.get("/api/image-jobs/:id", async (req, res) => {

@@ -443,6 +443,37 @@ test("persistent image job routes enqueue immediately, serialize work, recover a
     assert.equal(receiptFailureCalls, 1, "an unknown saved result must never be generated a second time");
     t.mock.restoreAll();
 
+    let releaseClearRunning;
+    let clearRunningStarted;
+    const clearRunningStartedPromise = new Promise((resolve) => { clearRunningStarted = resolve; });
+    globalThis.fetch = async () => {
+      clearRunningStarted();
+      await new Promise((resolve) => { releaseClearRunning = resolve; });
+      return successResponse();
+    };
+    const clearRunningJob = await enqueueJson(nativeFetch, baseUrl, "keep the running task while clearing");
+    await clearRunningStartedPromise;
+    const clearQueuedJob = await enqueueJson(nativeFetch, baseUrl, "remove the queued task while clearing");
+    const libraryBeforeClear = await (await nativeFetch(`${baseUrl}/api/images`)).json();
+    const clearResponse = await nativeFetch(`${baseUrl}/api/image-jobs`, { method: "DELETE" });
+    assert.equal(clearResponse.status, 200);
+    const clearResult = await clearResponse.json();
+    assert.ok(clearResult.removed >= 2);
+    assert.equal(clearResult.retainedActive, 1);
+    const jobsAfterClear = await (await nativeFetch(`${baseUrl}/api/image-jobs`)).json();
+    assert.deepEqual(jobsAfterClear.map((job) => job.id), [clearRunningJob.id]);
+    assert.equal(jobsAfterClear.some((job) => job.id === clearQueuedJob.id), false);
+    assert.deepEqual(
+      (await (await nativeFetch(`${baseUrl}/api/images`)).json()).map((image) => image.id),
+      libraryBeforeClear.map((image) => image.id),
+      "clearing queue records must not delete generated images",
+    );
+    releaseClearRunning();
+    await waitForJob(nativeFetch, baseUrl, clearRunningJob.id, (job) => job.status === "succeeded");
+    const finalClearResponse = await nativeFetch(`${baseUrl}/api/image-jobs`, { method: "DELETE" });
+    assert.deepEqual(await finalClearResponse.json(), { removed: 1, retainedActive: 0 });
+    assert.deepEqual(await (await nativeFetch(`${baseUrl}/api/image-jobs`)).json(), []);
+
     globalThis.fetch = async () => new Response(JSON.stringify({ error: { message: "copy-on-write fixture" } }), {
       status: 503,
       headers: { "content-type": "application/json" },

@@ -11,6 +11,7 @@ import {
   LoaderCircle,
   RefreshCw,
   RotateCw,
+  Trash2,
 } from 'lucide-react'
 import { Button } from '../../components/ui/button'
 import { api } from '../../lib/api'
@@ -21,8 +22,11 @@ type Props = {
   jobs: ImageGenerationJob[]
   loading: boolean
   error: string
+  feedback: string
+  clearing: boolean
   busyJobId: string
   onRefresh: () => void
+  onClear: () => void
   onRetry: (job: ImageGenerationJob) => void
   onCancel: (job: ImageGenerationJob) => void
   onOpenImage: (image: ImageLibraryItem) => void
@@ -65,7 +69,7 @@ function jobSummary(job: ImageGenerationJob, now: number) {
   return job.startedAt ? `运行 ${durationLabel(elapsedMs(job, now))} 后取消` : '排队时取消'
 }
 
-export function ImageJobQueue({ jobs, loading, error, busyJobId, onRefresh, onRetry, onCancel, onOpenImage }: Props) {
+export function ImageJobQueue({ jobs, loading, error, feedback, clearing, busyJobId, onRefresh, onClear, onRetry, onCancel, onOpenImage }: Props) {
   const [expanded, setExpanded] = useState(false)
   const [now, setNow] = useState(Date.now())
   const [unavailableImageIds, setUnavailableImageIds] = useState<Set<string>>(() => new Set())
@@ -87,6 +91,7 @@ export function ImageJobQueue({ jobs, loading, error, busyJobId, onRefresh, onRe
   }), [jobs])
   const visibleJobs = expanded ? ordered : ordered.slice(0, 4)
   const activeCount = jobs.filter((job) => job.status === 'queued' || job.status === 'running').length
+  const clearableCount = jobs.filter((job) => !['running', 'saving'].includes(job.status)).length
 
   return (
     <section className="border-b border-white/80 bg-white/30 backdrop-blur-sm" aria-labelledby="image-job-queue-title">
@@ -98,10 +103,14 @@ export function ImageJobQueue({ jobs, loading, error, busyJobId, onRefresh, onRe
             <p className="mt-0.5 text-xs text-slate-500">任务在后台继续，刷新页面后仍可查看进度</p>
           </div>
         </div>
-        <button type="button" onClick={onRefresh} disabled={loading} className="inline-flex h-8 w-8 items-center justify-center rounded-md text-slate-500 hover:bg-slate-100 disabled:opacity-40" title="刷新生图队列" aria-label="刷新生图队列"><RefreshCw className={`h-4 w-4 ${loading ? 'animate-spin' : ''}`} /></button>
+        <div className="flex items-center gap-1.5">
+          {jobs.length > 0 && <Button type="button" variant="secondary" size="sm" onClick={onClear} disabled={loading || clearing || !clearableCount} title={clearableCount ? '清除排队任务和任务记录，不删除生成图片；正在生成或保存的任务会保留' : '当前只有正在生成或保存的任务，完成后才能清空'}>{clearing ? <LoaderCircle className="h-4 w-4 animate-spin" /> : <Trash2 className="h-4 w-4" />}{clearing ? '清空中' : '清空队列'}</Button>}
+          <button type="button" onClick={onRefresh} disabled={loading || clearing} className="inline-flex h-8 w-8 items-center justify-center rounded-md text-slate-500 hover:bg-slate-100 disabled:opacity-40" title="刷新生图队列" aria-label="刷新生图队列"><RefreshCw className={`h-4 w-4 ${loading ? 'animate-spin' : ''}`} /></button>
+        </div>
       </div>
 
       {error && <div className="mx-4 mb-3 flex items-center justify-between gap-3 rounded-md bg-red-50 px-3 py-2 text-xs text-red-700" role="alert"><span>{error}</span><button type="button" className="shrink-0 font-semibold hover:underline" onClick={onRefresh}>重试</button></div>}
+      {feedback && !error && <div className="mx-4 mb-3 rounded-md bg-emerald-50 px-3 py-2 text-xs text-emerald-700" role="status" aria-live="polite">{feedback}</div>}
 
       {!jobs.length && !loading ? <div className="flex items-center gap-2 border-t border-slate-100 px-4 py-3 text-xs text-slate-500"><Images className="h-4 w-4" />还没有任务，提交后会立即出现在这里。</div>
         : <div className={`divide-y divide-slate-100 border-t border-slate-100 ${expanded ? 'max-h-[32rem] overflow-y-auto' : ''}`}>

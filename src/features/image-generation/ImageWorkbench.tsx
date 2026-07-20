@@ -221,6 +221,8 @@ export function ImageWorkbench({ config, active = true, onOpenModelSettings, onE
   const [jobs, setJobs] = useState<ImageGenerationJob[]>([])
   const [queueLoading, setQueueLoading] = useState(true)
   const [queueError, setQueueError] = useState('')
+  const [queueFeedback, setQueueFeedback] = useState('')
+  const [queueClearing, setQueueClearing] = useState(false)
   const [queueBusyJobId, setQueueBusyJobId] = useState('')
   const [library, setLibrary] = useState<ImageLibraryItem[]>([])
   const [libraryView, setLibraryView] = useState<LibraryView>('history')
@@ -564,6 +566,7 @@ export function ImageWorkbench({ config, active = true, onOpenModelSettings, onE
   }
 
   async function retryJob(job: ImageGenerationJob) {
+    setQueueFeedback('')
     setQueueBusyJobId(job.id)
     try {
       upsertJob(await api.retryImageJob(job.id))
@@ -577,6 +580,7 @@ export function ImageWorkbench({ config, active = true, onOpenModelSettings, onE
   }
 
   async function cancelJob(job: ImageGenerationJob) {
+    setQueueFeedback('')
     setQueueBusyJobId(job.id)
     try {
       upsertJob(await api.cancelImageJob(job.id))
@@ -586,6 +590,26 @@ export function ImageWorkbench({ config, active = true, onOpenModelSettings, onE
       setQueueError(error instanceof Error ? error.message : '任务取消失败。')
     } finally {
       setQueueBusyJobId('')
+    }
+  }
+
+  async function clearJobs() {
+    const clearableCount = jobsRef.current.filter((job) => !['running', 'saving'].includes(job.status)).length
+    if (!clearableCount) return
+    if (!window.confirm(`确定清空 ${clearableCount} 个生图任务？排队任务会取消，已生成图片仍保留在图片资产中；正在生成的任务不会中断。`)) return
+    setQueueClearing(true)
+    setQueueError('')
+    setQueueFeedback('')
+    try {
+      const result = await api.clearImageJobs()
+      await loadJobs(true)
+      setQueueFeedback(result.retainedActive
+        ? `已清空 ${result.removed} 个任务；${result.retainedActive} 个正在生成或保存的任务已保留，完成后可再次清空。`
+        : `已清空 ${result.removed} 个任务，生成图片仍保留在图片资产中。`)
+    } catch (error) {
+      setQueueError(error instanceof Error ? error.message : '生图队列清空失败。')
+    } finally {
+      setQueueClearing(false)
     }
   }
 
@@ -915,7 +939,7 @@ export function ImageWorkbench({ config, active = true, onOpenModelSettings, onE
             </div>
           </div>
 
-          <ImageJobQueue jobs={jobs} loading={queueLoading} error={queueError} busyJobId={queueBusyJobId} onRefresh={() => void loadJobs(false)} onRetry={(job) => void retryJob(job)} onCancel={(job) => void cancelJob(job)} onOpenImage={(image) => setSelectedImage(image)} />
+          <ImageJobQueue jobs={jobs} loading={queueLoading} error={queueError} feedback={queueFeedback} clearing={queueClearing} busyJobId={queueBusyJobId} onRefresh={() => void loadJobs(false)} onClear={() => void clearJobs()} onRetry={(job) => void retryJob(job)} onCancel={(job) => void cancelJob(job)} onOpenImage={(image) => setSelectedImage(image)} />
 
           <div className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-100 px-4 py-2.5">
             <div className="flex gap-1 rounded-md bg-slate-100 p-1" role="tablist" aria-label="图片资产视图"><button type="button" role="tab" aria-selected={libraryView === 'history'} onClick={() => setLibraryView('history')} className={`inline-flex h-8 items-center gap-1.5 rounded px-3 text-xs font-medium ${libraryView === 'history' ? 'bg-white text-slate-950 shadow-sm' : 'text-slate-500'}`}><Clock3 className="h-3.5 w-3.5" />生成历史</button><button type="button" role="tab" aria-selected={libraryView === 'favorites'} onClick={() => setLibraryView('favorites')} className={`inline-flex h-8 items-center gap-1.5 rounded px-3 text-xs font-medium ${libraryView === 'favorites' ? 'bg-white text-slate-950 shadow-sm' : 'text-slate-500'}`}><Heart className="h-3.5 w-3.5" />收藏相册</button></div>

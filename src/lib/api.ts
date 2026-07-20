@@ -139,6 +139,7 @@ export const api = {
     return request<ImageGenerationJob>('/api/image-jobs', { method: 'POST', body })
   },
   imageJobs: () => request<ImageGenerationJob[]>('/api/image-jobs'),
+  clearImageJobs: () => request<{ removed: number; retainedActive: number }>('/api/image-jobs', { method: 'DELETE' }),
   imageJob: (id: string) => request<ImageGenerationJob>(`/api/image-jobs/${encodeURIComponent(id)}`),
   retryImageJob: (id: string) => request<ImageGenerationJob>(`/api/image-jobs/${encodeURIComponent(id)}/retry`, { method: 'POST', body: '{}' }),
   cancelImageJob: (id: string) => request<ImageGenerationJob>(`/api/image-jobs/${encodeURIComponent(id)}`, { method: 'DELETE' }),

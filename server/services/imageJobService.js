@@ -956,6 +956,27 @@ export async function listImageJobs() {
   return mutateState(async (state) => publicJobs(state.jobs));
 }
 
+export async function clearImageJobs() {
+  let removedJobs = [];
+  const result = await commitState(async (state) => {
+    removedJobs = state.jobs.filter((job) => !["running", "saving"].includes(job.status));
+    state.jobs = state.jobs.filter((job) => ["running", "saving"].includes(job.status));
+    return {
+      removed: removedJobs.length,
+      retainedActive: state.jobs.length,
+    };
+  });
+  await Promise.all(removedJobs.flatMap((job) => [
+    removeInputDirectory(job.id).catch((error) => console.error("[image-job-clear]", error)),
+    removeCompletionReceipt(job.id).catch((error) => console.error("[image-job-clear]", error)),
+  ]));
+  for (const job of removedJobs) {
+    pendingFinalizations.delete(job.id);
+    notifyExecutionSettled(job.id);
+  }
+  return result;
+}
+
 export async function getImageJob(id) {
   return mutateState(async (state) => {
     const job = state.jobs.find((item) => item.id === id);
