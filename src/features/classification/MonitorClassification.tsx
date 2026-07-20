@@ -271,7 +271,7 @@ export function MonitorClassification({ products, monitor, onToggle, onSchedule,
 
   return (
     <>
-      <section className="border-y border-slate-200 bg-white" aria-label="商品筛选与批量操作">
+      <section className="monitor-surface border-y border-white/70" aria-label="商品筛选与批量操作">
         <div className="grid grid-cols-[minmax(0,1fr)_auto] gap-2 p-3 lg:grid-cols-[minmax(280px,1.7fr)_minmax(150px,0.8fr)_minmax(150px,0.8fr)_170px_auto]">
           <label className="relative block">
             <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400" />
@@ -323,8 +323,8 @@ export function MonitorClassification({ products, monitor, onToggle, onSchedule,
 
       {batchFeedback && <div className={`mt-3 flex items-center gap-2 rounded-md px-3 py-2 text-sm ${batchFeedback.tone === 'progress' ? 'bg-blue-50 text-blue-800' : batchFeedback.tone === 'success' ? 'bg-emerald-50 text-emerald-800' : 'bg-red-50 text-red-700'}`} role={batchFeedback.tone === 'error' ? 'alert' : 'status'} aria-live="polite">{batchFeedback.tone === 'progress' ? <LoaderCircle className="h-4 w-4 shrink-0 animate-spin" /> : batchFeedback.tone === 'success' ? <CheckCircle2 className="h-4 w-4 shrink-0" /> : <AlertTriangle className="h-4 w-4 shrink-0" />}<span>{batchFeedback.message}</span></div>}
 
-      <section className="mt-3 overflow-hidden border-y border-slate-200 bg-white" aria-label="商品监控列表">
-        <div className="hidden grid-cols-[28px_minmax(220px,1.7fr)_120px_100px_150px_140px] items-center gap-3 bg-slate-50 px-4 py-2.5 text-xs font-semibold text-slate-500 lg:grid">
+      <section className="monitor-surface mt-3 overflow-hidden border-y border-white/70" aria-label="商品监控列表">
+        <div className="hidden grid-cols-[28px_minmax(220px,1.7fr)_120px_100px_150px_140px] items-center gap-3 bg-white/25 px-4 py-2.5 text-xs font-semibold text-slate-600 lg:grid">
           <span />
           <span>商品</span>
           <span>价格与阈值</span>
@@ -341,7 +341,7 @@ export function MonitorClassification({ products, monitor, onToggle, onSchedule,
             const rules = monitorRuleSummary(product)
             const busy = busyProductId === product.id || Boolean(batchBusy)
             return (
-              <article key={product.id} className={`border-l-4 ${state.rail} bg-white transition-colors hover:bg-slate-50/60`}>
+              <article key={product.id} className={`border-l-4 ${state.rail} bg-white/10 transition-colors hover:bg-white/28`}>
                 <div className="grid grid-cols-[28px_minmax(0,1fr)] gap-x-3 gap-y-2 px-3 py-3 lg:grid-cols-[28px_minmax(220px,1.7fr)_120px_100px_150px_140px] lg:items-center lg:gap-3 lg:px-4">
                   <label className="flex h-8 items-center justify-center self-start lg:self-center" title="选择商品">
                     <input type="checkbox" checked={selectedIds.has(product.id)} onChange={() => toggleProductSelection(product.id)} className="h-4 w-4 accent-blue-600" aria-label={`选择 ${productTitle(product)}`} />
@@ -369,7 +369,7 @@ export function MonitorClassification({ products, monitor, onToggle, onSchedule,
                   </div>
                 </div>
                 {expanded && (
-                  <div id={`product-detail-${product.id}`} className="border-t border-slate-200 bg-[#f6f8fa] p-2 sm:p-3">
+                  <div id={`product-detail-${product.id}`} className="border-t border-white/70 bg-white/48 p-2 sm:p-3">
                     <ProductMonitorCard
                       product={product}
                       onToggle={onToggle}

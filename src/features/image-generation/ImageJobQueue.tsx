@@ -89,7 +89,7 @@ export function ImageJobQueue({ jobs, loading, error, busyJobId, onRefresh, onRe
   const activeCount = jobs.filter((job) => job.status === 'queued' || job.status === 'running').length
 
   return (
-    <section className="border-b border-slate-200 bg-white" aria-labelledby="image-job-queue-title">
+    <section className="border-b border-white/80 bg-white/30 backdrop-blur-sm" aria-labelledby="image-job-queue-title">
       <div className="flex flex-wrap items-center justify-between gap-3 px-4 py-3">
         <div className="flex min-w-0 items-center gap-2.5">
           <span className={`inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-md ${activeCount ? 'bg-blue-600 text-white' : 'bg-slate-100 text-slate-500'}`}><ListChecks className="h-4 w-4" /></span>

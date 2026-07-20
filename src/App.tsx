@@ -1,5 +1,5 @@
-import { lazy, Suspense, useEffect, useRef, useState } from 'react'
-import { BookOpen, CircleAlert, CircleCheck, Database, LoaderCircle, PackageSearch, Search, Settings, Type, WandSparkles, X } from 'lucide-react'
+import { lazy, Suspense, useCallback, useEffect, useRef, useState } from 'react'
+import { BookOpen, CircleAlert, CircleCheck, Database, Image as ImageIcon, LoaderCircle, PackageSearch, Search, Settings, Type, WandSparkles, X } from 'lucide-react'
 import { api } from './lib/api'
 import { Button } from './components/ui/button'
 import { LocalImportDialog } from './features/products/LocalImportDialog'
@@ -13,6 +13,9 @@ import { HelpCenter } from './features/help/HelpCenter'
 import { UpdateDialog } from './features/updates/UpdateDialog'
 import { ImageWorkbench, type ImageWorkbenchDraftTransfer } from './features/image-generation/ImageWorkbench'
 import { SettingsCenter, type SettingsSection } from './features/settings/SettingsCenter'
+import { AppearanceSettings } from './features/settings/AppearanceSettings'
+import { loadCustomWallpaper } from './features/settings/customWallpaperStore'
+import { APP_WALLPAPER_STORAGE_KEY, CUSTOM_APP_WALLPAPER_ID, DEFAULT_APP_WALLPAPER_ID, resolveAppWallpaper, type AppWallpaperId } from './features/settings/wallpapers'
 import type { PromptHistoryItem, PromptProductProfile, PromptStylePreset, PromptSyncPayload } from './features/prompt-studio/types'
 import type { AuthSession, LocalImportCommitResult, ModelConfigPatch, ModelConfigTestPayload, ModelConfigTestResult, MonitorChannel, Overview, Product, ProductCaptureOptions, RunRecord, UpdateInfo } from './types/domain'
 
@@ -81,6 +84,8 @@ function App() {
   const [settingsSection, setSettingsSection] = useState<SettingsSection>('accounts')
   const [authGuideAccountType, setAuthGuideAccountType] = useState<AccountType | null>(null)
   const [fontSize, setFontSize] = useState<FontSize>(() => (window.localStorage.getItem('ecommerce-monitor-font-size') as FontSize) || 'standard')
+  const [wallpaperId, setWallpaperId] = useState<AppWallpaperId>(() => resolveAppWallpaper(window.localStorage.getItem(APP_WALLPAPER_STORAGE_KEY)).id)
+  const [customWallpaperUrl, setCustomWallpaperUrl] = useState('')
   const [updateOpen, setUpdateOpen] = useState(false)
   const [updateInfo, setUpdateInfo] = useState<UpdateInfo | null>(null)
   const [updateChecking, setUpdateChecking] = useState(false)
@@ -91,6 +96,14 @@ function App() {
   const [professionalPromptMounted, setProfessionalPromptMounted] = useState(aiCreationView === 'professional')
   const updateCheckActive = useRef(false)
   const activePageRef = useRef<PageId>(activePage)
+  const customWallpaperUrlRef = useRef('')
+
+  const setCustomWallpaperBlob = useCallback((blob: Blob | null) => {
+    if (customWallpaperUrlRef.current) URL.revokeObjectURL(customWallpaperUrlRef.current)
+    const nextUrl = blob ? URL.createObjectURL(blob) : ''
+    customWallpaperUrlRef.current = nextUrl
+    setCustomWallpaperUrl(nextUrl)
+  }, [])
 
   async function refresh() {
     setOverview(await api.overview())
@@ -135,6 +148,28 @@ function App() {
     document.documentElement.dataset.fontSize = fontSize
     window.localStorage.setItem('ecommerce-monitor-font-size', fontSize)
   }, [fontSize])
+
+  useEffect(() => {
+    window.localStorage.setItem(APP_WALLPAPER_STORAGE_KEY, wallpaperId)
+  }, [wallpaperId])
+
+  useEffect(() => {
+    let active = true
+    loadCustomWallpaper()
+      .then((wallpaper) => {
+        if (!active) return
+        if (wallpaper) setCustomWallpaperBlob(wallpaper.blob)
+        else if (window.localStorage.getItem(APP_WALLPAPER_STORAGE_KEY) === CUSTOM_APP_WALLPAPER_ID) setWallpaperId(DEFAULT_APP_WALLPAPER_ID)
+      })
+      .catch(() => {
+        if (active && window.localStorage.getItem(APP_WALLPAPER_STORAGE_KEY) === CUSTOM_APP_WALLPAPER_ID) setWallpaperId(DEFAULT_APP_WALLPAPER_ID)
+      })
+    return () => {
+      active = false
+      if (customWallpaperUrlRef.current) URL.revokeObjectURL(customWallpaperUrlRef.current)
+      customWallpaperUrlRef.current = ''
+    }
+  }, [setCustomWallpaperBlob])
 
   useEffect(() => {
     if ((!notice && !error) || (notice.startsWith('正在') && !error)) return undefined
@@ -489,7 +524,7 @@ function App() {
   )
 
   const modelConfigPanel = <ModelConfigPanel purpose="creation" config={data.modelConfig} onSave={saveModelConfig} onDiscover={api.modelCatalog} onTest={testModelConfig} />
-  const promptWorkbench = <Suspense fallback={<div className="flex min-h-[420px] items-center justify-center gap-2 rounded-md border border-slate-200 bg-white text-sm text-slate-500"><LoaderCircle className="h-5 w-5 animate-spin" />正在加载专业提示词工作台</div>}><PromptWorkbench presentation="professional" config={data.modelConfig} onLoadWorkspace={api.promptStudio} onAnalyzeProduct={api.analyzePromptProduct} onGenerate={api.generatePromptSet} onQuickGenerate={api.quickGeneratePrompt} onOpenModelSettings={() => openSettings('models')} onSaveProductProfile={savePromptProductProfile} onDeleteProductProfile={api.deletePromptProductProfile} onSaveStylePreset={savePromptStylePreset} onDeleteStylePreset={api.deletePromptStylePreset} onToggleLibraryFavorite={api.togglePromptLibraryFavorite} onToggleFavoriteHistory={togglePromptHistoryFavorite} onRenameHistory={renamePromptHistory} onDeleteHistory={api.deletePromptHistory} onSyncToImageWorkbench={syncPromptToImageWorkbench} onExitProfessional={() => setAiCreationView('compose')} /></Suspense>
+  const promptWorkbench = <Suspense fallback={<div className="creative-surface flex min-h-[420px] items-center justify-center gap-2 rounded-md border border-white/70 text-sm text-slate-500"><LoaderCircle className="h-5 w-5 animate-spin" />正在加载专业提示词工作台</div>}><PromptWorkbench presentation="professional" config={data.modelConfig} onLoadWorkspace={api.promptStudio} onAnalyzeProduct={api.analyzePromptProduct} onGenerate={api.generatePromptSet} onQuickGenerate={api.quickGeneratePrompt} onOpenModelSettings={() => openSettings('models')} onSaveProductProfile={savePromptProductProfile} onDeleteProductProfile={api.deletePromptProductProfile} onSaveStylePreset={savePromptStylePreset} onDeleteStylePreset={api.deletePromptStylePreset} onToggleLibraryFavorite={api.togglePromptLibraryFavorite} onToggleFavoriteHistory={togglePromptHistoryFavorite} onRenameHistory={renamePromptHistory} onDeleteHistory={api.deletePromptHistory} onSyncToImageWorkbench={syncPromptToImageWorkbench} onExitProfessional={() => setAiCreationView('compose')} /></Suspense>
   const imageWorkbench = <ImageWorkbench active={activePage === 'image-workbench' && aiCreationView === 'compose'} config={data.modelConfig} onOpenModelSettings={() => openSettings('models')} incomingDraft={incomingImageDraft} onEnhancePrompt={api.enhanceImagePrompt} onOpenProfessionalPrompt={() => { setProfessionalPromptMounted(true); setAiCreationView('professional') }} />
 
   function renderPage() {
@@ -547,9 +582,21 @@ function App() {
     return null
   }
 
+  const selectedWallpaper = resolveAppWallpaper(wallpaperId)
+  const selectedWallpaperSrc = selectedWallpaper.id === CUSTOM_APP_WALLPAPER_ID ? customWallpaperUrl : selectedWallpaper.src
+
   return (
-    <div className="min-h-screen bg-[#f6f8fa]">
-      <aside className="app-sidebar fixed inset-y-0 left-0 flex w-64 flex-col border-r border-slate-200 bg-white">
+    <div
+      className={`wallpaper-${selectedWallpaper.id} min-h-screen bg-[#f6f8fa]`}
+      style={selectedWallpaperSrc ? {
+        backgroundAttachment: 'fixed',
+        backgroundImage: `linear-gradient(rgba(246, 248, 250, 0.46), rgba(246, 248, 250, 0.46)), url(${selectedWallpaperSrc})`,
+        backgroundPosition: selectedWallpaper.position,
+        backgroundRepeat: 'no-repeat',
+        backgroundSize: 'contain',
+      } : undefined}
+    >
+      <aside className="app-sidebar app-sidebar-surface fixed inset-y-0 left-0 flex w-64 flex-col border-r border-white/70">
         <div className="flex h-16 items-center gap-3 border-b border-slate-200 px-5">
           <div className="flex h-9 w-9 items-center justify-center rounded-md bg-blue-600 text-white">
             <Search className="h-5 w-5" />
@@ -582,13 +629,14 @@ function App() {
       </aside>
 
       <main className="app-main ml-64 min-h-screen">
-        <header className="sticky top-0 z-10 flex min-h-16 flex-wrap items-center justify-between gap-3 border-b border-slate-200 bg-white/95 px-3 py-2 backdrop-blur sm:px-6">
+        <header className="app-topbar-surface sticky top-0 z-10 flex min-h-16 flex-wrap items-center justify-between gap-3 border-b border-white/70 px-3 py-2 sm:px-6">
           <div className="min-w-0 flex-1">
             <h1 className="truncate text-xl font-semibold text-slate-950">{currentPage.title}</h1>
             <p className="truncate text-sm text-slate-500">{activePage === 'image-workbench' && aiCreationView === 'professional' ? '逐项控制产品事实、风格、文案和修改边界，再同步回 AI 创作。' : currentPage.subtitle}</p>
           </div>
           <div className="flex w-full max-w-full flex-wrap items-center justify-start gap-2 sm:w-auto sm:justify-end">
             <label className="flex h-9 items-center gap-2 rounded-md border border-slate-200 bg-white px-2 text-xs text-slate-500" title="调整界面文字大小"><Type className="h-4 w-4" /><select value={fontSize} onChange={(event) => setFontSize(event.target.value as FontSize)} className="bg-transparent text-xs text-slate-700 outline-none" aria-label="界面文字大小"><option value="small">小字</option><option value="standard">标准</option><option value="large">大字</option></select></label>
+            <Button type="button" variant="secondary" size="sm" className="h-9 w-9 p-0" onClick={() => openSettings('appearance')} aria-label="切换应用壁纸" title="切换应用壁纸"><ImageIcon className="h-4 w-4" /></Button>
             <Button type="button" variant={activePage === 'guide' ? 'primary' : 'secondary'} onClick={() => setActivePage('guide')}><BookOpen className="h-4 w-4" />使用说明书</Button>
             <Button type="button" variant="secondary" onClick={() => openSettings('accounts')} className="relative">
               <Settings className="h-4 w-4" /><span className="hidden sm:inline">设置中心</span>
@@ -629,6 +677,7 @@ function App() {
         accountContent={authPanel}
         feishuContent={<div className="space-y-5"><FeishuAuthorization feishu={data.feishu} products={data.products} onSave={saveFeishuSettings} /><FeishuSettings feishu={data.feishu} logs={data.notificationLogs} products={data.products} onSave={saveFeishuSettings} onTest={testFeishu} /></div>}
         modelContent={modelConfigPanel}
+        appearanceContent={<AppearanceSettings wallpaperId={wallpaperId} customWallpaperUrl={customWallpaperUrl} onWallpaperChange={setWallpaperId} onCustomWallpaperSaved={setCustomWallpaperBlob} onCustomWallpaperDeleted={() => { setCustomWallpaperBlob(null); setWallpaperId((current) => current === CUSTOM_APP_WALLPAPER_ID ? DEFAULT_APP_WALLPAPER_ID : current) }} />}
         currentVersion={data.runtime.version}
         updateInfo={updateInfo}
         updateChecking={updateChecking}

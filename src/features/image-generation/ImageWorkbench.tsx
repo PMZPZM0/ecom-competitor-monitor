@@ -834,8 +834,8 @@ export function ImageWorkbench({ config, active = true, onOpenModelSettings, onE
 
   return (
     <>
-      <div className="grid min-w-0 grid-cols-1 items-start gap-5 xl:grid-cols-[minmax(370px,420px)_minmax(0,1fr)]">
-        <form ref={formRef} onSubmit={generate} className="min-w-0 rounded-md border border-slate-200 bg-white shadow-sm xl:sticky xl:top-20 xl:flex xl:max-h-[calc(100vh-6rem)] xl:flex-col">
+      <div className="creative-workspace grid min-w-0 grid-cols-1 items-start gap-5 xl:grid-cols-[minmax(370px,420px)_minmax(0,1fr)]">
+        <form ref={formRef} onSubmit={generate} className="creative-surface min-w-0 rounded-md border border-white/70 shadow-sm xl:sticky xl:top-20 xl:flex xl:max-h-[calc(100vh-6rem)] xl:flex-col">
           <div className="flex shrink-0 flex-wrap items-center justify-between gap-3 border-b border-slate-200 px-4 py-3.5">
             <div className="flex min-w-0 items-center gap-3"><span className="inline-flex h-9 w-9 shrink-0 items-center justify-center rounded-md bg-blue-600 text-white"><Sparkles className="h-4 w-4" /></span><div className="min-w-0"><h2 className="text-sm font-semibold text-slate-950">AI 创作台</h2><div className="mt-0.5 flex min-w-0 items-center gap-2 text-xs text-slate-500"><span>提示词可直接写或让 AI 帮写</span><button type="button" onClick={onOpenModelSettings} className={`max-w-48 truncate rounded px-1.5 py-0.5 font-medium ${connectionTone}`} title={`${channelLabel} · ${config.imageModel || '未选择生图模型'} · ${connectionLabel}`}>{channelLabel} · {config.imageModel || connectionLabel}</button></div></div></div>
             <div className="flex items-center gap-1.5"><Button type="button" variant="ghost" size="sm" onClick={onOpenProfessionalPrompt}>专业提示词</Button><Button type="button" variant="secondary" size="sm" onClick={onOpenModelSettings} title="去设置中心配置 AI 模型"><Settings2 className="h-4 w-4" />设置中心</Button></div>
@@ -900,14 +900,14 @@ export function ImageWorkbench({ config, active = true, onOpenModelSettings, onE
             </details>
           </div>
 
-          <div className="shrink-0 border-t border-slate-200 bg-white p-4">
+          <div className="creative-surface-strong shrink-0 border-t border-white/80 p-4">
             {message && <p className={`mb-3 flex items-start gap-2 text-sm ${messageTone === 'error' ? 'text-red-600' : messageTone === 'success' ? 'text-emerald-700' : 'text-slate-600'}`} role={messageTone === 'error' ? 'alert' : 'status'} aria-live="polite">{enqueuing ? <LoaderCircle className="mt-0.5 h-4 w-4 shrink-0 animate-spin" /> : messageTone === 'error' ? <CircleAlert className="mt-0.5 h-4 w-4 shrink-0" /> : messageTone === 'success' ? <Check className="mt-0.5 h-4 w-4 shrink-0" /> : null}<span className="min-w-0 break-words">{message}</span></p>}
             <Button type="submit" className="h-11 w-full" disabled={enqueuing || !prompt.trim()} aria-busy={enqueuing}>{enqueuing ? <LoaderCircle className="h-4 w-4 animate-spin" /> : <WandSparkles className="h-4 w-4" />}{enqueuing ? '正在加入队列' : `生成 ${count} 张`}</Button>
             <p className="mt-2 text-center text-xs text-slate-400">生成只使用上方当前可见文字，不会再次改写或调用提示词模型。入队后可立即准备下一张。</p>
           </div>
         </form>
 
-        <section className="flex min-h-[620px] min-w-0 flex-col overflow-hidden rounded-md border border-slate-200 bg-white shadow-sm" aria-labelledby="image-library-title">
+        <section className="creative-surface flex min-h-[620px] min-w-0 flex-col overflow-hidden rounded-md border border-white/70 shadow-sm" aria-labelledby="image-library-title">
           <div className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-200 px-4 py-3.5">
             <div className="min-w-0"><h2 id="image-library-title" className="text-sm font-semibold text-slate-950">图片资产</h2><p className="mt-0.5 truncate text-xs text-slate-500">{lastResponse ? `${lastResponse.model} · ${lastResponse.size}` : `${library.length} 张本地生成图片`}</p></div>
             <div className="flex flex-wrap items-center gap-2">
@@ -924,7 +924,7 @@ export function ImageWorkbench({ config, active = true, onOpenModelSettings, onE
 
           {libraryFeedback && <div className={`border-b px-4 py-2 text-xs ${libraryFeedback.tone === 'error' ? 'border-red-100 bg-red-50 text-red-700' : libraryFeedback.tone === 'success' ? 'border-emerald-100 bg-emerald-50 text-emerald-700' : 'border-slate-100 bg-slate-50 text-slate-600'}`} role={libraryFeedback.tone === 'error' ? 'alert' : 'status'} aria-live="polite">{libraryFeedback.message}</div>}
 
-          <div className="scrollbar-thin min-h-0 flex-1 overflow-y-auto bg-slate-50/70 p-3 sm:p-4">
+          <div className="scrollbar-thin min-h-0 flex-1 overflow-y-auto bg-white/35 p-3 sm:p-4">
             {libraryLoading && !library.length ? <div className="flex min-h-72 items-center justify-center gap-2 text-sm text-slate-500"><LoaderCircle className="h-5 w-5 animate-spin" />正在读取图片资产</div>
               : libraryError && !library.length ? <div className="flex min-h-72 flex-col items-center justify-center gap-3 text-center"><CircleAlert className="h-7 w-7 text-red-500" /><div className="text-sm text-red-700">{libraryError}</div><Button type="button" variant="secondary" size="sm" onClick={() => void loadLibrary()}><RefreshCw className="h-4 w-4" />重新读取</Button></div>
                 : visibleItems.length ? <div className="space-y-6">{latestVisible.length > 0 && <section><div className="mb-2 flex items-center justify-between"><h3 className="text-xs font-semibold text-blue-700">本次结果</h3><span className="text-[11px] text-slate-400">{latestVisible.length} 张</span></div>{renderImageGrid(latestVisible)}</section>}{datedGroups.map(([label, items]) => <section key={label}><div className="mb-2 flex items-center justify-between"><h3 className="text-xs font-semibold text-slate-600">{label}</h3><span className="text-[11px] text-slate-400">{items.length} 张</span></div>{renderImageGrid(items)}</section>)}</div>

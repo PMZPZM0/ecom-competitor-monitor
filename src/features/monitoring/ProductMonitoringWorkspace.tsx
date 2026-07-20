@@ -118,7 +118,7 @@ export function ProductMonitoringWorkspace({
 
   return (
     <div className="space-y-3">
-      <section className="overflow-hidden rounded-md border border-slate-200 bg-white" aria-label="监控运行状态">
+      <section className="monitor-surface-strong overflow-hidden rounded-md border border-white/70" aria-label="监控运行状态">
         <div className="grid grid-cols-3 lg:grid-cols-[minmax(220px,1.25fr)_minmax(170px,0.9fr)_minmax(150px,0.8fr)_minmax(150px,0.8fr)_auto]">
           <button
             type="button"
@@ -152,7 +152,7 @@ export function ProductMonitoringWorkspace({
         </div>
       </section>
 
-      <div className="flex flex-wrap items-center justify-between gap-2">
+      <div className="monitor-title-bar flex flex-wrap items-center justify-between gap-2 rounded-md border border-white/60 px-3 py-2">
         <div className="flex items-center gap-2 text-sm text-slate-600">
           <span className="font-semibold text-slate-950">商品列表</span>
           <span className="text-slate-300">/</span>
@@ -165,7 +165,7 @@ export function ProductMonitoringWorkspace({
       </div>
 
       {addOpen && (
-        <section className="rounded-md border border-blue-200 bg-white shadow-sm" aria-label="新增商品">
+        <section className="monitor-surface-strong rounded-md border border-blue-200/70" aria-label="新增商品">
           <header className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-100 px-4 py-3">
             <div><h2 className="text-sm font-semibold text-slate-950">新增监控商品</h2><p className="mt-0.5 text-xs text-slate-500">选择单个或批量录入；抓取任务会在后台队列继续执行。</p></div>
             <div className="flex items-center gap-2">

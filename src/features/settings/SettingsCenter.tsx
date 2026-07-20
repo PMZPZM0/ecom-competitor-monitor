@@ -5,6 +5,7 @@ import {
   CheckCircle2,
   CircleAlert,
   CloudDownload,
+  Image as ImageIcon,
   LoaderCircle,
   RefreshCw,
   Settings,
@@ -16,7 +17,7 @@ import {
 import { Button } from '../../components/ui/button'
 import type { UpdateInfo } from '../../types/domain'
 
-export type SettingsSection = 'accounts' | 'feishu' | 'models' | 'updates'
+export type SettingsSection = 'accounts' | 'feishu' | 'models' | 'appearance' | 'updates'
 
 export type SettingsCenterProps = {
   open: boolean
@@ -26,6 +27,7 @@ export type SettingsCenterProps = {
   accountContent: ReactNode
   feishuContent: ReactNode
   modelContent: ReactNode
+  appearanceContent: ReactNode
   currentVersion: string
   updateInfo: UpdateInfo | null
   updateChecking: boolean
@@ -45,6 +47,7 @@ const sections: SectionOption[] = [
   { id: 'accounts', label: '账号授权', description: '淘宝账号与登录状态', icon: UserRound },
   { id: 'feishu', label: '飞书联动', description: '文档同步与价格提醒', icon: BellRing },
   { id: 'models', label: 'AI 模型', description: '提示词与生图通道', icon: WandSparkles },
+  { id: 'appearance', label: '外观', description: '应用壁纸与显示风格', icon: ImageIcon },
   { id: 'updates', label: '软件更新', description: '版本检查与安装包', icon: CloudDownload },
 ]
 
@@ -143,6 +146,7 @@ export function SettingsCenter({
   accountContent,
   feishuContent,
   modelContent,
+  appearanceContent,
   currentVersion,
   updateInfo,
   updateChecking,
@@ -226,6 +230,7 @@ export function SettingsCenter({
     if (section === 'accounts') return accountContent
     if (section === 'feishu') return feishuContent
     if (section === 'models') return modelContent
+    if (section === 'appearance') return appearanceContent
     return (
       <UpdateSettings
         currentVersion={currentVersion}

@@ -894,7 +894,7 @@ export function PromptWorkbench({
         <FeedbackBanner feedback={feedback} />
 
         <div className="grid min-w-0 items-start gap-4 xl:grid-cols-[minmax(0,1.05fr)_minmax(380px,0.95fr)]">
-          <section className="min-w-0 overflow-hidden rounded-md border border-slate-200 bg-white shadow-sm" aria-labelledby="quick-prompt-title">
+          <section className="creative-surface min-w-0 overflow-hidden rounded-md border border-white/70 shadow-sm" aria-labelledby="quick-prompt-title">
             <div className="flex min-h-14 flex-wrap items-center justify-between gap-2 border-b border-slate-100 px-5 py-2">
               <h3 id="quick-prompt-title" className="text-base font-semibold text-slate-950">你想做什么图？</h3>
               <div className="flex items-center gap-1">
@@ -964,7 +964,7 @@ export function PromptWorkbench({
             </div>
           </section>
 
-          <section className="min-w-0 overflow-hidden rounded-md border border-slate-200 bg-white shadow-sm" aria-labelledby="quick-result-title">
+          <section className="creative-surface min-w-0 overflow-hidden rounded-md border border-white/70 shadow-sm" aria-labelledby="quick-result-title">
             <div className="flex items-center justify-between gap-3 border-b border-slate-100 px-5 py-4">
               <div>
                 <h3 id="quick-result-title" className="text-base font-semibold text-slate-950">AI 推荐方案</h3>
@@ -1024,7 +1024,7 @@ export function PromptWorkbench({
             : <Button type="button" variant="secondary" onClick={() => setMode('simple')} className="h-9 shrink-0 px-2 sm:px-4" aria-label="返回简单模式" title="返回简单模式"><ArrowLeft className="h-4 w-4" /><span className="hidden sm:inline">返回简单模式</span></Button>}
         </div>
       </div>
-      <section className="overflow-hidden rounded-md border border-slate-200 bg-white shadow-sm" aria-labelledby="prompt-category-title">
+      <section className="creative-surface overflow-hidden rounded-md border border-white/70 shadow-sm" aria-labelledby="prompt-category-title">
         <div className="flex flex-col gap-3 border-b border-slate-100 px-4 py-3 sm:flex-row sm:items-center sm:justify-between">
           <div><h2 id="prompt-category-title" className="text-base font-semibold text-slate-950">先选本次要完成的图片任务</h2><p className="mt-0.5 text-xs text-slate-500">不同类目使用独立约束，减少偏题、产品变形和文字错误。</p></div>
           <span className="inline-flex w-fit items-center gap-1.5 rounded-md bg-blue-50 px-2.5 py-1.5 text-xs font-medium text-blue-700"><ShieldCheck className="h-3.5 w-3.5" />草稿自动保存</span>
@@ -1032,7 +1032,7 @@ export function PromptWorkbench({
         <div className="grid grid-cols-2 gap-px bg-slate-200 sm:grid-cols-4 xl:grid-cols-7" role="tablist" aria-label="提示词任务类目">
           {categories.map(({ id, label, description, icon: Icon }) => {
             const selected = draft.category === id
-            return <button key={id} type="button" role="tab" aria-selected={selected} onClick={() => selectCategory(id)} className={`group min-h-20 bg-white px-3 py-3 text-left outline-none transition focus-visible:z-10 focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-blue-500 ${selected ? 'bg-blue-50' : 'hover:bg-slate-50'}`}><span className={`flex items-center gap-2 text-sm font-semibold ${selected ? 'text-blue-800' : 'text-slate-800'}`}><Icon className={`h-4 w-4 ${selected ? 'text-blue-600' : 'text-slate-400 group-hover:text-slate-600'}`} />{label}</span><span className="mt-1.5 block text-[11px] leading-4 text-slate-500">{description}</span></button>
+            return <button key={id} type="button" role="tab" aria-selected={selected} onClick={() => selectCategory(id)} className={`group min-h-20 bg-white/80 px-3 py-3 text-left outline-none transition focus-visible:z-10 focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-blue-500 ${selected ? 'bg-blue-50/90' : 'hover:bg-white'}`}><span className={`flex items-center gap-2 text-sm font-semibold ${selected ? 'text-blue-800' : 'text-slate-800'}`}><Icon className={`h-4 w-4 ${selected ? 'text-blue-600' : 'text-slate-400 group-hover:text-slate-600'}`} />{label}</span><span className="mt-1.5 block text-[11px] leading-4 text-slate-500">{description}</span></button>
           })}
         </div>
       </section>
@@ -1041,7 +1041,7 @@ export function PromptWorkbench({
 
       <div className="grid min-w-0 items-start gap-3 xl:min-h-[calc(100dvh-6rem)] xl:grid-cols-[minmax(240px,0.78fr)_minmax(340px,1.08fr)_minmax(320px,1fr)]">
         <div className="min-w-0 xl:sticky xl:top-20 xl:self-start">
-        <aside className="scrollbar-thin min-w-0 overflow-hidden rounded-md border border-slate-200 bg-white shadow-sm xl:max-h-[calc(100dvh-8rem)] xl:overflow-y-auto" aria-label="产品与风格资产">
+        <aside className="creative-surface scrollbar-thin min-w-0 overflow-hidden rounded-md border border-white/70 shadow-sm xl:max-h-[calc(100dvh-8rem)] xl:overflow-y-auto" aria-label="产品与风格资产">
           <div className="border-b border-slate-100 px-4 py-3"><SectionTitle title="产品与风格资产" note="产品图锁定身份，风格图只影响场景和构图。" /></div>
 
           <div className="space-y-4 border-b border-slate-100 p-4">
@@ -1096,7 +1096,7 @@ export function PromptWorkbench({
         </div>
 
         <div className="min-w-0 xl:sticky xl:top-20 xl:self-start">
-        <main className="scrollbar-thin min-w-0 overflow-hidden rounded-md border border-slate-200 bg-white shadow-sm xl:max-h-[calc(100dvh-8rem)] xl:overflow-y-auto" aria-label="结构化创作要求">
+        <main className="creative-surface scrollbar-thin min-w-0 overflow-hidden rounded-md border border-white/70 shadow-sm xl:max-h-[calc(100dvh-8rem)] xl:overflow-y-auto" aria-label="结构化创作要求">
           <div className="border-b border-slate-100 px-4 py-3"><div className="flex items-center gap-2"><ActiveCategoryIcon className="h-4 w-4 text-blue-600" /><SectionTitle title={activeCategory.label} note={activeCategory.description} /></div></div>
           <div className="grid gap-4 p-4">
             <Field label="这次具体想做什么" value={draft.userRequest} onChange={(value) => updateDraft({ userRequest: value })} placeholder="只描述你想得到的结果；产品一致性、文字防错等规范会自动加入。" multiline />
@@ -1145,7 +1145,7 @@ export function PromptWorkbench({
         </div>
 
         <div className="min-w-0 xl:sticky xl:top-20 xl:self-start">
-        <aside className="scrollbar-thin min-w-0 overflow-hidden rounded-md border border-slate-200 bg-white shadow-sm xl:max-h-[calc(100dvh-8rem)] xl:overflow-y-auto" aria-label="提示词结果与资产库">
+        <aside className="creative-surface scrollbar-thin min-w-0 overflow-hidden rounded-md border border-white/70 shadow-sm xl:max-h-[calc(100dvh-8rem)] xl:overflow-y-auto" aria-label="提示词结果与资产库">
           <div className="grid grid-cols-2 border-b border-slate-200 bg-slate-50 p-1"><button type="button" onClick={() => setRightView('result')} className={`inline-flex h-9 items-center justify-center gap-2 rounded-md text-sm font-medium ${rightView === 'result' ? 'bg-white text-blue-700 shadow-sm' : 'text-slate-600 hover:text-slate-900'}`}><Sparkles className="h-4 w-4" />生成结果</button><button type="button" onClick={() => setRightView('history')} className={`inline-flex h-9 items-center justify-center gap-2 rounded-md text-sm font-medium ${rightView === 'history' ? 'bg-white text-blue-700 shadow-sm' : 'text-slate-600 hover:text-slate-900'}`}><FileText className="h-4 w-4" />提示词库 {workspace.history.length ? `(${workspace.history.length})` : ''}</button></div>
 
           {rightView === 'result' ? <div>
