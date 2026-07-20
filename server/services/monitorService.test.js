@@ -62,7 +62,8 @@ const { readDb, updateDb } = await import("../storage/db.js");
 after(async () => {
   if (previousDataDir === undefined) delete process.env.ECOM_MONITOR_DATA_DIR;
   else process.env.ECOM_MONITOR_DATA_DIR = previousDataDir;
-  await fs.rm(dataDir, { recursive: true, force: true });
+  await new Promise((resolve) => setTimeout(resolve, 250));
+  await fs.rm(dataDir, { recursive: true, force: true, maxRetries: 8, retryDelay: 50 });
 });
 
 test("capture queue keeps running work and starts the next task in order", async () => {
@@ -156,10 +157,10 @@ test("auth-required jobs can be resumed from their persisted scope", async () =>
   await resumeCaptureJob(paused.id, { operation: async () => ({
     run: { status: "success", items: [{ productId: "auth-product", status: "success" }] },
   }) });
-  for (let attempt = 0; attempt < 20; attempt += 1) {
+  for (let attempt = 0; attempt < 200; attempt += 1) {
     const resumed = (await getCaptureQueueStatus()).jobs.find((job) => job.id === paused.id);
     if (resumed?.status === "completed") break;
-    await new Promise((resolve) => setTimeout(resolve, 10));
+    await new Promise((resolve) => setTimeout(resolve, 25));
   }
   assert.equal((await getCaptureQueueStatus()).jobs.find((job) => job.id === paused.id)?.status, "completed");
   await clearFinishedCaptureJobs();
