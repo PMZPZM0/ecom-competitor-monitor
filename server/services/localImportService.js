@@ -11,7 +11,7 @@ import {
   resolveSkuPriceEvidence,
   selectAuthoritativePriceResolution,
 } from "./priceResolver.js";
-import { extractEmbeddedPromotionComponent, extractStructuredSku } from "./tmallScraper.js";
+import { extractEmbeddedPromotionComponent, extractStructuredSku, hydrateBrowserCapturePage } from "./tmallScraper.js";
 
 export const LOCAL_IMPORT_MAX_BYTES = 8 * 1024 * 1024;
 export const LOCAL_IMPORT_MAX_FILES = 200;
@@ -36,7 +36,7 @@ const identitySourceKeys = new Set([
   "unb", "munb", "wkunb", "wkcookie2", "tmsc", "opi", "pacc", "tracknick", "lgc", "login", "miid",
   "addresslist", "addressid", "areaid", "briefaddress", "detailaddress", "tel", "username", "displaynick",
 ]);
-const sensitiveTextKeySource = String.raw`api[_-]?key|authorization|cookie|password|passwd|secret|sign|signature|token|x5sec|_?m[_-]?h5[_-]?tk(?:[_-]?enc)?|_?tb[_-]?token_?|x[_-]?sign|x[_-]?sgext|x[_-]?mini[_-]?wua|nick|nickname|user[_-]?id|uid|account[_-]?id|login[_-]?id|open[_-]?id|union[_-]?id|mi[_-]?id|munb|unb|wk[_-]?unb|wk[_-]?cookie2|tmsc|opi|pacc|tracknick|lgc|login|address[_-]?id|area[_-]?id|brief[_-]?address|detail[_-]?address|tel|user[_-]?name|display[_-]?nick`;
+const sensitiveTextKeySource = String.raw`api[_-]?key|auth[_-]?key|authorization|cookie|password|passwd|secret|sign|signature|token|x5sec|_?m[_-]?h5[_-]?tk(?:[_-]?enc)?|_?tb[_-]?token_?|x[_-]?sign|x[_-]?sgext|x[_-]?mini[_-]?wua|nick|nickname|user[_-]?id|uid|account[_-]?id|login[_-]?id|open[_-]?id|union[_-]?id|mi[_-]?id|munb|unb|wk[_-]?unb|wk[_-]?cookie2|tmsc|opi|pacc|tracknick|lgc|login|address[_-]?id|area[_-]?id|brief[_-]?address|detail[_-]?address|tel|user[_-]?name|display[_-]?nick`;
 const sensitiveQueryPattern = new RegExp(`((?:[?&]|&amp;)(?:${sensitiveTextKeySource})=)[^&#\\s"'<>]*`, "gi");
 const sensitiveAssignmentPattern = new RegExp(`((?:^|[\\s,{;])["']?(?:${sensitiveTextKeySource})["']?\\s*[:=]\\s*)(?:"(?:\\\\.|[^"])*"|'(?:\\\\.|[^'])*'|[^\\r\\n,;}]+)`, "gim");
 const sensitiveEscapedStringAssignmentPattern = new RegExp(`((?:\\\\["'])(?:${sensitiveTextKeySource})(?:\\\\["'])\\s*:\\s*\\\\["'])(.*?)(\\\\["'])`, "gi");
@@ -103,7 +103,7 @@ export async function validateLocalEvidenceDirectory(value) {
 function isSensitiveKey(key) {
   const normalized = String(key).replaceAll(/[_-]/g, "").toLowerCase();
   return identitySourceKeys.has(normalized)
-    || /(?:apikey|authorization|cookie|password|passwd|secret|sign|signature|token|x5sec|mh5tk(?:enc)?|xsgext|xminiwua)$/.test(normalized);
+    || /(?:apikey|authkey|authorization|cookie|password|passwd|secret|sign|signature|token|x5sec|mh5tk(?:enc)?|xsgext|xminiwua)$/.test(normalized);
 }
 
 function safeProductEvidenceUrl(value, itemId = "") {
@@ -359,7 +359,14 @@ function buildSnapshot({ content, parsed, itemId, accountType, capturedAt }) {
   } catch {
     // A malformed embedded SKU object must not block valid imported API evidence.
   }
-  const normalizedPayloads = collectPricePayloads(parsed, itemId);
+  const browserPage = parsed?.captureType === "account-browser-local-source"
+    ? hydrateBrowserCapturePage(parsed)
+    : null;
+  const normalizedPayloads = browserPage
+    ? Object.entries(browserPage.skuNetworkPayloads || {}).flatMap(([skuId, payloads]) => (
+      payloads.map((payload) => ({ skuId, payload, identityVerified: true }))
+    ))
+    : collectPricePayloads(parsed, itemId);
   const payloadsBySku = new Map();
   for (const entry of normalizedPayloads) {
     if (!entry.payload) continue;
@@ -383,10 +390,12 @@ function buildSnapshot({ content, parsed, itemId, accountType, capturedAt }) {
       }),
       image: "",
     };
+    const selection = browserPage?.selectionResults?.find((item) => String(item.skuId) === skuId);
     const networkResolution = resolveSkuPriceEvidence(payloadsBySku.get(skuId) || [], {
       itemId,
       skuId,
       accountType,
+      selectedSkuVerified: browserPage ? Boolean(selection?.responseObserved) : undefined,
       capturedAt,
     });
     const embeddedResolution = resolveEmbeddedSkuPriceEvidence(sku, { itemId, skuId, accountType, capturedAt });
@@ -923,9 +932,7 @@ export async function readBrowserCaptureSource(captureId) {
   };
 }
 
-export async function reparseBrowserCaptureSource(captureId, options = {}) {
-  const { accountType, itemIdHint } = validateLocalImportOptions(options);
-  const capture = await readBrowserCaptureSource(captureId);
+function reparseBrowserCaptureRecord(capture, { accountType, itemIdHint, sourceFile = "" }) {
   const itemId = String(capture?.itemId || "").trim();
   if (!itemIdPattern.test(itemId)) {
     throw fail("INVALID_CAPTURE_ITEM_ID", "浏览器证据缺少已核验的商品 ID，无法重新解析。");
@@ -939,8 +946,8 @@ export async function reparseBrowserCaptureSource(captureId, options = {}) {
   const snapshot = {
     ...buildSnapshot({ content, parsed: capture, itemId, accountType, capturedAt }),
     source: "browser",
-    browserEvidenceId: captureId,
-    browserEvidenceFile: capture.sourceFile || "",
+    browserEvidenceId: capture.captureId,
+    browserEvidenceFile: sourceFile || capture.sourceFile || "",
     localFirst: { ...capture.localFirst },
   };
   const observedSkuCount = Number(snapshot.rawSignals?.observedSkuCount || 0);
@@ -952,9 +959,15 @@ export async function reparseBrowserCaptureSource(captureId, options = {}) {
 
   return {
     snapshot,
-    sourceFile: capture.sourceFile || "",
+    sourceFile: sourceFile || capture.sourceFile || "",
     localFirst: { ...capture.localFirst },
   };
+}
+
+export async function reparseBrowserCaptureSource(captureId, options = {}) {
+  const { accountType, itemIdHint } = validateLocalImportOptions(options);
+  const capture = await readBrowserCaptureSource(captureId);
+  return reparseBrowserCaptureRecord(capture, { accountType, itemIdHint, sourceFile: capture.sourceFile || "" });
 }
 
 async function atomicSave(record, directoryName = "local-imports", maxFiles = LOCAL_IMPORT_MAX_FILES, requiredOrigin = "") {

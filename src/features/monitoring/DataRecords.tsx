@@ -1,11 +1,11 @@
-import { CheckCircle2, CircleAlert, Download, ExternalLink, FolderOpen, LoaderCircle, RotateCcw, Save, Trash2 } from 'lucide-react'
+import { CheckCircle2, CircleAlert, Download, ExternalLink, FileSpreadsheet, FolderOpen, LoaderCircle, RotateCcw, Save, Trash2 } from 'lucide-react'
 import { useEffect, useState } from 'react'
 import { Button } from '../../components/ui/button'
 import { Card, CardContent, CardHeader, CardTitle } from '../../components/ui/card'
 import { Input } from '../../components/ui/input'
 import { api } from '../../lib/api'
 import { currency } from '../../lib/utils'
-import type { LocalEvidenceStatus, Product, Snapshot } from '../../types/domain'
+import type { ExcelSyncStatus, LocalEvidenceStatus, Product, Snapshot } from '../../types/domain'
 
 type Props = {
   snapshots: Snapshot[]
@@ -27,6 +27,9 @@ export function DataRecords({ snapshots, products, onClear, onEvidenceChanged }:
   const [feedback, setFeedback] = useState<{ tone: 'success' | 'error'; message: string } | null>(null)
   const [deleteConfirming, setDeleteConfirming] = useState(false)
   const [deletePhrase, setDeletePhrase] = useState('')
+  const [excelStatus, setExcelStatus] = useState<ExcelSyncStatus | null>(null)
+  const [excelBusy, setExcelBusy] = useState<'load' | 'sync' | 'open' | null>('load')
+  const [excelFeedback, setExcelFeedback] = useState<{ tone: 'success' | 'error'; message: string } | null>(null)
   const productName = new Map(products.map((product) => [product.id, product.name]))
   const shopName = new Map(products.map((product) => [product.id, product.shopName]))
   const modelName = new Map(products.map((product) => [product.id, product.model]))
@@ -44,6 +47,15 @@ export function DataRecords({ snapshots, products, onClear, onEvidenceChanged }:
         if (active) setFeedback({ tone: 'error', message: error instanceof Error ? error.message : '读取本地证据设置失败' })
       })
       .finally(() => { if (active) setBusy(null) })
+    return () => { active = false }
+  }, [])
+
+  useEffect(() => {
+    let active = true
+    api.excelSyncStatus()
+      .then((result) => { if (active) setExcelStatus(result) })
+      .catch((error) => { if (active) setExcelFeedback({ tone: 'error', message: error instanceof Error ? error.message : '读取 Excel 同步状态失败' }) })
+      .finally(() => { if (active) setExcelBusy(null) })
     return () => { active = false }
   }, [])
 
@@ -141,6 +153,33 @@ export function DataRecords({ snapshots, products, onClear, onEvidenceChanged }:
     URL.revokeObjectURL(url)
   }
 
+  async function syncExcel() {
+    setExcelBusy('sync')
+    setExcelFeedback(null)
+    try {
+      const result = await api.syncExcelWorkbook()
+      setExcelStatus(await api.excelSyncStatus())
+      setExcelFeedback({ tone: 'success', message: `已同步 ${result.currentRows} 条当前价格和 ${result.promotionRows} 条优惠数据，公式测算 ${result.calculationMs.toFixed(1)} ms。` })
+    } catch (error) {
+      setExcelFeedback({ tone: 'error', message: error instanceof Error ? error.message : 'Excel 同步失败' })
+    } finally {
+      setExcelBusy(null)
+    }
+  }
+
+  async function openExcel() {
+    setExcelBusy('open')
+    setExcelFeedback(null)
+    try {
+      const result = await api.openExcelWorkbook()
+      setExcelFeedback({ tone: 'success', message: `已打开：${result.path}` })
+    } catch (error) {
+      setExcelFeedback({ tone: 'error', message: error instanceof Error ? error.message : '打开 Excel 失败' })
+    } finally {
+      setExcelBusy(null)
+    }
+  }
+
   return (
     <div className="space-y-4">
       <Card>
@@ -194,6 +233,42 @@ export function DataRecords({ snapshots, products, onClear, onEvidenceChanged }:
             </div>
           )}
           {feedback && <div className={`flex items-start gap-2 rounded-md px-3 py-2 text-sm ${feedback.tone === 'success' ? 'bg-emerald-50 text-emerald-800' : 'bg-red-50 text-red-700'}`} role={feedback.tone === 'error' ? 'alert' : 'status'} aria-live="polite">{feedback.tone === 'success' ? <CheckCircle2 className="mt-0.5 h-4 w-4 shrink-0" /> : <CircleAlert className="mt-0.5 h-4 w-4 shrink-0" />}<span>{feedback.message}</span></div>}
+        </CardContent>
+      </Card>
+
+      <Card>
+        <CardHeader className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+          <div>
+            <CardTitle className="flex items-center gap-2"><FileSpreadsheet className="h-4 w-4 text-emerald-600" />Excel 公式自动测算</CardTitle>
+            <div className="mt-1 text-sm text-slate-500">本地优惠数据进入表格后，按商品、SKU 和账号匹配优惠码并立即验算到分。</div>
+          </div>
+          <div className="flex flex-wrap gap-2">
+            <Button type="button" variant="secondary" onClick={() => void syncExcel()} disabled={Boolean(excelBusy)}>
+              {excelBusy === 'sync' ? <LoaderCircle className="h-4 w-4 animate-spin" /> : <RotateCcw className="h-4 w-4" />}{excelBusy === 'sync' ? '同步中' : '立即同步'}
+            </Button>
+            <Button type="button" onClick={() => void openExcel()} disabled={Boolean(excelBusy)}>
+              {excelBusy === 'open' ? <LoaderCircle className="h-4 w-4 animate-spin" /> : <ExternalLink className="h-4 w-4" />}{excelBusy === 'open' ? '打开中' : '打开 Excel'}
+            </Button>
+          </div>
+        </CardHeader>
+        <CardContent className="space-y-3">
+          <div className="grid gap-2 sm:grid-cols-3">
+            <div className="rounded-md bg-slate-50 px-3 py-2">
+              <div className="text-xs text-slate-500">同步状态</div>
+              <div className="mt-1 text-sm font-medium text-slate-800">{excelBusy === 'load' ? '正在读取' : excelStatus?.exists ? '工作簿已生成' : '等待首次同步'}</div>
+            </div>
+            <div className="rounded-md bg-slate-50 px-3 py-2">
+              <div className="text-xs text-slate-500">最近同步</div>
+              <div className="mt-1 text-sm font-medium text-slate-800">{excelStatus?.modifiedAt ? new Date(excelStatus.modifiedAt).toLocaleString() : '--'}</div>
+            </div>
+            <div className="rounded-md bg-slate-50 px-3 py-2">
+              <div className="text-xs text-slate-500">公式测算耗时</div>
+              <div className="mt-1 text-sm font-medium text-slate-800">{excelStatus?.calculationMs != null ? `${excelStatus.calculationMs.toFixed(1)} ms` : '--'}</div>
+            </div>
+          </div>
+          <div className="break-all text-xs text-slate-400">文件位置：{excelStatus?.path || '读取中...'}</div>
+          <div className="text-xs text-slate-500">工作簿包含原始优惠数据、优惠码规则和公式计算。未通过本地证据验证的结果只标为待核验，不参与页面展示或飞书提醒。</div>
+          {(excelFeedback || excelStatus?.lastError) && <div className={`flex items-start gap-2 rounded-md px-3 py-2 text-sm ${(excelFeedback?.tone === 'error' || (!excelFeedback && excelStatus?.lastError)) ? 'bg-red-50 text-red-700' : 'bg-emerald-50 text-emerald-800'}`} role={(excelFeedback?.tone === 'error' || (!excelFeedback && excelStatus?.lastError)) ? 'alert' : 'status'} aria-live="polite">{(excelFeedback?.tone === 'error' || (!excelFeedback && excelStatus?.lastError)) ? <CircleAlert className="mt-0.5 h-4 w-4 shrink-0" /> : <CheckCircle2 className="mt-0.5 h-4 w-4 shrink-0" />}<span>{excelFeedback?.message || excelStatus?.lastError}</span></div>}
         </CardContent>
       </Card>
 

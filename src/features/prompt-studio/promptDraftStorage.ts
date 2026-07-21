@@ -8,7 +8,7 @@ const FILES_KEY = 'active-draft'
 
 const categories = new Set(['white-background', 'product-scene', 'campaign-poster', 'detail-page', 'local-edit', 'background-swap', 'product-retouch'])
 const copyModes = new Set(['none', 'reserved', 'exact'])
-const ratios = new Set(['1:1', '3:4', '4:3', '16:9'])
+const ratios = new Set(['1:1', '4:5', '3:4', '2:3', '9:16', '4:3', '3:2', '16:9'])
 const resolutions = new Set(['1k', '2k', '4k'])
 const qualities = new Set(['low', 'medium', 'high'])
 const backgrounds = new Set(['auto', 'opaque', 'transparent'])

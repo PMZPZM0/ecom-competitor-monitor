@@ -6,6 +6,7 @@ export const TMALL_PRICE_STATUS = Object.freeze({
   UNKNOWN: "unknown",
   VALID: "valid",
   COOLDOWN: "cooldown",
+  DEGRADED: "degraded",
 });
 
 const DEFAULT_ACCOUNT_COOLDOWN_MS = 15 * 60 * 1000;

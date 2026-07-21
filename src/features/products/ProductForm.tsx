@@ -32,7 +32,7 @@ export function ProductForm({ sessions, onAdd, onRequireAuth }: Props) {
   const [platform, setPlatform] = useState<ProductPlatform>('tmall')
   const [linkInput, setLinkInput] = useState('')
   const [idInput, setIdInput] = useState('')
-  const [accountType, setAccountType] = useState<AccountType>(() => fallbackAccountType)
+  const [accountType, setAccountType] = useState<AccountType>(fallbackAccountType)
   const [captureBuyerShows, setCaptureBuyerShows] = useState(false)
   const [captureMediaAssets, setCaptureMediaAssets] = useState(false)
   const [submitting, setSubmitting] = useState(false)
@@ -48,7 +48,7 @@ export function ProductForm({ sessions, onAdd, onRequireAuth }: Props) {
   async function submit(event: React.FormEvent) {
     event.preventDefault()
     setSubmitting(true)
-    setStatus({ tone: 'progress', message: `正在后台打开商品，采集价格、800 主图和 SKU 图${captureMediaAssets ? '、完整素材' : ''}${captureBuyerShows ? '、买家秀' : ''}；采集完成后会脱敏保存并从本地文件解析...` })
+    setStatus({ tone: 'progress', message: '正在后台打开商品，采集价格、800 主图和 SKU 图；采集完成后会脱敏保存并从本地文件解析...' })
     try {
       const productInput = inputMode === 'id' ? idInput : linkInput
       const itemId = itemIdFromProductInput(productInput)
@@ -156,14 +156,15 @@ export function ProductForm({ sessions, onAdd, onRequireAuth }: Props) {
             <label className="flex min-h-12 cursor-pointer items-center gap-2 rounded-md bg-slate-50 px-3 text-sm text-slate-700">
               <input type="checkbox" checked={captureMediaAssets} onChange={(event) => setCaptureMediaAssets(event.target.checked)} className="h-4 w-4 accent-blue-600" />
               <Archive className="h-4 w-4 shrink-0 text-slate-500" />
-              <span><span className="block font-medium">抓取完整素材</span><span className="block text-xs text-slate-400">750 主图、详情图、视频</span></span>
+              <span><span className="block font-medium">启用完整素材</span><span className="block text-xs text-slate-400">添加后在卡片按需单独抓取</span></span>
             </label>
             <label className="flex min-h-12 cursor-pointer items-center gap-2 rounded-md bg-slate-50 px-3 text-sm text-slate-700">
               <input type="checkbox" checked={captureBuyerShows} onChange={(event) => setCaptureBuyerShows(event.target.checked)} className="h-4 w-4 accent-blue-600" />
               <Images className="h-4 w-4 shrink-0 text-slate-500" />
-              <span><span className="block font-medium">同时抓取买家秀</span><span className="block text-xs text-slate-400">独立可选，会增加时间</span></span>
+              <span><span className="block font-medium">启用买家秀</span><span className="block text-xs text-slate-400">添加后在卡片按需单独抓取</span></span>
             </label>
           </div>
+          {(captureMediaAssets || captureBuyerShows) && <div className="rounded-md bg-sky-50 px-3 py-2 text-xs leading-5 text-sky-800">勾选仅启用对应功能，首次抓价不会连续打开素材或买家秀页面。添加后请在商品卡片单独抓取；成功落盘后可使用“本地解析”，全程不再访问淘宝。</div>}
           <div className="mt-auto grid gap-2 pt-1">
             <Button type="submit" disabled={submitting || !itemId} className="w-full"><Plus className="h-4 w-4" />{submitting ? '自动采集与解析中' : '自动采集并本地解析'}</Button>
             {status && <div className={`flex min-w-0 items-start gap-1.5 text-xs leading-5 ${status.tone === 'progress' ? 'text-blue-700' : status.tone === 'success' ? 'text-emerald-700' : 'text-red-700'}`} role={status.tone === 'error' ? 'alert' : 'status'} aria-live="polite">{status.tone === 'progress' ? <LoaderCircle className="mt-0.5 h-4 w-4 shrink-0 animate-spin" /> : status.tone === 'success' ? <CircleCheck className="mt-0.5 h-4 w-4 shrink-0" /> : <CircleAlert className="mt-0.5 h-4 w-4 shrink-0" />}<span className="min-w-0 break-all">{status.message}</span></div>}

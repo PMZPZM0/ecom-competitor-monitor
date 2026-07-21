@@ -7,7 +7,7 @@ import test, { after } from "node:test";
 const dataDir = await fs.mkdtemp(path.join(os.tmpdir(), "ecom-browser-local-capture-"));
 process.env.ECOM_MONITOR_DATA_DIR = dataDir;
 
-const { buildBrowserCaptureEvidence, scrapeTmallProduct } = await import("./tmallScraper.js");
+const { buildBrowserCaptureEvidence, scrapeTaobaoSearchMainImage, scrapeTmallMaterials, scrapeTmallProduct } = await import("./tmallScraper.js");
 
 after(async () => {
   await fs.rm(dataDir, { recursive: true, force: true });
@@ -42,12 +42,15 @@ test("browser service Node network calls only target local Chrome DevTools", asy
 
 test("browser capture rechecks access restrictions after interactive page actions", async () => {
   const source = await fs.readFile(new URL("./browserService.js", import.meta.url), "utf8");
-  const helperAt = source.indexOf("const assertNoAccessRestriction = async");
-  const skuLoopAt = source.indexOf("for (const selection of requestedSelections)");
-  const finalCaptureAt = source.indexOf("const result = await cdp.send", skuLoopAt);
-  const skuLoop = source.slice(skuLoopAt, finalCaptureAt);
-  assert.ok(helperAt >= 0 && skuLoopAt > helperAt);
-  assert.match(skuLoop, /await assertNoAccessRestriction\(\)/);
+  const selectionHelperAt = source.indexOf("export async function captureRequestedSkuSelections");
+  const renderAt = source.indexOf("export async function getRenderedHtml", selectionHelperAt);
+  const selectionHelper = source.slice(selectionHelperAt, renderAt);
+  const restrictionHelperAt = source.indexOf("const assertNoAccessRestriction = async", renderAt);
+  const selectionInvocationAt = source.indexOf("captureRequestedSkuSelections({", restrictionHelperAt);
+  const finalCaptureAt = source.indexOf("const result = await cdp.send", selectionInvocationAt);
+  assert.ok(selectionHelperAt >= 0 && renderAt > selectionHelperAt);
+  assert.match(selectionHelper, /await assertNoAccessRestriction\(\)/);
+  assert.ok(restrictionHelperAt >= 0 && selectionInvocationAt > restrictionHelperAt);
   assert.match(source.slice(finalCaptureAt), /isTaobaoAccessRestrictedDocument/);
 });
 
@@ -58,11 +61,44 @@ test("browser evidence hook runs before the temporary tab is closed", async () =
   assert.ok(hookAt >= 0 && closeAt > hookAt);
 });
 
+test("search cover is parsed only after sanitized browser evidence is saved and reloaded", async () => {
+  const itemId = "1062991546966";
+  const image = "https://img.alicdn.com/bao/uploaded/i2/search-cover.jpg";
+  const result = await scrapeTaobaoSearchMainImage(
+    { itemId, url: `https://detail.tmall.com/item.htm?id=${itemId}` },
+    { source: "taobao-browser", accountType: "normal" },
+    {
+      renderPage: async (url, _session, options) => {
+        assert.equal(url, `https://s.taobao.com/search?q=${itemId}`);
+        assert.equal(options.captureNetworkResponses, false);
+        const page = {
+          html: `<div style="display:none">手机扫码登录</div><article><a href="https://detail.tmall.com/item.htm?id=${itemId}"><img src="${image}"></a></article>`,
+          visibleText: "搜索结果",
+          finalUrl: url,
+          statusCode: 200,
+          cookieHeader: "cookie2=must-not-be-saved",
+          authState: { loggedIn: true, cookie: "must-not-be-saved" },
+        };
+        await options.persistEvidenceBeforeClose(page);
+        return page;
+      },
+    },
+  );
+  assert.equal(result.searchMainImage, image);
+  assert.equal(result.searchMainImageStatus, "verified");
+  assert.equal(result.searchMainImageSource, "taobao-search-exact-item-card");
+  assert.equal(result.searchMainImageLocalFirst.sourceSanitized, true);
+  assert.equal(result.searchMainImageLocalFirst.parsedFromDisk, true);
+  const saved = await fs.readFile(path.join(dataDir, result.searchMainImageEvidenceFile), "utf8");
+  assert.doesNotMatch(saved, /must-not-be-saved|cookie2/);
+});
+
 test("Tmall SSO bridge runs in the browser and its one-time response never enters evidence", async () => {
   const source = await fs.readFile(new URL("./browserService.js", import.meta.url), "utf8");
+  const policyAt = source.indexOf("if (shouldRefreshTmallSso(authSession");
   const bridgeAt = source.indexOf("await refreshTmallSsoFromCapturedLogin(cdp, priceResponses, url)");
   const captureAt = source.indexOf("const capturedPage =", bridgeAt);
-  assert.ok(bridgeAt >= 0 && captureAt > bridgeAt);
+  assert.ok(policyAt >= 0 && bridgeAt > policyAt && captureAt > bridgeAt);
 
   const evidence = buildBrowserCaptureEvidence({
     product: { url: "https://detail.tmall.com/item.htm?id=843315272699" },
@@ -83,6 +119,21 @@ test("Tmall SSO bridge runs in the browser and its one-time response never enter
   });
   assert.deepEqual(evidence.page.networkPayloads, []);
   assert.doesNotMatch(JSON.stringify(evidence), /pass\.tmall\.com|token=secret/);
+});
+
+test("session checks are local cookie reads and authorization tabs close after sync", async () => {
+  const browserSource = await fs.readFile(new URL("./browserService.js", import.meta.url), "utf8");
+  const checkAt = browserSource.indexOf("export async function checkTaobaoSession");
+  const closeAt = browserSource.indexOf("export async function closeAccountBrowser", checkAt);
+  const checkSource = browserSource.slice(checkAt, closeAt);
+  assert.match(checkSource, /await ensureBrowser\("about:blank", context\)/);
+  assert.match(checkSource, /await getTaobaoAuthState/);
+  assert.doesNotMatch(checkSource, /getRenderedHtml|Page\.navigate|createBackgroundTab/);
+
+  const serverSource = await fs.readFile(new URL("../index.js", import.meta.url), "utf8");
+  assert.match(serverSource, /await closeAccountTab\(pending\.loginTargetId/);
+  assert.match(serverSource, /const eagerBrowserWarmup = process\.env\.ECOM_MONITOR_EAGER_BROWSER_WARMUP === "1"/);
+  assert.doesNotMatch(serverSource, /ECOM_MONITOR_EAGER_BROWSER_WARMUP !== "0"/);
 });
 
 test("the price diagnostic script also saves and reloads browser evidence before parsing", async () => {
@@ -202,6 +253,69 @@ test("account browser capture saves loaded data, re-reads disk, and never fetche
     assert.equal(stored.page.networkPayloads[0].captureRunId, "selection-run-single");
     assert.equal(stored.page.networkPayloads[0].responseSequence, 1);
     assert.equal(Object.hasOwn(stored.page.selectionResults[0], "responseObserved"), false);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("complete materials parse from reloaded browser evidence without requiring any price payload", async () => {
+  const itemId = "843315272611";
+  const skuId = "6274971436111";
+  const sellerId = "2206573316203";
+  const url = `https://detail.tmall.com/item.htm?id=${itemId}`;
+  const primary = `https://img.alicdn.com/imgextra/i1/${sellerId}/primary-0-item_pic.jpg`;
+  const gallery = `https://img.alicdn.com/imgextra/i2/${sellerId}/gallery.jpg`;
+  const skuImage = `https://img.alicdn.com/imgextra/i3/${sellerId}/sku.jpg`;
+  const detail = `https://img.alicdn.com/imgextra/i4/${sellerId}/detail.jpg`;
+  const video = `https://cloud.video.taobao.com/play/u/${sellerId}/p/2/e/6/t/1/448997458828.mp4?appKey=7596`;
+  const html = `<html><head><title>素材本地解析测试</title></head><body>
+    <div class="gallery"><img class="thumbnailPic" src="${primary}"/><img class="thumbnailPic" data-original="${gallery}"/></div>
+    <div class="descV8"><img data-ks-lazyload="${detail}"/><video data-src="${video}"></video></div>
+    <script>window.__DATA__=${JSON.stringify({
+      headImageVO: { images: [primary, gallery] },
+      skuBase: { props: [{ pid: "1", values: [{ vid: "10", name: "标准款", image: skuImage }] }], skus: [{ skuId, propPath: "1:10" }] },
+      skuCore: { sku2info: { [skuId]: { quantity: 10 } } },
+    })}</script>
+  </body></html>`;
+  let renderCalls = 0;
+  const renderPage = async (_url, _session, options) => {
+    renderCalls += 1;
+    assert.equal(options.captureVideo, true);
+    assert.equal(options.captureBuyerShow, false);
+    return {
+      html,
+      visibleText: "素材本地解析测试",
+      finalUrl: url,
+      statusCode: 200,
+      source: "browser",
+      authState: { loggedIn: true },
+      networkPayloads: [],
+      selectionResults: [],
+      mediaObservations: { galleryImages: [primary, gallery], detailImages: [detail], videoUrls: [video] },
+    };
+  };
+  const originalFetch = globalThis.fetch;
+  let nodeNetworkCalls = 0;
+  globalThis.fetch = async () => {
+    nodeNetworkCalls += 1;
+    throw new Error("material parsing must remain local");
+  };
+  try {
+    const snapshot = await scrapeTmallMaterials({ id: "materials-local", itemId, url }, {
+      id: "session-materials",
+      source: "taobao-browser",
+      accountType: "normal",
+    }, { renderPage });
+    assert.equal(renderCalls, 1);
+    assert.equal(nodeNetworkCalls, 0);
+    assert.equal(snapshot.mainImage800, primary);
+    assert.deepEqual(snapshot.gallery750Images, [gallery]);
+    assert.deepEqual(snapshot.skuImages, [skuImage]);
+    assert.deepEqual(snapshot.detailImages, [detail]);
+    assert.deepEqual(snapshot.videoUrls, [video]);
+    assert.equal(snapshot.localFirst.sourceSaved, true);
+    assert.equal(snapshot.localFirst.parsedFromDisk, true);
+    assert.equal(snapshot.rawSignals.networkAccessedAfterLocalSave, false);
   } finally {
     globalThis.fetch = originalFetch;
   }
@@ -470,7 +584,7 @@ test("browser evidence keeps identical responses from distinct sequence position
   assert.equal(evidence.page.selectionResults[0].responseSequenceEndInclusive, 2);
 });
 
-test("a locally reloaded price-login gate stops before refresh and SKU selection", async () => {
+test("a persistent locally reloaded price-login gate stops after one controlled refresh", async () => {
   const itemId = "843315272601";
   const url = `https://detail.tmall.com/item.htm?id=${itemId}`;
   const html = `<script>window.__DATA__=${JSON.stringify({
@@ -501,7 +615,73 @@ test("a locally reloaded price-login gate stops before refresh and SKU selection
     }),
     (error) => error.code === "TMALL_PRICE_AUTH_REQUIRED",
   );
-  assert.equal(renderCalls, 1);
+  assert.equal(renderCalls, 2);
+});
+
+test("a first-load price gate recovers within the same capture instead of requiring a second user click", async () => {
+  const itemId = "843315272604";
+  const skuId = "6274971436004";
+  const url = `https://detail.tmall.com/item.htm?id=${itemId}`;
+  const gatedHtml = `<script>window.__DATA__=${JSON.stringify({
+    skuBase: { props: [{ pid: "1", values: [{ vid: "10", name: "标准款" }] }], skus: [{ skuId, propPath: "1:10" }] },
+    skuCore: { sku2info: { [skuId]: { price: { priceText: "199", priceTitle: "优惠前" } } } },
+  })}</script>`;
+  const verifiedHtml = `<script>window.__DATA__=${JSON.stringify({
+    skuBase: { props: [{ pid: "1", values: [{ vid: "10", name: "标准款" }] }], skus: [{ skuId, propPath: "1:10" }] },
+    skuCore: { sku2info: { [skuId]: { subPrice: { priceText: "139", priceTitle: "平台加补后" }, price: { priceText: "199", priceTitle: "优惠前" } } } },
+  })}</script>`;
+  const payload = {
+    url: "https://h5api.m.tmall.com/h5/mtop.taobao.pcdetail.data.adjust/1.0/",
+    mimeType: "application/json",
+    responseKind: "price",
+    captureRunId: "first-load-recovery-run",
+    responseSequence: 1,
+    body: JSON.stringify({ data: { componentsVO: { xsRedPacketParamVO: {
+      trackParams: { itemId, skuId, price1: "199", price2: "139" },
+      xsRedPocketParams: { tbShopRedPocket: JSON.stringify({ umpInfo: { umpPromotionList: [{ promotionName: "spsd4plan", amount: 6000 }] } }) },
+    } } } }),
+  };
+  let renderCalls = 0;
+  const snapshot = await scrapeTmallProduct({ id: "product-first-load-recovery", itemId, url, captureBuyerShows: false }, {
+    id: "session-first-load-recovery",
+    source: "taobao-browser",
+    accountType: "normal",
+    browserProfileKey: "profile-first-load-recovery",
+    browserPort: 9336,
+  }, {
+    renderPage: async (_url, _session, options) => {
+      renderCalls += 1;
+      const common = {
+        finalUrl: url,
+        statusCode: 200,
+        source: "browser",
+        authState: { loggedIn: true },
+        buyerShowInteractions: [],
+      };
+      if (renderCalls === 1) return { ...common, html: gatedHtml, visibleText: "登录查看更多优惠", networkPayloads: [], selectionResults: [] };
+      if (!options.selectSkus) return { ...common, html: verifiedHtml, visibleText: "正常商品页", networkPayloads: [], selectionResults: [] };
+      return {
+        ...common,
+        html: verifiedHtml,
+        visibleText: "正常商品页",
+        networkPayloads: [payload],
+        selectionResults: [{
+          skuId,
+          selected: true,
+          responseReceivedAfterSelection: true,
+          captureRunId: "first-load-recovery-run",
+          responseSequenceStartExclusive: 0,
+          responseSequenceEndInclusive: 1,
+        }],
+      };
+    },
+  });
+
+  assert.equal(renderCalls, 3);
+  assert.equal(snapshot.skuPrices.length, 1);
+  assert.equal(snapshot.skuPrices[0].normalPrice, 139);
+  assert.equal(snapshot.skuPrices[0].resolutionStatus, "verified");
+  assert.equal(snapshot.localFirst.parsedFromDisk, true);
 });
 
 test("an account restriction page stops after the first browser load", async () => {

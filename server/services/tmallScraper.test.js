@@ -1,12 +1,32 @@
 import assert from "node:assert/strict";
 import fs from "node:fs/promises";
 import test from "node:test";
-import { applyAppliedCoinDiscount, applyMediaCapturePreference, applyNetworkPromoData, applyVisibleDiscountItems, applyVisibleSurprisePrice, buildBrowserCaptureEvidence, buyerShowCaptureFromNetwork, buyerShowsFromRateDetail, calculateAccountPriceScenario, calculatePriceScenarios, collectDiscountItems, collectDiscountItemsFromText, collectProductProgramItems, collectVisibleSurprisePrices, extractBuyerShowItems, extractEmbeddedPromotionComponent, extractSelectedSkuId, extractShopName, extractStructuredSku, filterProductVideoUrls, gatedSelectionSkuIds, hasCurrentSkuPriceData, hasTmallPriceLoginGate, isUnselectablePromotionSku, resolveCaptureAccessMode, resolveCoinBenefit, resolveSkuPrices, scrapeTmallBuyerShows, scrapeTmallProduct, selectGalleryImages, selectSquareMainImage, sellerIdFromProductMedia, shouldRequireTmallPriceAuthorization } from "./tmallScraper.js";
+import { applyAppliedCoinDiscount, applyMediaCapturePreference, applyNetworkPromoData, applyVisibleDiscountItems, applyVisibleSurprisePrice, buildBrowserCaptureEvidence, buyerShowCaptureFromNetwork, buyerShowsFromRateDetail, calculateAccountPriceScenario, calculatePriceScenarios, collectDiscountItems, collectDiscountItemsFromText, collectProductProgramItems, collectVisibleSurprisePrices, extractBuyerShowItems, extractEmbeddedPromotionComponent, extractSearchMainImage, extractSelectedSkuId, extractShopName, extractStructuredSku, filterProductVideoUrls, gatedSelectionSkuIds, hasCurrentSkuPriceData, hasTmallPriceLoginGate, hydrateBrowserCapturePage, isUnselectablePromotionSku, resolveCaptureAccessMode, resolveCoinBenefit, resolveSkuPrices, retryableSelectionSkuIds, scrapeTmallBuyerShows, scrapeTmallMaterials, scrapeTmallProduct, searchMainImageQueries, selectGalleryImages, selectSquareMainImage, sellerIdFromProductMedia, shouldRequireTmallPriceAuthorization } from "./tmallScraper.js";
 import { resolveEmbeddedSkuPriceEvidence } from "./priceResolver.js";
 
 test("Tmall scraper has no Node-side price fetch escape hatch", async () => {
   const source = await fs.readFile(new URL("./tmallScraper.js", import.meta.url), "utf8");
   assert.doesNotMatch(source, /\bfetch\s*\(/, "淘宝/天猫价格只能由账号浏览器采集、脱敏落盘并重读后解析");
+});
+
+test("search main image requires an exact item card and never falls back to another product image", () => {
+  const expectedItemId = "1062991546966";
+  const exactImage = "https://g-search1.alicdn.com/img/bao/uploaded/i2/exact-search-cover.jpg";
+  const html = `<main>
+    <article><a href="https://item.taobao.com/item.htm?id=999999999999"><img src="https://img.alicdn.com/bao/uploaded/i2/wrong-cover.jpg"></a></article>
+    <article><a href="https://detail.tmall.com/item.htm?id=${expectedItemId}"><img data-src="${exactImage}_400x400.jpg_.webp"></a></article>
+  </main>`;
+  assert.deepEqual(extractSearchMainImage(html, expectedItemId), { image: exactImage, matched: true, reason: "" });
+
+  const missing = extractSearchMainImage(`<a href="https://detail.tmall.com/item.htm?id=${expectedItemId}">目标商品</a><img src="https://img.alicdn.com/bao/uploaded/i2/unrelated-detail.jpg">`, expectedItemId);
+  assert.equal(missing.image, "");
+  assert.equal(missing.matched, true);
+  assert.equal(missing.reason, "SEARCH_CARD_IMAGE_NOT_FOUND");
+});
+
+test("search main image queries use the recognized model and title instead of an ineffective item-id search", () => {
+  assert.deepEqual(searchMainImageQueries({ model: "ZN30FC866", name: "苏泊尔电蒸锅家用多功能蒸汽锅" }, "837915049470"), ["ZN30FC866", "苏泊尔电蒸锅家用多功能蒸汽锅"]);
+  assert.deepEqual(searchMainImageQueries({ name: "待识别商品 837915049470" }, "837915049470"), ["837915049470"]);
 });
 
 test("extractEmbeddedPromotionComponent skips an invalid leading candidate", () => {
@@ -28,6 +48,31 @@ test("browser captures require a verified account identity before prices are tru
   assert.equal(resolveCaptureAccessMode(browserSession, { authState: { loggedIn: false }, cookieHeader: "sid=value" }), "anonymous");
   assert.equal(resolveCaptureAccessMode({ source: "manual-cookie", cookie: "sid=value" }), "anonymous");
   assert.equal(resolveCaptureAccessMode(null), "anonymous");
+});
+
+test("legacy local evidence restores each self-identifying SKU response without a sequence window", () => {
+  const itemId = "668945261101";
+  const skuIds = ["6206877831711", "6088816047261"];
+  const payload = (skuId) => ({
+    url: "https://h5api.m.tmall.com/h5/mtop.taobao.pcdetail.data.adjust/1.0/",
+    responseKind: "price",
+    body: JSON.stringify({ data: { componentsVO: { xsRedPacketParamVO: { trackParams: { itemId, skuId, price1: "705", price2: "300" } } } } }),
+  });
+  const page = hydrateBrowserCapturePage({
+    captureType: "account-browser-local-source",
+    itemId,
+    page: {
+      networkPayloads: [payload(skuIds[0]), payload(skuIds[1]), {
+        ...payload(skuIds[1]),
+        body: JSON.stringify({ data: { componentsVO: { xsRedPacketParamVO: { trackParams: { itemId: "999999999999", skuId: skuIds[1], price1: "999", price2: "1" } } } } }),
+      }],
+      selectionResults: skuIds.map((skuId) => ({ skuId, selected: true })),
+    },
+  });
+  assert.deepEqual(Object.keys(page.skuNetworkPayloads).sort(), [...skuIds].sort());
+  assert.deepEqual(page.selectionResults.map(({ skuId, responseObserved }) => [skuId, responseObserved]), skuIds.map((skuId) => [skuId, true]));
+  assert.equal(page.skuNetworkPayloads[skuIds[0]].length, 1);
+  assert.equal(page.skuNetworkPayloads[skuIds[1]].length, 1);
 });
 
 test("browser page readiness rejects a list-only shell until the current price arrives", () => {
@@ -91,6 +136,23 @@ test("only unresolved SKU selection windows are retried after a price login resp
   assert.deepEqual(gatedSelectionSkuIds(payloads, selections), ["6096276240242"]);
 });
 
+test("every unresolved selectable SKU is retried once without touching verified siblings", () => {
+  const skus = [
+    { skuId: "verified", selectionValueIds: ["1"] },
+    { skuId: "timeout", selectionValueIds: ["2"] },
+    { skuId: "late-control", selectionValueIds: ["3"] },
+    { skuId: "missing-result", selectionValueIds: ["4"] },
+    { skuId: "no-selection-path", selectionValueIds: [] },
+  ];
+  const selections = [
+    { skuId: "verified", selected: true, responseObserved: true },
+    { skuId: "timeout", selected: true, responseObserved: false, reason: "response-timeout" },
+    { skuId: "late-control", selected: false, responseObserved: false, reason: "missing-value:3" },
+  ];
+
+  assert.deepEqual(retryableSelectionSkuIds(skus, selections), ["timeout", "late-control", "missing-result"]);
+});
+
 test("shared scrapers reject every non-browser source before network access", async () => {
   await assert.rejects(
     scrapeTmallProduct({ url: "https://detail.tmall.com/item.htm?id=843315272599" }, { source: "manual-cookie" }),
@@ -98,6 +160,10 @@ test("shared scrapers reject every non-browser source before network access", as
   );
   await assert.rejects(
     scrapeTmallBuyerShows({ url: "https://detail.tmall.com/item.htm?id=843315272599" }, null),
+    /已阻止后端直接请求淘宝接口/,
+  );
+  await assert.rejects(
+    scrapeTmallMaterials({ url: "https://detail.tmall.com/item.htm?id=843315272599" }, { source: "manual-cookie" }),
     /已阻止后端直接请求淘宝接口/,
   );
 });
@@ -169,7 +235,7 @@ test("selectSquareMainImage preserves a known search image when a new capture on
   assert.equal(selectSquareMainImage([activityImage], knownSearchImage), knownSearchImage);
 });
 
-test("selectGalleryImages keeps five gallery-role assets even when the 800 image is also present", () => {
+test("selectGalleryImages excludes the large primary image and keeps the next five assets", () => {
   const primary = "https://img.alicdn.com/imgextra/i1/1/O1CN-primary_!!1-0-item_pic.jpg";
   const gallery = selectGalleryImages([
     primary,
@@ -177,7 +243,8 @@ test("selectGalleryImages keeps five gallery-role assets even when the 800 image
     ...Array.from({ length: 6 }, (_, index) => `https://img.alicdn.com/imgextra/i1/1/O1CN-gallery-${index + 1}_!!1.jpg`),
   ], primary);
   assert.equal(gallery.length, 5);
-  assert.equal(gallery.filter((image) => image.includes("O1CN-primary")).length, 1);
+  assert.equal(gallery.filter((image) => image.includes("O1CN-primary")).length, 0);
+  assert.ok(gallery[0].includes("O1CN-gallery-1"));
 });
 
 test("resolveSkuPrices keeps normal price before coin price", () => {
@@ -684,6 +751,19 @@ test("filterProductVideoUrls deduplicates Taobao play and Tmall Supermarket CDN 
   assert.deepEqual(videos, [
     "https://cloud.video.taobao.com/play/u/725677994/p/2/e/6/t/1/533410081214.mp4?appKey=38829",
   ]);
+});
+
+test("filterProductVideoUrls drops expiring signed streams that cannot survive sanitized local evidence", () => {
+  assert.deepEqual(filterProductVideoUrls([
+    "https://tbm-auth.alicdn.com/path/product.mp4?auth_key=temporary-secret",
+    "https://cloud.video.taobao.com/play/u/725677994/p/2/e/6/t/1/533410081214.mp4?appKey=38829",
+  ]), [
+    "https://cloud.video.taobao.com/play/u/725677994/p/2/e/6/t/1/533410081214.mp4?appKey=38829",
+  ]);
+});
+
+test("scrapeTmallMaterials is exported as an independent material capture entry point", () => {
+  assert.equal(typeof scrapeTmallMaterials, "function");
 });
 
 test("extractBuyerShowItems keeps only review content with real media or copy", () => {

@@ -20,7 +20,9 @@ const TRANSIENT_RENAME_ERRORS = new Set(["EACCES", "EBUSY", "EPERM"]);
 export const imageGenerationRequestSchema = z.object({
   prompt: z.string().trim().min(1, "请输入正向提示词。").max(4_000),
   negativePrompt: z.string().trim().max(2_000).optional(),
-  ratio: z.enum(["1:1", "3:4", "4:3", "16:9"]),
+  ratio: z.enum(["1:1", "4:5", "3:4", "2:3", "9:16", "4:3", "3:2", "16:9", "custom"]),
+  customWidth: z.number().int().min(512).max(4096).optional(),
+  customHeight: z.number().int().min(512).max(4096).optional(),
   quality: z.enum(["low", "medium", "high"]),
   format: z.enum(["png", "jpeg", "webp"]),
   background: z.enum(["auto", "opaque", "transparent"]),
@@ -29,7 +31,20 @@ export const imageGenerationRequestSchema = z.object({
   resolution: z.enum(["1k", "2k", "4k"]).default("1k"),
   sourceImageId: z.string().trim().max(80).optional(),
   editMode: z.enum(["mask", "annotation"]).optional(),
+  editIntent: z.enum(["local", "background", "outpaint", "redraw"]).optional(),
+  compositionMode: z.enum(["keep", "smart"]).optional(),
+  copyText: z.string().trim().max(500).optional(),
+  copyPosition: z.enum(["top", "center", "bottom"]).optional(),
+  copyStyle: z.enum(["light", "dark"]).optional(),
+  copyScale: z.enum(["small", "medium", "large"]).optional(),
   clientRequestId: z.string().uuid("生图请求幂等 ID 无效。").optional(),
+}).superRefine((value, context) => {
+  if (value.ratio === "custom" && (!value.customWidth || !value.customHeight)) {
+    context.addIssue({ code: "custom", message: "自定义尺寸需要同时填写宽度和高度。" });
+  }
+  if (value.ratio !== "custom" && (value.customWidth || value.customHeight)) {
+    context.addIssue({ code: "custom", message: "仅自定义比例可以提交自定义宽高。" });
+  }
 });
 
 function jobError(message, { code = "IMAGE_JOB_INVALID", status = 400, retryable } = {}) {
@@ -134,6 +149,7 @@ function normalizeStoredJob(job) {
       ? {
           code: String(job.error.code || "IMAGE_JOB_FAILED").slice(0, 100),
           message: String(job.error.message || "图片生成失败。").slice(0, 1_000),
+          status: Number.isInteger(job.error.status) && job.error.status >= 400 && job.error.status <= 599 ? job.error.status : 502,
           retryable: job.error.retryable !== false,
         }
       : null,
@@ -407,6 +423,7 @@ function normalizedFailure(error) {
   return {
     code: String(error?.code || (aborted ? "IMAGE_JOB_ABORTED" : "IMAGE_JOB_FAILED")).slice(0, 100),
     message: String(error?.message || (aborted ? "图片生成已取消。" : "图片生成失败。")).slice(0, 1_000),
+    status: Number.isInteger(error?.status) && error.status >= 400 && error.status <= 599 ? error.status : aborted ? 409 : 502,
     retryable: error?.retryable ?? error?.status !== 400,
   };
 }
@@ -504,6 +521,9 @@ export async function executeImageGeneration(request, {
     createdAt,
     referenceImageCount: generated.appliedOptions.referenceImageCount,
     maskApplied: generated.appliedOptions.maskApplied,
+    editIntent: generated.appliedOptions.editIntent,
+    compositionMode: generated.appliedOptions.compositionMode,
+    productMaskConfidence: generated.appliedOptions.productMaskConfidence,
   });
   onImagesSaved?.();
   const result = {
@@ -997,7 +1017,7 @@ export async function waitForImageJob(id, { pollMs = 25, onExecutionSettled } = 
       if (job.status === "failed") {
         throw jobError(job.error?.message || "图片生成失败。", {
           code: job.error?.code || "IMAGE_JOB_FAILED",
-          status: 502,
+          status: job.error?.status || 502,
           retryable: job.error?.retryable,
         });
       }
@@ -1074,6 +1094,7 @@ export async function cancelImageJob(id) {
     job.completedAt = now;
     job.error = {
       code: "IMAGE_JOB_CANCELLED",
+      status: 409,
       message: abort
         ? "已标记取消；模型服务可能已经计费。为避免重复扣费，此任务不能直接重试。"
         : "图片生成任务已取消。",

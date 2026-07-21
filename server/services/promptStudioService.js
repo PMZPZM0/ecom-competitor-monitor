@@ -104,7 +104,7 @@ export const copySchema = z.object({
 });
 
 export const promptParametersSchema = z.object({
-  ratio: z.enum(["1:1", "3:4", "4:3", "16:9"]),
+  ratio: z.enum(["1:1", "4:5", "3:4", "2:3", "9:16", "4:3", "3:2", "16:9"]),
   resolution: z.enum(["1k", "2k", "4k"]),
   quality: z.enum(["low", "medium", "high"]),
   background: z.enum(["auto", "opaque", "transparent"]),

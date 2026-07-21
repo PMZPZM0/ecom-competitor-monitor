@@ -4,6 +4,7 @@ import {
   browserCommandMatchesContext,
   browserRuntimeInfo,
   canReuseBrowser,
+  captureRequestedSkuSelections,
   classifyTaobaoSessionCheck,
   cookieHeaderForUrls,
   createTaobaoAccessRestrictedError,
@@ -14,16 +15,58 @@ import {
   isTaobaoAccessRestrictedDocument,
   isTaobaoLoginDocument,
   isTaobaoLoginUrl,
+  isTmallLoginPageUrl,
   isTmallSilentLoginResponse,
   isTrustedTmallSilentLoginResponse,
-  isTmallSessionCookie,
   shouldCaptureNetworkResponse,
   shouldPreserveCaptureCache,
+  shouldRefreshTmallSso,
   skuIdFromNetworkBody,
   skuIdFromNetworkUrl,
   taobaoCookieStateForUrls,
   tmallSsoSyncUrlsFromSilentLogin,
 } from "./browserService.js";
+
+test("one SKU runtime timeout does not erase successful sibling selections", async () => {
+  let responseSequence = 0;
+  let calls = 0;
+  const observedTimeouts = [];
+  const cdp = {
+    async send(method, params, timeoutMs) {
+      assert.equal(method, "Runtime.evaluate");
+      assert.match(params.expression, /hydrationDeadline = Date\.now\(\) \+ 1500/);
+      assert.match(params.expression, /interactionDeadline = Date\.now\(\) \+ 6000/);
+      observedTimeouts.push(timeoutMs);
+      calls += 1;
+      if (calls === 2) throw new Error("CDP 调用超时：Runtime.evaluate");
+      responseSequence += 1;
+      return { result: { value: { selected: true, clicked: [String(calls)] } } };
+    },
+  };
+
+  const results = await captureRequestedSkuSelections({
+    cdp,
+    requestedSelections: [
+      { skuId: "sku-success-before", valueIds: ["1"] },
+      { skuId: "sku-timeout", valueIds: ["2"] },
+      { skuId: "sku-success-after", valueIds: ["3"] },
+      { skuId: "sku-missing-path", valueIds: [] },
+    ],
+    captureRunId: "selection-run",
+    getResponseSequence: () => responseSequence,
+    responseTimeoutMs: 0,
+    responseSettleMs: 0,
+  });
+
+  assert.equal(calls, 3);
+  assert.deepEqual(observedTimeouts, [8000, 8000, 8000]);
+  assert.deepEqual(results.map(({ skuId, reason }) => ({ skuId, reason })), [
+    { skuId: "sku-success-before", reason: "response-received" },
+    { skuId: "sku-timeout", reason: "runtime-timeout" },
+    { skuId: "sku-success-after", reason: "response-received" },
+    { skuId: "sku-missing-path", reason: "missing-selection-ids" },
+  ]);
+});
 
 test("Tmall SSO bridge accepts only trusted same-session endpoints", () => {
   const body = `callback({"content":{"data":{"asyncUrls":[
@@ -80,13 +123,28 @@ test("Tmall silent-login bridges stay out of persisted capture payloads", () => 
   assert.equal(isTmallSilentLoginResponse("https://h5api.m.tmall.com/h5/mtop.taobao.pcdetail.data.adjust/1.0/"), false);
 });
 
-test("Tmall reauthorization clears the complete Tmall session without touching Taobao", () => {
-  assert.equal(isTmallSessionCookie({ name: "login", domain: ".tmall.com" }), true);
-  assert.equal(isTmallSessionCookie({ name: "_m_h5_tk", domain: "h5api.m.tmall.com" }), true);
-  assert.equal(isTmallSessionCookie({ name: "wk_unb", domain: ".tmall.hk" }), true);
-  assert.equal(isTmallSessionCookie({ name: "cookie17", domain: ".taobao.com" }), false);
-  assert.equal(isTmallSessionCookie({ name: "skupanel-skuoptions-layout-mode", domain: "detail.tmall.com" }), true);
-  assert.equal(isTmallSessionCookie({ name: "login", domain: ".evil-tmall.com" }), false);
+test("Tmall SSO refresh is state-aware and rate-limited per persistent account browser", () => {
+  const now = Date.parse("2026-07-21T08:00:00.000Z");
+  assert.equal(shouldRefreshTmallSso({ tmallPriceStatus: "unknown" }, { now }), true);
+  assert.equal(shouldRefreshTmallSso({ tmallPriceStatus: "degraded" }, { now, lastRefreshAt: now - 60 * 1000 }), true);
+  assert.equal(shouldRefreshTmallSso({ tmallPriceStatus: "cooldown" }, { now, lastRefreshAt: now - 60 * 60 * 1000 }), false);
+  assert.equal(shouldRefreshTmallSso({ tmallPriceStatus: "cooldown" }, { now, lastRefreshAt: now - 13 * 60 * 60 * 1000 }), true);
+  assert.equal(shouldRefreshTmallSso({
+    tmallPriceStatus: "valid",
+    tmallPriceCheckedAt: "2026-07-21T07:00:00.000Z",
+  }, { now }), false);
+  assert.equal(shouldRefreshTmallSso({
+    tmallPriceStatus: "valid",
+    tmallPriceCheckedAt: "2026-07-19T07:00:00.000Z",
+  }, { now }), true);
+});
+
+test("stale Tmall login cleanup matches only the exact secure login page", () => {
+  assert.equal(isTmallLoginPageUrl("https://login.tmall.com/?redirectURL=x"), true);
+  assert.equal(isTmallLoginPageUrl("http://login.tmall.com/?redirectURL=x"), false);
+  assert.equal(isTmallLoginPageUrl("https://login.tmall.com.evil.example/"), false);
+  assert.equal(isTmallLoginPageUrl("https://detail.tmall.com/item.htm?id=1"), false);
+  assert.equal(isTmallLoginPageUrl("https://login.taobao.com/member/login.jhtml"), false);
 });
 
 test("buyer-show response classifier ignores unrelated generic feeds", () => {
@@ -115,6 +173,19 @@ test("skuIdFromNetworkBody uses the authoritative pcdetail response SKU", () => 
   assert.equal(itemIdFromNetworkBody(body), "843315272519");
   assert.equal(skuIdFromNetworkBody(JSON.stringify({ data: { skuId: "wrong-level" } })), "");
   assert.equal(itemIdFromNetworkBody(JSON.stringify({ data: { itemId: "wrong-level" } })), "");
+});
+
+test("network body identity falls back to a self-identifying UMP price map", () => {
+  const itemId = "1065716131860";
+  const skuId = "6115959029488";
+  const body = JSON.stringify({ data: { componentsVO: { umpPriceLogVO: {
+    xobjectId: itemId,
+    sid: skuId,
+    map: `{${skuId}:{"price1":"909.00","price2":"599.00"}}`,
+  } } } });
+  assert.equal(itemIdFromNetworkBody(body), itemId);
+  assert.equal(skuIdFromNetworkBody(body), skuId);
+  assert.equal(skuIdFromNetworkBody(body.replace(`{${skuId}:`, "{different:")), "");
 });
 
 test("isTaobaoLoginUrl recognizes Taobao login redirects", () => {

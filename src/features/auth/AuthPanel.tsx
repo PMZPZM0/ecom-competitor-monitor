@@ -88,7 +88,7 @@ export function AuthPanel({ sessions, onSaved, onActivate, onDelete }: Props) {
 
   async function checkSession(session: AuthSession) {
     setBusy(`check:${session.id}`)
-    setMessage(`正在检测「${session.name}」登录状态...`)
+    setMessage(`正在读取「${session.name}」本地登录凭据，不会打开淘宝页面...`)
     try {
       const result = await api.checkAuthSession(session.id)
       setMessage(`${session.name}：${result.message}`)
@@ -102,10 +102,10 @@ export function AuthPanel({ sessions, onSaved, onActivate, onDelete }: Props) {
 
   async function checkAllSessions() {
     setBusy('check-all')
-    setMessage('正在按顺序检测全部扫码账号，不会抓取商品...')
+    setMessage('正在按顺序读取全部账号的本地登录凭据，不会打开淘宝页面或抓取商品...')
     try {
       const result = await api.checkAllAuthSessions()
-      setMessage(`检测完成：在线 ${result.valid} 个，待复检 ${result.degraded} 个，失效 ${result.expired} 个${result.manual ? `，旧 Cookie ${result.manual} 个不参与采价` : ''}。`)
+      setMessage(`检测完成：可正常采价 ${result.valid} 个，淘宝身份在线 ${result.identityOnline ?? result.valid} 个，待复检 ${result.degraded} 个，登录失效 ${result.expired} 个${result.manual ? `，旧 Cookie ${result.manual} 个不参与采价` : ''}。`)
       await onSaved()
     } catch (error) {
       setMessage(error instanceof Error ? error.message : '一键检测失败。')
@@ -116,13 +116,20 @@ export function AuthPanel({ sessions, onSaved, onActivate, onDelete }: Props) {
 
   async function reauthorizeSession(session: AuthSession) {
     setBusy(`reauth:${session.id}`)
-    setMessage(`正在打开「${session.name}」重新授权窗口...`)
+    setMessage(session.loginStatus === 'expired'
+      ? `正在打开「${session.name}」淘宝扫码窗口...`
+      : `正在保留「${session.name}」登录状态并准备价格复检...`)
     try {
       const result = await api.reauthorizeAuthSession(session.id)
+      if (result.mode === 'silent') {
+        setMessage(result.message)
+        await onSaved()
+        return
+      }
       setPendingProfileKey(result.profileKey)
-      setMessage('重新授权窗口已打开，扫码成功后会更新原账号卡片。')
+      setMessage('淘宝扫码窗口已打开，登录成功后会更新原账号卡片。')
     } catch (error) {
-      setMessage(error instanceof Error ? error.message : '打开重新授权失败。')
+      setMessage(error instanceof Error ? error.message : '处理账号授权状态失败。')
     } finally {
       setBusy('')
     }
@@ -170,7 +177,7 @@ export function AuthPanel({ sessions, onSaved, onActivate, onDelete }: Props) {
         <CardHeader className="flex flex-row flex-wrap items-center justify-between gap-3">
           <div>
             <CardTitle>已授权登录账号</CardTitle>
-            <div className="mt-1 text-sm text-slate-500">{sessions.length} 个账号 · {sessions.filter((session) => session.source === 'taobao-browser' && (session.enabled ?? session.active)).length} 个参与采价</div>
+            <div className="mt-1 text-sm text-slate-500">{sessions.length} 个账号 · {sessions.filter((session) => session.source === 'taobao-browser' && session.priceUsable && (session.enabled ?? session.active)).length} 个已验证可采价</div>
           </div>
           <Button type="button" size="sm" variant="secondary" onClick={checkAllSessions} disabled={Boolean(busy) || Boolean(pendingProfileKey)}>
             <RefreshCw className={`h-4 w-4 ${busy === 'check-all' ? 'animate-spin' : ''}`} />
@@ -186,6 +193,13 @@ export function AuthPanel({ sessions, onSaved, onActivate, onDelete }: Props) {
               const iconClass = group.color === 'violet' ? 'text-violet-600' : group.color === 'amber' ? 'text-amber-600' : 'text-sky-600'
               const checkedAt = session.lastCheckedAt || session.lastSuccessAt
               const checkedTitle = checkedAt ? `最近检测 ${new Date(checkedAt).toLocaleString('zh-CN', { hour12: false })}` : '尚未检测登录状态'
+              const availabilityLabel = session.availabilityStatus === 'ready'
+                ? '账号可用'
+                : session.availabilityStatus === 'login-expired'
+                  ? '登录失效'
+                  : session.availabilityStatus === 'price-unavailable'
+                    ? '价格不可用'
+                    : '等待价格验证'
               return (
                 <section key={session.id} className={`min-w-0 rounded-md border p-2.5 ${panelClass}`}>
                   <div className="flex items-start gap-2">
@@ -193,10 +207,9 @@ export function AuthPanel({ sessions, onSaved, onActivate, onDelete }: Props) {
                     <div className="min-w-0 flex-1">
                       <div className="flex min-w-0 items-center gap-2"><span className="truncate text-sm font-semibold text-slate-950" title={session.name}>{session.name}</span><span className="shrink-0 text-[11px] text-slate-500">{group.title}</span></div>
                       <div className="mt-1 flex flex-wrap gap-1 text-[11px] font-medium">
-                        <span title={checkedTitle} className={`inline-flex items-center rounded px-1.5 py-0.5 ${session.loginStatus === 'expired' ? 'bg-red-50 text-red-700' : session.loginStatus === 'valid' ? 'bg-emerald-50 text-emerald-700' : 'bg-white/80 text-slate-500'}`}>{session.source !== 'taobao-browser' ? '旧 Cookie' : session.loginStatus === 'expired' ? '登录失效' : session.loginStatus === 'valid' ? '在线' : '未检测'}</span>
-                        <span className={`inline-flex items-center rounded px-1.5 py-0.5 ${session.source === 'taobao-browser' && (session.enabled ?? session.active) ? 'bg-blue-50 text-blue-700' : 'bg-white/80 text-slate-500'}`}>{session.source === 'taobao-browser' && (session.enabled ?? session.active) ? '采价中' : '已停用'}</span>
-                        {session.source === 'taobao-browser' && <span className={`inline-flex items-center rounded px-1.5 py-0.5 ${session.tmallPriceStatus === 'valid' ? 'bg-emerald-50 text-emerald-700' : session.tmallPriceStatus === 'cooldown' ? 'bg-amber-50 text-amber-700' : 'bg-white/80 text-slate-500'}`}>{session.tmallPriceStatus === 'valid' ? '价格已验证' : session.tmallPriceStatus === 'cooldown' ? '价格冷却' : '价格待验证'}</span>}
-                        {session.healthStatus === 'degraded' && <span className="inline-flex items-center rounded bg-amber-50 px-1.5 py-0.5 text-amber-700">抓取异常</span>}
+                        <span title={session.availabilityReason || checkedTitle} className={`inline-flex items-center rounded px-1.5 py-0.5 ${session.availabilityStatus === 'ready' ? 'bg-emerald-100 text-emerald-800' : session.availabilityStatus === 'login-expired' || session.availabilityStatus === 'price-unavailable' ? 'bg-red-100 text-red-800' : 'bg-amber-100 text-amber-800'}`}>{session.source !== 'taobao-browser' ? '旧 Cookie' : availabilityLabel}</span>
+                        {session.source === 'taobao-browser' && <span title={checkedTitle} className={`inline-flex items-center rounded px-1.5 py-0.5 ${session.identityOnline ? 'bg-sky-50 text-sky-700' : 'bg-white/80 text-slate-500'}`}>{session.identityOnline ? '淘宝身份在线' : '身份未确认'}</span>}
+                        <span className={`inline-flex items-center rounded px-1.5 py-0.5 ${session.priceUsable && (session.enabled ?? session.active) ? 'bg-blue-50 text-blue-700' : 'bg-white/80 text-slate-500'}`}>{session.priceUsable && (session.enabled ?? session.active) ? '参与自动监控' : session.enabled ?? session.active ? '不参与自动监控' : '已停用'}</span>
                       </div>
                     </div>
                     <Button type="button" size="sm" variant="danger" className="h-7 w-7 shrink-0 p-0" onClick={() => onDelete(session)} disabled={Boolean(busy) || Boolean(pendingProfileKey)} title={`删除账号「${session.name}」`} aria-label={`删除账号「${session.name}」`}><Trash2 className="h-3.5 w-3.5" /></Button>
@@ -204,8 +217,8 @@ export function AuthPanel({ sessions, onSaved, onActivate, onDelete }: Props) {
 
                   {session.source === 'taobao-browser' ? (
                     <div className="mt-1.5 flex flex-wrap items-center gap-1 border-t border-white/80 pt-1.5">
-                      <Button type="button" size="sm" variant="secondary" className="h-7 px-2" onClick={() => checkSession(session)} disabled={Boolean(busy) || Boolean(pendingProfileKey)} title="只检测登录状态，不抓取商品"><RefreshCw className={`h-3.5 w-3.5 ${busy === `check:${session.id}` ? 'animate-spin' : ''}`} />{busy === `check:${session.id}` ? '检测中' : '检测'}</Button>
-                      <Button type="button" size="sm" variant="ghost" className="h-7 px-2" onClick={() => reauthorizeSession(session)} disabled={Boolean(busy) || Boolean(pendingProfileKey)} title="扫码后更新当前账号，不新增重复卡片"><KeyRound className="h-3.5 w-3.5" />重新授权</Button>
+                      <Button type="button" size="sm" variant="secondary" className="h-7 px-2" onClick={() => checkSession(session)} disabled={Boolean(busy) || Boolean(pendingProfileKey)} title="只读取本地登录凭据，不打开淘宝页面"><RefreshCw className={`h-3.5 w-3.5 ${busy === `check:${session.id}` ? 'animate-spin' : ''}`} />{busy === `check:${session.id}` ? '检测中' : '检测'}</Button>
+                      <Button type="button" size="sm" variant="ghost" className="h-7 px-2" onClick={() => reauthorizeSession(session)} disabled={Boolean(busy) || Boolean(pendingProfileKey)} title={session.loginStatus === 'expired' ? '淘宝登录已失效，扫码后更新当前账号' : '保留当前登录和 Cookie，只准备下一次手动价格复检；不会直接显示可用'}><KeyRound className="h-3.5 w-3.5" />{busy === `reauth:${session.id}` ? '处理中' : session.loginStatus === 'expired' ? '重新扫码' : '准备复检'}</Button>
                       <Button type="button" size="sm" variant="ghost" className="ml-auto h-7 px-2" onClick={() => onActivate(session)} disabled={Boolean(busy) || Boolean(pendingProfileKey)}>{session.enabled ?? session.active ? '停用' : '启用'}</Button>
                     </div>
                   ) : <div className="mt-1.5 border-t border-white/80 pt-1.5 text-xs text-slate-500">旧 Cookie 不参与价格监控，请删除后改用扫码授权。</div>}

@@ -1,6 +1,111 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { applyItemScopedNewCustomerGift, applyPriceResolution, resolveEmbeddedPromotionPriceEvidence, resolveEmbeddedSkuPriceEvidence, resolveSkuPriceEvidence, selectAuthoritativePriceResolution } from "./priceResolver.js";
+import { PRICE_PROMOTION_INDEX, applyItemScopedNewCustomerGift, applyPriceResolution, resolveEmbeddedPromotionPriceEvidence, resolveEmbeddedSkuPriceEvidence, resolveSkuPriceEvidence, resolveUmpPriceLogPayload, selectAuthoritativePriceResolution } from "./priceResolver.js";
+
+test("the promotion index exactly covers every locally observed price code", () => {
+  const observedCodes = [
+    "commonItemDiscount", "spsd4plan", "spsd4cjmj", "spsd4price", "spsd4autopri",
+    "spsd4hjmssjbt", "zflj", "spsd4jzjj", "coupon2RedForNewUser", "coupon2PlatRed",
+    "coupon288vipcard", "uppAcrossPromotion", "1", "5", "9", "10", "12", "20", "22", "42", "saleCjmj",
+  ];
+  assert.deepEqual(observedCodes.filter((code) => !PRICE_PROMOTION_INDEX.has(code)), []);
+  assert.equal(PRICE_PROMOTION_INDEX.has("anything-vip-like"), false);
+  assert.equal(PRICE_PROMOTION_INDEX.get("coupon288vipcard").kind, "vip88");
+});
+
+test("UMP price logs recover an exact local formula when the red-packet component is absent", () => {
+  const itemId = "1065716131860";
+  const skuId = "6115959029488";
+  const payload = {
+    url: "https://h5api.m.tmall.com/h5/mtop.taobao.pcdetail.data.adjust/1.0/",
+    body: JSON.stringify({ data: { componentsVO: {
+      priceVO: {
+        price: { priceText: "909", priceTitle: "新品抢购" },
+        extraPrice: { priceText: "599", priceTitle: "店铺优惠后" },
+      },
+      umpPriceLogVO: {
+        xobjectId: itemId,
+        sid: skuId,
+        map: `{${skuId}:{"price1":"909.00","price2":"599.00","price3":"999.00","utcDNow":"9_9000^spsd4plan_31000"}}`,
+      },
+    } } }),
+  };
+
+  const resolution = resolveUmpPriceLogPayload(payload, { itemId, skuId, accountType: "gift" });
+  const sku = applyPriceResolution({ skuId, priceLayers: [] }, resolution);
+  assert.equal(resolution.status, "verified");
+  assert.equal(resolution.source, "ump-price-log");
+  assert.equal(sku.normalPrice, 599);
+  assert.equal(sku.originalPrice, 909);
+  assert.match(sku.priceCalculation.normal, /平台活动立减 310\.00/);
+});
+
+test("UMP price logs reject a broken baseline instead of treating price3 as a current price", () => {
+  const itemId = "1065716131860";
+  const skuId = "6115959029488";
+  const payload = {
+    url: "https://h5api.m.tmall.com/h5/mtop.taobao.pcdetail.data.adjust/1.0/",
+    body: JSON.stringify({ data: { componentsVO: {
+      priceVO: { price: { priceText: "909" }, extraPrice: { priceText: "599" } },
+      umpPriceLogVO: {
+        xobjectId: itemId,
+        sid: skuId,
+        map: `{${skuId}:{"price1":"909.00","price2":"599.00","price3":"1000.00","utcDNow":"9_9000^spsd4plan_31000"}}`,
+      },
+    } } }),
+  };
+  const resolution = resolveUmpPriceLogPayload(payload, { itemId, skuId, accountType: "gift" });
+  assert.equal(resolution.status, "ambiguous");
+  assert.equal(resolution.reason, "ump-baseline-formula-does-not-close");
+});
+
+test("red-packet and UMP aliases converge on one gift formula without a false conflict", () => {
+  const itemId = "1065142695897";
+  const skuId = "6279248802676";
+  const data = JSON.stringify({ itemId, skuId });
+  const payload = {
+    url: `https://h5api.m.tmall.com/h5/mtop.taobao.pcdetail.data.adjust/1.0/?data=${encodeURIComponent(data)}`,
+    body: JSON.stringify({ data: { componentsVO: {
+      priceVO: { price: { priceText: "609" }, extraPrice: { priceText: "259" } },
+      umpPriceLogVO: {
+        xobjectId: itemId,
+        sid: skuId,
+        map: `{${skuId}:{"price1":"609.00","price2":"259.00","price3":"899.00","utcDNow":"saleCjmj_29000^spsd4plan_21800^spsd4cjmj_9200^spsd4jzjj_2000^1_2000"}}`,
+      },
+      xsRedPacketParamVO: {
+        trackParams: { itemId, skuId, price1: "609", price2: "259" },
+        xsRedPocketParams: { tbShopRedPocket: { umpInfo: { umpPromotionList: [
+          { promotionName: "spsd4plan", amount: 21800 },
+          { promotionName: "spsd4cjmj", amount: 9200 },
+          { promotionName: "spsd4jzjj", amount: 2000 },
+          { promotionName: "coupon2RedForNewUser", amount: 2000 },
+        ] } } },
+      },
+    } } }),
+  };
+  const resolution = resolveSkuPriceEvidence([payload], { itemId, skuId, accountType: "gift", selectedSkuVerified: true });
+  const sku = applyPriceResolution({ skuId, priceLayers: [] }, resolution);
+  assert.equal(resolution.status, "verified");
+  assert.equal(sku.normalPrice, 299);
+  assert.equal(sku.surprisePrice, 279);
+  assert.equal(sku.giftPrice, 259);
+  assert.match(sku.priceCalculation.gift, /新客礼金 20\.00/);
+});
+
+test("an unregistered promotion code fails closed even when ignoring it would match price2", () => {
+  const skuId = "unknown-promotion-code";
+  const resolution = resolveSkuPriceEvidence([payload(skuId, "199", "139", [
+    { promotionName: "spsd4plan", amount: 6000 },
+    { promotionName: "futurePromotionCode", amount: 1000 },
+  ])], { itemId: "843315272519", skuId, accountType: "normal", selectedSkuVerified: true });
+  const sku = applyPriceResolution({ skuId, normalPrice: 139, priceLayers: [] }, resolution);
+
+  assert.equal(resolution.status, "ambiguous");
+  assert.equal(resolution.reason, "unknown-promotion-code");
+  assert.deepEqual(resolution.unknownPromotionCodes, ["futurePromotionCode"]);
+  assert.equal(sku.normalPrice, null);
+  assert.equal(sku.priceTitle, "价格待核对");
+});
 
 test("missing authoritative evidence clears list and guessed prices", () => {
   const sku = applyPriceResolution({
@@ -102,12 +207,12 @@ test("resolves the current billion-subsidy top-up code as a public promotion", (
   assert.equal(resolution.channels.billion.status, "verified");
   assert.equal(resolution.channels.seckill.status, "unavailable");
   assert.equal(sku.originalPrice, 569);
-  assert.equal(sku.normalPrice, 391);
-  assert.equal(sku.priceTitle, "百亿补贴价");
+  assert.equal(sku.normalPrice, 569);
+  assert.equal(sku.priceTitle, "普通价");
   assert.equal(sku.billionPrice, 391);
   assert.equal(sku.billionStatus, "available");
-  assert.equal(sku.priceCalculation.normal, "标价 569.00 - 百亿补贴 170.00 - 百亿补贴加补 8.00 = 百亿补贴价 391.00");
-  assert.equal(sku.priceCalculation.billion, sku.priceCalculation.normal);
+  assert.equal(sku.priceCalculation.normal, "标价 569.00 = 普通价 569.00");
+  assert.equal(sku.priceCalculation.billion, "普通价 569.00 - 百亿补贴 170.00 - 百亿补贴加补 8.00 = 百亿补贴价 391.00");
 });
 
 test("resolves Taobao flash-sale subsidy and top-up as a verified flash-sale price", () => {
@@ -127,13 +232,13 @@ test("resolves Taobao flash-sale subsidy and top-up as a verified flash-sale pri
   assert.equal(resolution.campaignKind, "seckill");
   assert.equal(resolution.channels.seckill.status, "verified");
   assert.equal(resolution.channels.billion.status, "unavailable");
-  assert.equal(resolution.normalLabel, "淘宝秒杀价");
-  assert.equal(sku.normalPrice, 54.92);
-  assert.equal(sku.priceTitle, "淘宝秒杀价");
+  assert.equal(resolution.normalLabel, "普通价");
+  assert.equal(sku.normalPrice, 295);
+  assert.equal(sku.priceTitle, "普通价");
   assert.equal(sku.seckillPrice, 54.92);
   assert.equal(sku.seckillStatus, "available");
-  assert.equal(sku.priceCalculation.normal, "标价 295.00 - 淘宝秒杀补贴 236.00 - 淘宝秒杀加补 4.08 = 淘宝秒杀价 54.92");
-  assert.equal(sku.priceCalculation.seckill, sku.priceCalculation.normal);
+  assert.equal(sku.priceCalculation.normal, "标价 295.00 = 普通价 295.00");
+  assert.equal(sku.priceCalculation.seckill, "普通价 295.00 - 淘宝秒杀补贴 236.00 - 淘宝秒杀加补 4.08 = 淘宝秒杀价 54.92");
 });
 
 test("campaign labels flow through every downstream price formula", () => {
@@ -189,9 +294,10 @@ test("resolves the real subsidy and coin formula for the meat grinder", () => {
   ])], { itemId: "843315272519", skuId, accountType: "normal", selectedSkuVerified: true });
   const sku = applyPriceResolution({ skuId, priceLayers: [] }, resolution);
   assert.equal(resolution.status, "verified");
-  assert.equal(sku.normalPrice, 99);
+  assert.equal(sku.normalPrice, 219);
+  assert.equal(sku.billionPrice, 99);
   assert.equal(sku.coinPrice, 94.62);
-  assert.match(sku.priceCalculation.normal, /百亿补贴 120\.00/);
+  assert.match(sku.priceCalculation.billion, /百亿补贴 120\.00/);
   assert.match(sku.priceCalculation.coin, /淘金币抵扣 4\.38/);
 });
 
@@ -449,7 +555,7 @@ test("resolves an explicit 88VIP benefit without reusing gift or surprise fields
   const resolution = resolveSkuPriceEvidence([payload(skuId, "199", "129", [
     { promotionName: "spsd4plan", amount: 3000 },
     { promotionName: "spsd4cjmj", amount: 3000 },
-    { promotionName: "88vipDiscount", amount: 1000 },
+    { promotionName: "coupon288vipcard", amount: 1000 },
   ])], { itemId: "843315272519", skuId, accountType: "vip88", selectedSkuVerified: true });
   const sku = applyPriceResolution({ skuId, giftPrice: 119, surprisePrice: 109, priceLayers: [] }, resolution);
   assert.equal(sku.normalPrice, 139);
@@ -464,7 +570,7 @@ test("an 88VIP account keeps gift and 88VIP channels when both are explicit", ()
     { promotionName: "spsd4plan", amount: 3000 },
     { promotionName: "spsd4cjmj", amount: 3000 },
     { promotionName: "coupon2RedForNewUser", amount: 1000 },
-    { promotionName: "88vipDiscount", amount: 1000 },
+    { promotionName: "coupon288vipcard", amount: 1000 },
     { promotionName: "uppAcrossPromotion", amount: 500 },
   ])], { itemId: "843315272519", skuId, accountType: "vip88", selectedSkuVerified: true });
   const sku = applyPriceResolution({ skuId, priceLayers: [] }, resolution);
@@ -553,7 +659,7 @@ test("does not expose a coin price derived through an invisible 88VIP layer", ()
   const skuId = "coin-hidden-vip";
   const resolution = resolveSkuPriceEvidence([payload(skuId, "200", "130", [
     { promotionName: "spsd4plan", amount: 5000 },
-    { promotionName: "88vipDiscount", amount: 1000 },
+    { promotionName: "coupon288vipcard", amount: 1000 },
     { promotionName: "uppAcrossPromotion", amount: 1000 },
   ])], { itemId: "843315272519", skuId, accountType: "gift", selectedSkuVerified: true });
   const sku = applyPriceResolution({ skuId, priceLayers: [] }, resolution);
@@ -632,7 +738,7 @@ test("government subsidy stays independent for normal, gift and 88VIP accounts",
   const cases = [
     { accountType: "normal", displayed: "119", accountPromotion: null, field: null },
     { accountType: "gift", displayed: "109", accountPromotion: { promotionName: "coupon2RedForNewUser", amount: 1000 }, field: "giftPrice" },
-    { accountType: "vip88", displayed: "109", accountPromotion: { promotionName: "88vipDiscount", amount: 1000 }, field: "vipPrice" },
+    { accountType: "vip88", displayed: "109", accountPromotion: { promotionName: "coupon288vipcard", amount: 1000 }, field: "vipPrice" },
   ];
   for (const { accountType, displayed, accountPromotion, field } of cases) {
     const skuId = `government-${accountType}`;

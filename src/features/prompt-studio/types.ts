@@ -43,7 +43,7 @@ export type PromptCopy = {
 }
 
 export type PromptParameters = {
-  ratio: '1:1' | '3:4' | '4:3' | '16:9'
+  ratio: '1:1' | '4:5' | '3:4' | '2:3' | '9:16' | '4:3' | '3:2' | '16:9'
   resolution: '1k' | '2k' | '4k'
   quality: 'low' | 'medium' | 'high'
   background: 'auto' | 'opaque' | 'transparent'

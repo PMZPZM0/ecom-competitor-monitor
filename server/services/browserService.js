@@ -16,9 +16,26 @@ const browserProcesses = new Map();
 const browserStartPromises = new Map();
 const browserModes = new Map();
 const verifiedBrowserOwners = new Map();
+const tmallSsoRefreshTimes = new Map();
+const TMALL_SSO_REFRESH_MIN_INTERVAL_MS = 12 * 60 * 60 * 1000;
+const TMALL_PRICE_CAPABILITY_FRESH_MS = 24 * 60 * 60 * 1000;
 
 export function browserRuntimeInfo() {
   return { profileDir: accountProfilesDir, captureBrowserIdleMs: 0 };
+}
+
+export function shouldRefreshTmallSso(authSession = {}, { lastRefreshAt = 0, now = Date.now() } = {}) {
+  // A product-page login redirect invalidates the previous bridge result.
+  // The next user-triggered capture must be allowed to rebuild Tmall SSO
+  // immediately instead of waiting for the normal twelve-hour refresh window.
+  if (authSession.tmallPriceStatus === "degraded") return true;
+  const checkedAt = Date.parse(authSession.tmallPriceCheckedAt || "");
+  const priceCapabilityFresh = authSession.tmallPriceStatus === "valid"
+    && Number.isFinite(checkedAt)
+    && now >= checkedAt
+    && now - checkedAt < TMALL_PRICE_CAPABILITY_FRESH_MS;
+  if (priceCapabilityFresh) return false;
+  return !lastRefreshAt || now - lastRefreshAt >= TMALL_SSO_REFRESH_MIN_INTERVAL_MS;
 }
 
 function identityFromNetworkUrl(value) {
@@ -55,17 +72,28 @@ function parseNetworkBody(body) {
 }
 
 function identityFromNetworkBody(body) {
-  const value = parseNetworkBody(body)?.data?.componentsVO?.xsRedPacketParamVO?.trackParams;
-  if (!value) return { itemId: "", skuId: "" };
-  try {
-    const trackParams = typeof value === "string" ? JSON.parse(value) : value;
-    return {
-      itemId: String(trackParams?.itemId || trackParams?.itemNumId || ""),
-      skuId: String(trackParams?.skuId || ""),
-    };
-  } catch {
-    return { itemId: "", skuId: "" };
+  const components = parseNetworkBody(body)?.data?.componentsVO;
+  const value = components?.xsRedPacketParamVO?.trackParams;
+  if (value) {
+    try {
+      const trackParams = typeof value === "string" ? JSON.parse(value) : value;
+      const identity = {
+        itemId: String(trackParams?.itemId || trackParams?.itemNumId || ""),
+        skuId: String(trackParams?.skuId || ""),
+      };
+      if (identity.itemId || identity.skuId) return identity;
+    } catch {
+      return { itemId: "", skuId: "" };
+    }
   }
+  const ump = components?.umpPriceLogVO;
+  const itemId = String(ump?.xobjectId || "");
+  const skuId = String(ump?.sid || "");
+  const map = String(ump?.map || "").trim();
+  if (/^\d{5,30}$/.test(itemId) && /^\d{5,30}$/.test(skuId) && map.startsWith(`{${skuId}:`) && map.endsWith("}")) {
+    return { itemId, skuId };
+  }
+  return { itemId: "", skuId: "" };
 }
 
 export function itemIdFromNetworkBody(body) {
@@ -115,48 +143,9 @@ export function isTrustedTmallSilentLoginResponse(value) {
   }
 }
 
-export function isTmallSessionCookie(cookie = {}) {
-  const domain = String(cookie.domain || "").replace(/^\./, "").toLowerCase();
-  return domain === "tmall.com" || domain.endsWith(".tmall.com") || domain === "tmall.hk" || domain.endsWith(".tmall.hk");
-}
-
-export async function resetTmallSession(options = {}) {
+export function resetTmallSsoRefreshWindow(options = {}) {
   const context = browserContext(options);
-  if (!(await isBrowserReady(context))) return 0;
-  const [version, targets] = await Promise.all([
-    getJson(`http://127.0.0.1:${context.port}/json/version`),
-    getJson(`http://127.0.0.1:${context.port}/json/list`).catch(() => []),
-  ]);
-  await assertBrowserOwnership(context, version);
-  const browserCdp = await createCdp(version.webSocketDebuggerUrl);
-  let cookies;
-  try {
-    ({ cookies } = await browserCdp.send("Storage.getCookies", {}, 10000));
-  } finally {
-    browserCdp.close();
-  }
-  const expiredCookies = (cookies || []).filter(isTmallSessionCookie);
-  if (!expiredCookies.length) return 0;
-
-  let temporaryTab = null;
-  const pageTarget = targets.find((target) => target.type === "page" && target.webSocketDebuggerUrl)
-    || (temporaryTab = await createBackgroundTab(context));
-  const pageCdp = await createCdp(pageTarget.webSocketDebuggerUrl);
-  try {
-    await pageCdp.send("Network.enable", {}, 10000);
-    for (const cookie of expiredCookies) {
-      await pageCdp.send("Network.deleteCookies", {
-        name: cookie.name,
-        domain: cookie.domain,
-        path: cookie.path || "/",
-        ...(cookie.partitionKey ? { partitionKey: cookie.partitionKey } : {}),
-      }, 10000);
-    }
-  } finally {
-    pageCdp.close();
-    if (temporaryTab) await closeTab(temporaryTab.id, context);
-  }
-  return expiredCookies.length;
+  tmallSsoRefreshTimes.delete(browserKey(context));
 }
 
 // Tmall returns one-time same-browser SSO bridge URLs after a Taobao login.
@@ -423,6 +412,15 @@ export function isTaobaoLoginUrl(url = "") {
   }
 }
 
+export function isTmallLoginPageUrl(url = "") {
+  try {
+    const parsed = new URL(url);
+    return parsed.protocol === "https:" && parsed.hostname === "login.tmall.com";
+  } catch {
+    return false;
+  }
+}
+
 export function isTaobaoAccessRestrictedDocument(html = "") {
   return /访问行为存在异常|不当获取使用平台商业信息|系统将限制(?:该)?账号|再次违规将升级处置/i.test(String(html));
 }
@@ -452,7 +450,7 @@ export function isTaobaoLoginDocument(url = "", html = "") {
 export async function openProductInAccountChrome(url, authSession) {
   const parsed = validateProductUrl(url);
   if (!authSession?.browserProfileKey || !authSession?.browserPort) {
-    throw new Error("对应账号没有可复用的浏览器登录态，请重新授权该账号。");
+    throw new Error("对应账号没有可复用的浏览器登录态，请检测账号；只有明确失效时才重新扫码。");
   }
 
   const options = {
@@ -724,6 +722,12 @@ export async function minimizeAccountBrowser(options = {}) {
   return setBrowserWindowState(context, "minimize");
 }
 
+export async function closeAccountTab(id, options = {}) {
+  if (!id) return false;
+  await closeTab(id, options);
+  return true;
+}
+
 function restoreAccountBrowser(options = {}) {
   setBrowserWindowState(options, "restore");
 }
@@ -824,15 +828,6 @@ export async function openTaobaoLogin(options = {}) {
   );
 }
 
-export async function openTmallLogin(options = {}) {
-  const redirectUrl = "https://detail.tmall.com/item.htm";
-  return openLoginPage(
-    `https://login.tmall.com/?redirectURL=${encodeURIComponent(redirectUrl)}`,
-    options,
-    "已打开天猫价格授权窗口，请用淘宝 App 扫码；天猫登录完成后会自动同步并最小化窗口。",
-  );
-}
-
 export async function getTaobaoCookieHeader(options = {}) {
   const state = await getTaobaoAuthState(options);
   return state.cookie;
@@ -866,40 +861,27 @@ export async function getTaobaoAuthState(options = {}) {
 export async function checkTaobaoSession(options = {}) {
   const context = browserContext({ ...options, headless: false, background: true });
   const checkUrl = taobaoAuthUrls[0];
-  try {
-    const page = await getRenderedHtml(checkUrl, {
-      browserProfileKey: context.profileKey,
-      browserPort: context.port,
-    });
-    const loginPage = isTaobaoLoginDocument(page.finalUrl, page.html);
-    const status = classifyTaobaoSessionCheck({
-      authLoggedIn: page.authState?.loggedIn,
-      hasCookie: Boolean(page.cookieHeader),
-      loginPage,
-      explicitLogin: isTaobaoLoginUrl(page.finalUrl),
-    });
-    return {
-      status,
-      loggedIn: status === "valid",
-      cookie: page.cookieHeader || "",
-      nickname: page.authState?.nickname || "",
-      browserClosed: false,
-      finalUrl: page.finalUrl,
-      loginPage,
-    };
-  } catch (error) {
-    const authState = await getTaobaoAuthState({ ...context, url: checkUrl }).catch(() => ({ loggedIn: false, cookie: "" }));
-    return {
-      status: "degraded",
-      loggedIn: Boolean(authState.loggedIn),
-      cookie: authState.cookie || "",
-      nickname: authState.nickname || "",
-      browserClosed: Boolean(authState.browserClosed),
-      finalUrl: "",
-      loginPage: false,
-      error: error.message,
-    };
-  }
+  await ensureBrowser("about:blank", context).catch(() => undefined);
+  const authState = await getTaobaoAuthState({ ...context, url: checkUrl }).catch((error) => ({
+    loggedIn: false,
+    cookie: "",
+    browserClosed: true,
+    error: error.message,
+  }));
+  const status = classifyTaobaoSessionCheck({
+    authLoggedIn: authState.loggedIn,
+    hasCookie: Boolean(authState.cookie),
+  });
+  return {
+    status,
+    loggedIn: status === "valid",
+    cookie: authState.cookie || "",
+    nickname: authState.nickname || "",
+    browserClosed: Boolean(authState.browserClosed),
+    finalUrl: "",
+    loginPage: false,
+    ...(authState.error ? { error: authState.error } : {}),
+  };
 }
 
 export async function closeAccountBrowser(options = {}) {
@@ -938,6 +920,107 @@ export async function closeAccountBrowser(options = {}) {
   }
 }
 
+export async function captureRequestedSkuSelections({
+  cdp,
+  requestedSelections = [],
+  captureRunId,
+  getResponseSequence,
+  assertNoAccessRestriction = async () => {},
+  wait = (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds)),
+  responseTimeoutMs = 6500,
+  responseSettleMs = 500,
+}) {
+  const selectionResults = [];
+  for (const selection of requestedSelections) {
+    const skuId = String(selection?.skuId || "");
+    const valueIds = Array.from(new Set((selection?.valueIds || []).map(String).filter(Boolean)));
+    const responseSequenceStartExclusive = Number(getResponseSequence());
+    const baseResult = {
+      skuId,
+      selected: false,
+      responseReceivedAfterSelection: false,
+      captureRunId,
+      responseSequenceStartExclusive,
+    };
+    if (!skuId || !valueIds.length) {
+      selectionResults.push({
+        ...baseResult,
+        responseSequenceEndInclusive: Number(getResponseSequence()),
+        reason: "missing-selection-ids",
+      });
+      continue;
+    }
+
+    let selectionResult;
+    try {
+      selectionResult = await cdp.send("Runtime.evaluate", {
+        expression: `(async () => {
+          const valueIds = ${JSON.stringify(valueIds)};
+          const pause = (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds));
+          const findValue = (valueId) => document.querySelector('#skuOptionsArea [data-vid="' + valueId + '"]')
+            || Array.from(document.querySelectorAll('[data-vid]')).find((element) => element.getAttribute('data-vid') === valueId);
+          const hydrationDeadline = Date.now() + 1500;
+          const interactionDeadline = Date.now() + 6000;
+          let targets = [];
+          while (Date.now() < hydrationDeadline) {
+            targets = valueIds.map(findValue);
+            if (targets.every(Boolean)) break;
+            await pause(150);
+          }
+          const clicked = [];
+          for (const valueId of valueIds) {
+            let target = findValue(valueId);
+            while (!target && Date.now() < interactionDeadline) {
+              await pause(100);
+              target = findValue(valueId);
+            }
+            if (!target || target.getAttribute('data-disabled') === 'true') return { selected: false, clicked, missing: valueId };
+            const clickable = target.closest('button,[role="button"],a') || target;
+            clickable.scrollIntoView({ block: 'center', inline: 'nearest' });
+            clickable.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true, view: window }));
+            clickable.dispatchEvent(new MouseEvent('mouseup', { bubbles: true, cancelable: true, view: window }));
+            clickable.click?.();
+            clicked.push(valueId);
+            await pause(350);
+          }
+          return { selected: clicked.length === valueIds.length, clicked };
+        })()`,
+        returnByValue: true,
+        awaitPromise: true,
+      }, 8000);
+    } catch (error) {
+      selectionResults.push({
+        ...baseResult,
+        responseSequenceEndInclusive: Number(getResponseSequence()),
+        reason: /超时|timed?\s*out/i.test(String(error?.message || "")) ? "runtime-timeout" : "runtime-error",
+      });
+      continue;
+    }
+
+    let responseReceivedAfterSelection = false;
+    if (selectionResult.result?.value?.selected) {
+      const deadline = Date.now() + responseTimeoutMs;
+      while (Date.now() < deadline && Number(getResponseSequence()) <= responseSequenceStartExclusive) {
+        await wait(100);
+      }
+      responseReceivedAfterSelection = Number(getResponseSequence()) > responseSequenceStartExclusive;
+      if (responseReceivedAfterSelection && responseSettleMs > 0) await wait(responseSettleMs);
+    }
+    selectionResults.push({
+      ...baseResult,
+      selected: Boolean(selectionResult.result?.value?.selected),
+      responseReceivedAfterSelection,
+      responseSequenceEndInclusive: Number(getResponseSequence()),
+      clicked: selectionResult.result?.value?.clicked || [],
+      reason: selectionResult.result?.value?.missing
+        ? `missing-value:${selectionResult.result.value.missing}`
+        : responseReceivedAfterSelection ? "response-received" : "response-timeout",
+    });
+    await assertNoAccessRestriction();
+  }
+  return selectionResults;
+}
+
 export async function getRenderedHtml(url, authSession = {}, renderOptions = {}) {
   const context = browserContext({ profileKey: authSession.browserProfileKey, port: authSession.browserPort, headless: false, background: true });
   let tab = null;
@@ -959,14 +1042,21 @@ export async function getRenderedHtml(url, authSession = {}, renderOptions = {})
     const priceResponses = new Map();
     const buyerShowResponses = new Map();
     const buyerShowInteractions = [];
+    const observedVideoResponses = new Set();
     const captureRunId = randomUUID();
     let pcdetailResponseSequence = 0;
     const requestedSelections = Array.isArray(renderOptions.selectSkus) ? renderOptions.selectSkus : [];
     if (requestedSelections.length && !preserveCache) await cdp.send("Network.clearBrowserCache");
     const priceResponseLimit = requestedSelections.length || Array.isArray(renderOptions.selectSkuNames) ? 240 : 60;
     cdp.on("Network.responseReceived", ({ requestId, response, type }) => {
+      if (renderOptions.captureNetworkResponses === false) return;
       const responseUrl = String(response?.url || "");
       const mimeType = String(response?.mimeType || "");
+      if (renderOptions.captureVideo && (
+        /video/i.test(mimeType)
+        || /Media/i.test(type)
+        || /\.(?:mp4|m3u8)(?:$|[?#])/i.test(responseUrl)
+      ) && observedVideoResponses.size < 24) observedVideoResponses.add(responseUrl);
       const buyerShowUrl = isBuyerShowResponseUrl(responseUrl);
       if (!shouldCaptureNetworkResponse(response, type)) return;
       const target = buyerShowUrl ? buyerShowResponses : priceResponses;
@@ -997,70 +1087,22 @@ export async function getRenderedHtml(url, authSession = {}, renderOptions = {})
     await cdp.send("Page.navigate", { url });
     await new Promise((resolve) => setTimeout(resolve, 7000));
     await assertNoAccessRestriction();
-    await refreshTmallSsoFromCapturedLogin(cdp, priceResponses, url);
+    const ssoRefreshKey = browserKey(context);
+    if (shouldRefreshTmallSso(authSession, { lastRefreshAt: tmallSsoRefreshTimes.get(ssoRefreshKey) || 0 })) {
+      const refreshed = await refreshTmallSsoFromCapturedLogin(cdp, priceResponses, url);
+      if (refreshed) tmallSsoRefreshTimes.set(ssoRefreshKey, Date.now());
+    }
     await assertNoAccessRestriction();
     const selectSkuNames = Array.isArray(renderOptions.selectSkuNames)
       ? renderOptions.selectSkuNames.filter(Boolean)
       : renderOptions.selectSkuName ? [renderOptions.selectSkuName] : [];
-    const selectionResults = [];
-    for (const selection of requestedSelections) {
-      const skuId = String(selection?.skuId || "");
-      const valueIds = Array.from(new Set((selection?.valueIds || []).map(String).filter(Boolean)));
-      const responseSequenceStartExclusive = pcdetailResponseSequence;
-      if (!skuId || !valueIds.length) {
-        selectionResults.push({
-          skuId,
-          selected: false,
-          responseReceivedAfterSelection: false,
-          captureRunId,
-          responseSequenceStartExclusive,
-          responseSequenceEndInclusive: pcdetailResponseSequence,
-          reason: "missing-selection-ids",
-        });
-        continue;
-      }
-      const selectionResult = await cdp.send("Runtime.evaluate", {
-        expression: `(async () => {
-          const valueIds = ${JSON.stringify(valueIds)};
-          const clicked = [];
-          const pause = (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds));
-          for (const valueId of valueIds) {
-            const target = document.querySelector('#skuOptionsArea [data-vid="' + valueId + '"]');
-            if (!target || target.getAttribute('data-disabled') === 'true') return { selected: false, clicked, missing: valueId };
-            target.scrollIntoView({ block: 'center', inline: 'nearest' });
-            target.click?.();
-            clicked.push(valueId);
-            // Multi-dimensional SKU controls update asynchronously. Waiting
-            // between dimensions prevents the second click from replacing the
-            // first before the page sends the authoritative SKU request.
-            await pause(450);
-          }
-          return { selected: clicked.length === valueIds.length, clicked };
-        })()`,
-        returnByValue: true,
-        awaitPromise: true,
-      }, 10000);
-      let responseReceivedAfterSelection = false;
-      if (selectionResult.result?.value?.selected) {
-        const deadline = Date.now() + 8000;
-        while (Date.now() < deadline && pcdetailResponseSequence <= responseSequenceStartExclusive) {
-          await new Promise((resolve) => setTimeout(resolve, 100));
-        }
-        responseReceivedAfterSelection = pcdetailResponseSequence > responseSequenceStartExclusive;
-        if (responseReceivedAfterSelection) await new Promise((resolve) => setTimeout(resolve, 600));
-      }
-      selectionResults.push({
-        skuId,
-        selected: Boolean(selectionResult.result?.value?.selected),
-        responseReceivedAfterSelection,
-        captureRunId,
-        responseSequenceStartExclusive,
-        responseSequenceEndInclusive: pcdetailResponseSequence,
-        clicked: selectionResult.result?.value?.clicked || [],
-        reason: selectionResult.result?.value?.missing ? `missing-value:${selectionResult.result.value.missing}` : responseReceivedAfterSelection ? "response-received" : "response-timeout",
-      });
-      await assertNoAccessRestriction();
-    }
+    const selectionResults = await captureRequestedSkuSelections({
+      cdp,
+      requestedSelections,
+      captureRunId,
+      getResponseSequence: () => pcdetailResponseSequence,
+      assertNoAccessRestriction,
+    });
     for (const selectSkuName of selectSkuNames) {
       const selectionResult = await cdp.send("Runtime.evaluate", {
         expression: `(() => {
@@ -1095,6 +1137,21 @@ export async function getRenderedHtml(url, authSession = {}, renderOptions = {})
         returnByValue: true,
       }, 10000);
       if (videoTabResult.result?.value?.clicked) await new Promise((resolve) => setTimeout(resolve, 2200));
+      await assertNoAccessRestriction();
+      await cdp.send("Runtime.evaluate", {
+        expression: `(async () => {
+          const pause = (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds));
+          const maxScroll = Math.max(0, document.documentElement.scrollHeight - innerHeight);
+          const steps = Math.min(8, Math.max(1, Math.ceil(maxScroll / Math.max(innerHeight * 1.5, 900))));
+          for (let index = 1; index <= steps; index += 1) {
+            window.scrollTo(0, Math.round(maxScroll * index / steps));
+            await pause(400);
+          }
+          return { steps, scrollHeight: document.documentElement.scrollHeight };
+        })()`,
+        returnByValue: true,
+        awaitPromise: true,
+      }, 15000);
       await assertNoAccessRestriction();
     }
     if (renderOptions.captureBuyerShow) {
@@ -1192,6 +1249,41 @@ export async function getRenderedHtml(url, authSession = {}, renderOptions = {})
       expression: "window.location.href",
       returnByValue: true,
     }, 10000);
+    const mediaObservationResult = renderOptions.captureVideo
+      ? await cdp.send("Runtime.evaluate", {
+        expression: `(() => {
+          const attributes = ['currentSrc', 'src', 'data-src', 'data-ks-lazyload', 'data-original', 'data-lazyload', 'data-lazy-src', 'data-video', 'data-video-url'];
+          const values = (element) => attributes.map((attribute) => attribute === 'currentSrc' ? element.currentSrc : element.getAttribute?.(attribute)).filter(Boolean);
+          const context = (element) => {
+            const parts = [];
+            let current = element;
+            for (let depth = 0; current && depth < 5; depth += 1, current = current.parentElement) parts.push(current.id || '', String(current.className || ''));
+            return parts.join(' ');
+          };
+          const images = [];
+          const galleryImages = [];
+          const detailImages = [];
+          const videoUrls = [];
+          for (const image of document.querySelectorAll('img')) {
+            const urls = values(image);
+            images.push(...urls);
+            const owner = context(image);
+            if (/thumbnail|gallery|mainpic|viewer|headimage/i.test(owner)) galleryImages.push(...urls);
+            if (/desc|detail|description|imagetext|modulepic/i.test(owner)) detailImages.push(...urls);
+          }
+          for (const media of document.querySelectorAll('video,source,[data-video],[data-video-url]')) videoUrls.push(...values(media));
+          for (const entry of performance.getEntriesByType('resource')) if (/\\.(?:mp4|m3u8)(?:$|[?#])/i.test(entry.name || '')) videoUrls.push(entry.name);
+          const unique = (items, limit) => Array.from(new Set(items.map(String).filter(Boolean))).slice(0, limit);
+          return {
+            images: unique(images, 240),
+            galleryImages: unique(galleryImages, 24),
+            detailImages: unique(detailImages, 160),
+            videoUrls: unique(videoUrls, 24),
+          };
+        })()`,
+        returnByValue: true,
+      }, 10000)
+      : { result: { value: {} } };
     if (isTaobaoAccessRestrictedDocument(`${visibleTextResult.result?.value || ""}\n${result.result?.value || ""}`)) {
       throw createTaobaoAccessRestrictedError(visibleTextResult.result?.value || result.result?.value || "");
     }
@@ -1230,6 +1322,13 @@ export async function getRenderedHtml(url, authSession = {}, renderOptions = {})
       networkPayloads,
       buyerShowPayloads,
       buyerShowInteractions,
+      mediaObservations: {
+        ...(mediaObservationResult.result?.value || {}),
+        videoUrls: Array.from(new Set([
+          ...(mediaObservationResult.result?.value?.videoUrls || []),
+          ...observedVideoResponses,
+        ])).slice(0, 24),
+      },
       priceNetworkPayloads,
       skuNetworkPayloads: {},
       selectionResults,

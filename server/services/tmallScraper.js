@@ -272,7 +272,7 @@ function isNoiseImage(url) {
 }
 
 function isCommerceImage(url) {
-  return /\/\/(gw|img)\.alicdn\.com\/(imgextra|bao\/uploaded)/i.test(url || "") && !isNoiseImage(url);
+  return /\/\/(?:(?:gw|img)\.alicdn\.com\/(?:imgextra|bao\/uploaded)|g-search\d*\.alicdn\.com\/img\/bao\/uploaded)/i.test(url || "") && !isNoiseImage(url);
 }
 
 function normalizeVideoUrl(url) {
@@ -318,6 +318,7 @@ export function filterProductVideoUrls(candidates, productImages = []) {
     if (parsed.protocol !== "https:") continue;
     if (!/(^|\.)(taobao\.com|alicdn\.com)$/i.test(parsed.hostname)) continue;
     if (!/\.(mp4|m3u8)$/i.test(parsed.pathname)) continue;
+    if (/auth[_-]?key/i.test(parsed.search) || /(?:^|\.)tbm-auth\.alicdn\.com$/i.test(parsed.hostname)) continue;
     if (/\/(?:u|user)\/(?:null|undefined|0)\//i.test(parsed.pathname)) continue;
     if (/placeholder|default|loading|sample|preview|test/i.test(parsed.pathname)) continue;
 
@@ -730,19 +731,131 @@ export function selectSquareMainImage(mobileImages = [], fallback = "") {
 }
 
 export function selectGalleryImages(candidates = [], primaryImage = "", limit = 5) {
-  void primaryImage;
+  const primaryKey = imageKey(primaryImage);
   return uniqueBy(candidates.map(cleanImage).filter(isCommerceImage), imageKey)
+    .filter((image) => !primaryKey || imageKey(image) !== primaryKey)
     .slice(0, limit);
 }
 
-function extractProductMedia(html, jsonData, domData, skuImages = [], mobileDetailData = null, knownPrimaryImages = [], knownGalleryImages = [], knownVideoUrls = []) {
+function itemIdsFromSearchElement($element) {
+  const values = [
+    $element.attr("href"),
+    $element.attr("data-href"),
+    $element.attr("data-url"),
+    $element.attr("data-nid"),
+    $element.attr("data-itemid"),
+    $element.attr("data-item-id"),
+    $element.attr("data-id"),
+  ].filter(Boolean);
+  const ids = [];
+  for (const value of values) {
+    const source = String(value).replace(/&amp;/gi, "&");
+    if (/^\d{6,20}$/.test(source)) ids.push(source);
+    for (const match of source.matchAll(/(?:[?&#]|\b)(?:id|itemId|item_id|nid)=?(\d{6,20})/gi)) ids.push(match[1]);
+  }
+  return new Set(ids);
+}
+
+function searchCardImageCandidates($, $scope) {
+  const candidates = [];
+  const append = (value) => {
+    if (!value) return;
+    for (const part of String(value).split(/\s*,\s*/)) {
+      const source = part.trim().split(/\s+/)[0];
+      const image = cleanImage(source);
+      if (isCommerceImage(image)) candidates.push(image);
+    }
+  };
+  $scope.find("img,picture source").addBack("img,picture source").each((_, node) => {
+    const $node = $(node);
+    for (const attribute of ["currentSrc", "src", "data-src", "data-ks-lazyload", "data-original", "data-lazyload", "data-lazy-src", "srcset", "data-srcset"]) {
+      append($node.attr(attribute));
+    }
+  });
+  $scope.find("[style*='background']").addBack("[style*='background']").each((_, node) => {
+    const style = $(node).attr("style") || "";
+    for (const match of style.matchAll(/url\(["']?([^"')]+)["']?\)/gi)) append(match[1]);
+  });
+  return uniqueBy(candidates, imageKey);
+}
+
+function scriptSearchCardImage(html, itemId) {
+  const escapedId = itemId.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const idToken = `(?:itemId|item_id|nid|auctionId)\\?"?\\s*[:=]\\s*\\?"?${escapedId}\\?"?`;
+  const imageToken = `(?:picUrl|pic_url|imageUrl|image_url|mainPic|itemPic)\\?"?\\s*[:=]\\s*\\?"([^"']+)`;
+  const patterns = [
+    new RegExp(`${idToken}[\\s\\S]{0,2400}?${imageToken}`, "i"),
+    new RegExp(`${imageToken}[\\s\\S]{0,2400}?${idToken}`, "i"),
+  ];
+  for (const pattern of patterns) {
+    const match = String(html || "").match(pattern);
+    const image = cleanImage(match?.[1] || "");
+    if (isCommerceImage(image)) return image;
+  }
+  return "";
+}
+
+export function extractSearchMainImage(html, expectedItemId) {
+  const itemId = String(expectedItemId || "");
+  if (!/^\d{6,20}$/.test(itemId)) return { image: "", matched: false, reason: "INVALID_ITEM_ID" };
+  const $ = cheerio.load(String(html || ""));
+  const matchedElements = $("a[href],[data-href],[data-url],[data-nid],[data-itemid],[data-item-id],[data-id]")
+    .toArray()
+    .filter((node) => itemIdsFromSearchElement($(node)).has(itemId));
+  let exactCardFound = matchedElements.length > 0;
+  for (const node of matchedElements) {
+    let $scope = $(node);
+    for (let depth = 0; depth < 7 && $scope.length; depth += 1) {
+      const images = searchCardImageCandidates($, $scope);
+      if (images.length) return { image: images[0], matched: true, reason: "" };
+      const $parent = $scope.parent();
+      if (!$parent.length || $parent.is("body,html")) break;
+      const linkedIds = new Set();
+      $parent.find("a[href],[data-nid],[data-itemid],[data-item-id]").each((_, child) => {
+        for (const linkedId of itemIdsFromSearchElement($(child))) linkedIds.add(linkedId);
+      });
+      if (linkedIds.size > 3) break;
+      $scope = $parent;
+    }
+  }
+  const scriptedImage = scriptSearchCardImage(html, itemId);
+  if (scriptedImage) return { image: scriptedImage, matched: true, reason: "" };
+  exactCardFound ||= new RegExp(`(?:itemId|item_id|nid|auctionId)\\?"?\\s*[:=]\\s*\\?"?${itemId}(?!\\d)`, "i").test(String(html || ""));
+  return { image: "", matched: exactCardFound, reason: exactCardFound ? "SEARCH_CARD_IMAGE_NOT_FOUND" : "SEARCH_CARD_NOT_FOUND" };
+}
+
+function mediaElementImage($element) {
+  const source = [
+    "data-src",
+    "data-ks-lazyload",
+    "data-original",
+    "data-lazyload",
+    "data-lazy-src",
+    "data-image",
+    "src",
+  ].map((attribute) => $element.attr(attribute)).find((value) => value && !/\/s\.gif(?:$|[?#])/i.test(value));
+  return cleanImage(source || "");
+}
+
+function normalizeMediaObservations(value = {}) {
+  const normalize = (items, limit) => unique((Array.isArray(items) ? items : []).map(String).filter(Boolean)).slice(0, limit);
+  return {
+    images: normalize(value.images, 240),
+    galleryImages: normalize(value.galleryImages, 24),
+    detailImages: normalize(value.detailImages, 160),
+    videoUrls: normalize(value.videoUrls, 24),
+  };
+}
+
+function extractProductMedia(html, jsonData, domData, skuImages = [], mobileDetailData = null, knownPrimaryImages = [], knownGalleryImages = [], knownVideoUrls = [], observedMedia = {}) {
   const $ = cheerio.load(html);
+  const observations = normalizeMediaObservations(observedMedia);
   const skuImageKeys = new Set(skuImages.map(imageKey));
   const headImageVO = extractValueByKey(html, "headImageVO") || extractObjectByKey(html, "headImageVO");
   const headImages = uniqueBy(collectCommerceImages(headImageVO?.images || headImageVO), imageKey).filter(isCommerceImage);
   const thumbnailImages = uniqueBy(
     $("img[class*='thumbnailPic'], [class*='thumbnail'] img")
-      .map((_, image) => cleanImage($(image).attr("src") || $(image).attr("data-src") || ""))
+      .map((_, image) => mediaElementImage($(image)))
       .get(),
     imageKey,
   ).filter(isCommerceImage);
@@ -750,17 +863,17 @@ function extractProductMedia(html, jsonData, domData, skuImages = [], mobileDeta
   const fallbackHeadImages = uniqueBy(
     fallbackHeadImageKeys
       .flatMap((key) => collectCommerceImages(extractValueByKey(html, key) || extractObjectByKey(html, key)))
-      .concat(thumbnailImages, domData.mainImages),
+      .concat(thumbnailImages, observations.galleryImages, domData.mainImages),
     imageKey,
   ).filter(isCommerceImage);
   const headCandidates = uniqueBy(headImages.length ? headImages : fallbackHeadImages, imageKey);
   const domMainImages = uniqueBy(
     $("img[class*='mainPic'], [class*='mainPic'] img")
-      .map((_, image) => cleanImage($(image).attr("src") || $(image).attr("data-src") || ""))
+      .map((_, image) => mediaElementImage($(image)))
       .get(),
     imageKey,
   ).filter(isCommerceImage);
-  const fallbackImages = uniqueBy([...domData.mainImages, ...jsonData.images], imageKey)
+  const fallbackImages = uniqueBy([...observations.galleryImages, ...domData.mainImages, ...jsonData.images, ...observations.images], imageKey)
     .filter(isCommerceImage)
     .filter((image) => !/detail|desc|content|module/i.test(image) && !skuImageKeys.has(imageKey(image)));
   const mobileSquareImages = uniqueBy(mobileDetailData?.item?.images || [], imageKey).filter(isCommerceImage);
@@ -790,17 +903,14 @@ function extractProductMedia(html, jsonData, domData, skuImages = [], mobileDeta
     "[id*='detail'] img",
   ];
   const domDetailImages = $(detailSelectors.join(","))
-    .map((_, img) => {
-      const src = $(img).attr("data-src") || $(img).attr("src") || "";
-      return cleanImage(src);
-    })
+    .map((_, img) => mediaElementImage($(img)))
     .get();
 
   const detailImageKeys = ["detailImages", "descImages", "itemDescImages", "descriptionImages", "moduleDesc"];
   const structuredDetailImages = detailImageKeys.flatMap((key) =>
     collectCommerceImages(extractValueByKey(html, key) || extractObjectByKey(html, key)),
   );
-  const detailImages = uniqueBy([...domDetailImages, ...structuredDetailImages], imageKey)
+  const detailImages = uniqueBy([...domDetailImages, ...observations.detailImages, ...structuredDetailImages], imageKey)
     .filter((image) => isCommerceImage(image) && !excludedKeys.has(imageKey(image)))
     .slice(0, 80);
 
@@ -812,6 +922,7 @@ function extractProductMedia(html, jsonData, domData, skuImages = [], mobileDeta
     buyerShows: extractBuyerShowItems(html),
     videoUrls: filterProductVideoUrls([
       ...extractVideoUrls(html, jsonData, [...mainImages, ...skuImages]),
+      ...observations.videoUrls,
       ...knownVideoUrls,
     ], [...mainImages, ...skuImages]),
   };
@@ -1296,7 +1407,9 @@ async function fetchMobilePromotionPayloads(itemId, skuPrices, authSession, rend
     return capture.promotionCapture;
   } catch (error) {
     if (error?.code === "TMALL_PRICE_AUTH_REQUIRED" || error?.code === "TAOBAO_ACCESS_RESTRICTED") throw error;
-    return { networkPayloads: [], skuNetworkPayloads: {}, selectionResults: [] };
+    const captureError = String(error?.message || "SKU 逐项选择抓取失败").replace(/https?:\/\/\S+/g, "[URL]").slice(0, 300);
+    console.warn("[sku-promotion-capture]", { itemId, skuCount: skuPrices.length, error: captureError });
+    return { networkPayloads: [], skuNetworkPayloads: {}, selectionResults: [], captureError };
   }
 }
 
@@ -1601,11 +1714,11 @@ export function hasTmallPriceLoginGate(networkPayloads = [], pageText = "") {
   });
 }
 
-export function shouldRequireTmallPriceAuthorization(networkPayloads = [], embeddedResolutions = []) {
+export function shouldRequireTmallPriceAuthorization(networkPayloads = [], currentSkuResolutions = []) {
   if (!hasTmallPriceLoginGate(networkPayloads)) return false;
-  const resolutions = embeddedResolutions instanceof Map
-    ? [...embeddedResolutions.values()]
-    : Array.from(embeddedResolutions || []);
+  const resolutions = currentSkuResolutions instanceof Map
+    ? [...currentSkuResolutions.values()]
+    : Array.from(currentSkuResolutions || []);
   return !resolutions.some((resolution) => (
     resolution?.status === "verified"
     && resolution?.channels?.normal?.status === "verified"
@@ -1633,6 +1746,15 @@ export function gatedSelectionSkuIds(networkPayloads = [], selectionResults = []
     .filter(Boolean)));
 }
 
+export function retryableSelectionSkuIds(skuPrices = [], selectionResults = []) {
+  const resultsBySku = new Map(Array.from(selectionResults || []).map((selection) => [String(selection?.skuId || ""), selection]));
+  return Array.from(new Set(Array.from(skuPrices || [])
+    .filter((sku) => Array.isArray(sku?.selectionValueIds) && sku.selectionValueIds.length > 0)
+    .filter((sku) => resultsBySku.get(String(sku.skuId || ""))?.responseObserved !== true)
+    .map((sku) => String(sku.skuId || ""))
+    .filter(Boolean)));
+}
+
 function mergePromotionCaptureRetry(initial, retry) {
   const retriedSkuIds = new Set((retry.selectionResults || []).map((selection) => String(selection.skuId || "")));
   return {
@@ -1645,11 +1767,12 @@ function mergePromotionCaptureRetry(initial, retry) {
       ...(initial.selectionResults || []).filter((selection) => !retriedSkuIds.has(String(selection.skuId || ""))),
       ...(retry.selectionResults || []),
     ],
+    captureError: [initial.captureError, retry.captureError].filter(Boolean).join("；").slice(0, 500),
   };
 }
 
 function tmallPriceAuthRequiredError() {
-  const error = new Error("淘宝账号仍在线，但天猫优惠价格授权未同步；本次未保存价格，请在账号授权中重新授权后重试。");
+  const error = new Error("淘宝账号仍在线，但天猫优惠价格授权暂未同步；本次未保存价格。当前登录会保留，稍后重试时软件会在后台再次同步。");
   error.code = "TMALL_PRICE_AUTH_REQUIRED";
   return error;
 }
@@ -1772,14 +1895,16 @@ export function buildBrowserCaptureEvidence({ product, accountType, itemId, page
       accessVerified: resolveCaptureAccessMode({ source: "taobao-browser" }, page) === "authenticated",
       networkPayloads: payloads,
       buyerShowInteractions: Array.isArray(page.buyerShowInteractions) ? page.buyerShowInteractions : [],
+      mediaObservations: normalizeMediaObservations(page.mediaObservations),
       selectionResults: Array.isArray(promotionCapture.selectionResults)
         ? promotionCapture.selectionResults.map(compactSelectionResult)
         : [],
+      promotionCaptureError: String(promotionCapture.captureError || "").slice(0, 500),
     },
   };
 }
 
-function hydrateBrowserCapturePage(record) {
+export function hydrateBrowserCapturePage(record) {
   const stored = record?.page || {};
   const expectedItemId = String(record?.itemId || "");
   const networkPayloads = Array.isArray(stored.networkPayloads) ? stored.networkPayloads.map(compactBrowserPayload).map((payload) => {
@@ -1802,16 +1927,25 @@ function hydrateBrowserCapturePage(record) {
   const windowedSkuPayloads = new Map();
   const selectionResults = storedSelections.map((selection) => {
     const skuId = selection.skuId;
-    const windowPayloads = (allSkuNetworkPayloads[skuId] || []).filter((payload) => (
-      payload.captureRunId === selection.captureRunId
-      && Number.isSafeInteger(payload.responseSequence)
-      && payload.responseSequence > selection.responseSequenceStartExclusive
-      && payload.responseSequence <= selection.responseSequenceEndInclusive
-    ));
+    const hasSequenceWindow = /^[a-z0-9_-]{1,80}$/i.test(selection.captureRunId || "")
+      && Number.isSafeInteger(selection.responseSequenceStartExclusive)
+      && Number.isSafeInteger(selection.responseSequenceEndInclusive);
+    const skuPayloads = allSkuNetworkPayloads[skuId] || [];
+    const windowPayloads = hasSequenceWindow
+      ? skuPayloads.filter((payload) => (
+        payload.captureRunId === selection.captureRunId
+        && Number.isSafeInteger(payload.responseSequence)
+        && payload.responseSequence > selection.responseSequenceStartExclusive
+        && payload.responseSequence <= selection.responseSequenceEndInclusive
+      ))
+      // Legacy evidence predates response windows. The payload has already
+      // passed exact itemId + response-body skuId checks above, so it can be
+      // restored without borrowing any other SKU's promotion response.
+      : skuPayloads;
     if (!windowedSkuPayloads.has(skuId)) windowedSkuPayloads.set(skuId, []);
     windowedSkuPayloads.get(skuId).push(...windowPayloads);
     const responseObserved = selection.selected === true
-      && selection.responseReceivedAfterSelection === true
+      && (!hasSequenceWindow || selection.responseReceivedAfterSelection === true)
       && windowPayloads.length > 0;
     return { ...selection, responseObserved };
   });
@@ -1830,7 +1964,9 @@ function hydrateBrowserCapturePage(record) {
     priceNetworkPayloads: networkPayloads.filter((payload) => payload.responseKind === "price"),
     skuNetworkPayloads,
     buyerShowInteractions: Array.isArray(stored.buyerShowInteractions) ? stored.buyerShowInteractions : [],
+    mediaObservations: normalizeMediaObservations(stored.mediaObservations),
     selectionResults,
+    promotionCaptureError: String(stored.promotionCaptureError || "").slice(0, 500),
   };
 }
 
@@ -1845,6 +1981,7 @@ async function persistAndReloadBrowserCapture(evidence) {
       networkPayloads: page.priceNetworkPayloads,
       skuNetworkPayloads: page.skuNetworkPayloads,
       selectionResults: page.selectionResults,
+      captureError: page.promotionCaptureError,
     },
     captureId: saved.captureId,
     sourceFile: record.sourceFile,
@@ -1881,6 +2018,98 @@ async function renderAndReloadBrowserCapture({ product, authSession, renderPage 
   return persistedCapture;
 }
 
+function searchMainImageEvidence({ authSession, itemId, query, page, capturedAt }) {
+  return {
+    captureType: "account-browser-local-source",
+    evidencePurpose: "search-main-image",
+    capturedAt,
+    searchQuery: query,
+    requestedUrl: `https://s.taobao.com/search?q=${encodeURIComponent(query)}`,
+    finalUrl: page.finalUrl,
+    itemId,
+    accountType: authSession?.accountType || "normal",
+    page: {
+      html: String(page.html || ""),
+      visibleText: String(page.visibleText || ""),
+      finalUrl: String(page.finalUrl || ""),
+      statusCode: Number(page.statusCode || 200),
+      source: "browser",
+      accessVerified: true,
+      networkPayloads: [],
+    },
+  };
+}
+
+export function searchMainImageQueries(product, itemId) {
+  const model = cleanText(product?.model || product?.lastSnapshot?.model || "");
+  const title = cleanTitle(product?.lastSnapshot?.title || product?.name || "");
+  const queries = [];
+  if (model && !/^(?:未识别|未知|暂无|无)(?:型号)?$/i.test(model) && model.length >= 3) queries.push(model);
+  if (title && !/^(?:待识别商品|批量商品)(?:\s|$)/i.test(title)) queries.push(title.slice(0, 64));
+  if (!queries.length) queries.push(String(itemId || ""));
+  return unique(queries);
+}
+
+export function parseSearchMainImageEvidence(record, expectedItemId) {
+  const itemId = String(expectedItemId || "");
+  if (record?.evidencePurpose !== "search-main-image" || String(record?.itemId || "") !== itemId) {
+    throw new Error("搜索主图本地证据与目标商品不一致，已拒绝解析。");
+  }
+  if (record?.localFirst?.parsedFromDisk !== true) {
+    throw new Error("搜索主图证据尚未从本地文件重新读取，已拒绝解析。");
+  }
+  const parsed = extractSearchMainImage(record?.page?.html || "", itemId);
+  return {
+    searchMainImage: parsed.image,
+    searchMainImageStatus: parsed.image ? "verified" : "unavailable",
+    searchMainImageSource: parsed.image ? "taobao-search-exact-item-card" : "",
+    searchMainImageCapturedAt: String(record?.capturedAt || new Date().toISOString()),
+    searchMainImageEvidenceId: String(record?.captureId || ""),
+    searchMainImageEvidenceFile: String(record?.sourceFile || ""),
+    searchMainImageLocalFirst: { ...record.localFirst },
+    searchMainImageError: parsed.image
+      ? ""
+      : parsed.reason === "SEARCH_CARD_IMAGE_NOT_FOUND"
+        ? "已找到对应商品卡片，但卡片主图未加载完成。"
+        : "淘宝搜索结果中未找到该商品的精确匹配卡片。",
+  };
+}
+
+export async function scrapeTaobaoSearchMainImage(product, authSession, { renderPage = getRenderedHtml } = {}) {
+  if (authSession?.source !== "taobao-browser") {
+    throw new Error("搜索主图只允许使用已扫码授权的账号浏览器采集，已阻止后端直接请求淘宝。");
+  }
+  const itemId = String(product.itemId || extractItemId(product.url));
+  if (!/^\d{6,20}$/.test(itemId)) throw new Error("商品 ID 无效，无法获取搜索主图。");
+  let lastResult = null;
+  for (const query of searchMainImageQueries(product, itemId)) {
+    const capturedAt = new Date().toISOString();
+    const searchUrl = `https://s.taobao.com/search?q=${encodeURIComponent(query)}`;
+    let persisted = null;
+    const persistObservedPage = async (page) => {
+      if (isTaobaoLoginUrl(page.finalUrl)) {
+        throw new Error("搜索页需要重新登录，请先到账号授权完成登录后重试。");
+      }
+      if (isTaobaoAccessRestrictedDocument(`${page.visibleText || ""}\n${page.html || ""}`)) {
+        throw createTaobaoAccessRestrictedError(page.visibleText || page.html || "");
+      }
+      const { readBrowserCaptureSource, saveBrowserCaptureSource } = await import("./localImportService.js");
+      const saved = await saveBrowserCaptureSource(searchMainImageEvidence({ authSession, itemId, query, page, capturedAt }));
+      persisted = await readBrowserCaptureSource(saved.captureId);
+    };
+    const observedPage = await renderPage(searchUrl, authSession, {
+      captureNetworkResponses: false,
+      preserveCache: true,
+      persistEvidenceBeforeClose: persistObservedPage,
+    });
+    if (!persisted) await persistObservedPage(observedPage);
+    const result = parseSearchMainImageEvidence(persisted, itemId);
+    if (result.searchMainImageStatus === "verified") return result;
+    lastResult = result;
+  }
+  return lastResult;
+}
+
 export async function scrapeTmallBuyerShows(product, authSession) {
   if (authSession?.source !== "taobao-browser") {
     throw new Error("买家秀只允许使用已扫码授权的账号浏览器采集，已阻止后端直接请求淘宝接口。");
@@ -1907,6 +2136,15 @@ export async function scrapeTmallBuyerShows(product, authSession) {
   }
   html = page.html;
   assertMatchingProductId(product.url, extractItemId(page.finalUrl, product.url, html), page.finalUrl);
+  return buyerShowResultFromBrowserCapture(product, browserCapture, authSession?.id || "guest");
+}
+
+function buyerShowResultFromBrowserCapture(product, browserCapture, accountSessionId = "local-evidence") {
+  const page = browserCapture.page || {};
+  const html = page.html || "";
+  const itemId = String(browserCapture.itemId || extractItemId(page.finalUrl, product.url, html));
+  assertMatchingProductId(product.url, itemId, page.finalUrl);
+  const buyerShowPayloads = page.buyerShowPayloads || (page.networkPayloads || []).filter((payload) => payload?.responseKind === "buyer-show");
   const existingImages = [
     product.lastSnapshot?.mainImage800,
     product.lastSnapshot?.mainImage,
@@ -1914,9 +2152,8 @@ export async function scrapeTmallBuyerShows(product, authSession) {
     ...(product.lastSnapshot?.skuImages || []),
   ];
   const sellerId = extractSellerId(html) || sellerIdFromProductMedia(existingImages);
-  const accountSessionId = authSession?.id || "guest";
-  const domItems = extractBuyerShowItems(html, page.buyerShowPayloads || []);
-  const observed = buyerShowCaptureFromNetwork(page.buyerShowPayloads || [], { itemId, accountSessionId });
+  const domItems = extractBuyerShowItems(html, buyerShowPayloads);
+  const observed = buyerShowCaptureFromNetwork(buyerShowPayloads, { itemId, accountSessionId });
   const dom = domItems.length
     ? buyerShowCaptureResult({ status: "partial", source: "verified-dom", itemId, sellerId, accountSessionId, pageCount: 1, items: domItems })
     : buyerShowCaptureResult({ status: "failed", source: "verified-dom", failureCode: "REVIEW_UI_NOT_FOUND", itemId, sellerId, accountSessionId });
@@ -1929,6 +2166,108 @@ export async function scrapeTmallBuyerShows(product, authSession) {
     browserEvidenceFile: browserCapture.sourceFile,
     localFirst: browserCapture.localFirst,
   };
+}
+
+export function parseTmallBuyerShowEvidence(product, record) {
+  if (record?.localFirst?.parsedFromDisk !== true || record?.page?.accessVerified !== true) {
+    throw new Error("买家秀本地证据尚未完成脱敏落盘和重新读盘，已拒绝解析。");
+  }
+  return buyerShowResultFromBrowserCapture(product, {
+    ...record,
+    captureId: record.captureId,
+    sourceFile: record.sourceFile,
+    localFirst: record.localFirst,
+  });
+}
+
+export async function scrapeTmallMaterials(product, authSession, { renderPage = getRenderedHtml } = {}) {
+  if (authSession?.source !== "taobao-browser") {
+    throw new Error("完整素材只允许使用已扫码授权的账号浏览器采集，已阻止后端直接请求淘宝接口。");
+  }
+  const capturedAt = new Date().toISOString();
+  const browserCapture = await fetchHtml({
+    ...product,
+    captureBuyerShows: false,
+    captureMediaAssets: true,
+  }, authSession, renderPage, { capturedAt });
+  const page = browserCapture.page;
+  const html = page.html || "";
+  const itemId = extractItemId(page.finalUrl, product.url, html);
+  assertMatchingProductId(product.url, itemId, page.finalUrl);
+  const accessMode = resolveCaptureAccessMode(authSession, page);
+  if (accessMode !== "authenticated") throw new Error("本地素材采集文件未通过账号访问校验，已停止解析。");
+
+  return materialSnapshotFromBrowserCapture(product, browserCapture, { capturedAt, accessMode });
+}
+
+function materialSnapshotFromBrowserCapture(product, browserCapture, { capturedAt = browserCapture?.capturedAt || new Date().toISOString(), accessMode = "authenticated" } = {}) {
+  const page = browserCapture.page || {};
+  const html = page.html || "";
+  const itemId = String(browserCapture.itemId || extractItemId(page.finalUrl, product.url, html));
+  assertMatchingProductId(product.url, itemId, page.finalUrl);
+
+  const jsonData = extractFromJson(parseJsonBlobs(html));
+  const domData = extractFromDom(html);
+  const structuredSku = extractStructuredSku(html);
+  const skuImages = unique([...structuredSku.skuImages, ...jsonData.skuImages]).slice(0, 40);
+  const knownPrimaryImages = [
+    ...(product.knownPrimaryImages || []),
+    product.lastSnapshot?.mainImage800,
+    product.lastSnapshot?.mainImage,
+    product.mainImage,
+  ].filter(Boolean);
+  const media = extractProductMedia(
+    html,
+    jsonData,
+    domData,
+    skuImages,
+    null,
+    knownPrimaryImages,
+    [],
+    [],
+    page.mediaObservations,
+  );
+
+  return {
+    capturedAt,
+    finalUrl: page.finalUrl,
+    statusCode: page.statusCode,
+    source: page.source,
+    accessMode,
+    itemId,
+    mainImage: media.mainImage800 || media.mainImages[0] || "",
+    mainImage800: media.mainImage800 || media.mainImages[0] || "",
+    gallery750Images: media.gallery750Images,
+    mainImages: media.mainImages,
+    detailImages: media.detailImages,
+    videoUrls: media.videoUrls,
+    skuImages,
+    skuPrices: structuredSku.skuPrices.map((sku) => ({ skuId: sku.skuId, image: sku.image || "" })),
+    browserEvidenceId: browserCapture.captureId,
+    browserEvidenceFile: browserCapture.sourceFile,
+    localFirst: browserCapture.localFirst,
+    rawSignals: {
+      materialImageCount: media.mainImages.length + skuImages.length + media.detailImages.length,
+      materialGalleryCount: media.gallery750Images.length,
+      materialDetailCount: media.detailImages.length,
+      materialVideoCount: media.videoUrls.length,
+      browserEvidenceSourceSaved: browserCapture?.localFirst?.sourceSaved === true,
+      browserEvidenceParsedFromDisk: browserCapture?.localFirst?.parsedFromDisk === true,
+      networkAccessedAfterLocalSave: false,
+    },
+  };
+}
+
+export function parseTmallMaterialsEvidence(product, record) {
+  if (record?.localFirst?.parsedFromDisk !== true || record?.page?.accessVerified !== true) {
+    throw new Error("素材本地证据尚未完成脱敏落盘和重新读盘，已拒绝解析。");
+  }
+  return materialSnapshotFromBrowserCapture(product, {
+    ...record,
+    captureId: record.captureId,
+    sourceFile: record.sourceFile,
+    localFirst: record.localFirst,
+  });
 }
 
 export async function scrapeTmallProduct(product, authSession, { renderPage = getRenderedHtml } = {}) {
@@ -1959,15 +2298,15 @@ export async function scrapeTmallProduct(product, authSession, { renderPage = ge
   // The first read supplies only selection metadata; prices are parsed from
   // the final local read below.
   const initialHasCurrentPrice = hasCurrentSkuPriceData(initial.page.html);
-  if (!initialHasCurrentPrice && hasTmallPriceLoginGate(
-    initial.page.networkPayloads || [],
-    `${initial.page.visibleText || ""}\n${initial.page.html || ""}`,
-  )) throw tmallPriceAuthRequiredError();
   if (!initialHasCurrentPrice) {
     const refreshed = await fetchHtml(product, authSession, renderPage, { preserveCache: false, capturedAt: startedAt });
     const refreshedPage = refreshed.page;
     const refreshedItemId = extractItemId(refreshedPage.finalUrl, product.url, refreshedPage.html);
     assertMatchingProductId(product.url, refreshedItemId, refreshedPage.finalUrl);
+    if (!hasCurrentSkuPriceData(refreshedPage.html) && hasTmallPriceLoginGate(
+      refreshedPage.networkPayloads || [],
+      `${refreshedPage.visibleText || ""}\n${refreshedPage.html || ""}`,
+    )) throw tmallPriceAuthRequiredError();
     initial = refreshed;
   }
   page = initial.page;
@@ -1981,12 +2320,12 @@ export async function scrapeTmallProduct(product, authSession, { renderPage = ge
   let mobilePromotionCapture = promotionCaptureSkus.length
     ? await fetchMobilePromotionPayloads(itemId, promotionCaptureSkus, authSession, renderPage, startedAt)
     : { networkPayloads: [], skuNetworkPayloads: {}, selectionResults: [] };
-  const gatedSkuIds = new Set(gatedSelectionSkuIds(
-    mobilePromotionCapture.networkPayloads,
+  const retrySkuIds = new Set(retryableSelectionSkuIds(
+    promotionCaptureSkus,
     mobilePromotionCapture.selectionResults,
   ));
-  if (gatedSkuIds.size) {
-    const retrySkus = promotionCaptureSkus.filter((sku) => gatedSkuIds.has(String(sku.skuId)));
+  if (retrySkuIds.size) {
+    const retrySkus = promotionCaptureSkus.filter((sku) => retrySkuIds.has(String(sku.skuId)));
     const retryCapture = await fetchMobilePromotionPayloads(itemId, retrySkus, authSession, renderPage, startedAt);
     mobilePromotionCapture = mergePromotionCaptureRetry(mobilePromotionCapture, retryCapture);
   }
@@ -1999,6 +2338,7 @@ export async function scrapeTmallProduct(product, authSession, { renderPage = ge
     promotionCapture: mobilePromotionCapture,
     capturedAt: startedAt,
   }));
+  try {
   page = reloaded.page;
   mobilePromotionCapture = reloaded.promotionCapture;
   browserCapture = reloaded;
@@ -2018,8 +2358,30 @@ export async function scrapeTmallProduct(product, authSession, { renderPage = ge
     String(sku.skuId),
     resolveEmbeddedSkuPriceEvidence(sku, { itemId, skuId: sku.skuId, accountType, capturedAt: startedAt }),
   ]));
+  const currentSkuResolutions = new Map(structuredSku.skuPrices.map((sku) => {
+    const skuPayloads = [
+      ...(page.skuNetworkPayloads?.[sku.skuId] || []),
+      ...(mobilePromotionCapture.skuNetworkPayloads?.[sku.skuId] || []),
+    ];
+    const selection = mobilePromotionCapture.selectionResults.find((item) => String(item.skuId) === String(sku.skuId));
+    const networkResolution = resolveSkuPriceEvidence(skuPayloads, {
+      itemId,
+      skuId: sku.skuId,
+      accountType,
+      selectedSkuVerified: Boolean(selection?.responseObserved),
+      capturedAt: startedAt,
+    });
+    const embeddedPromotionResolution = resolveEmbeddedPromotionPriceEvidence(embeddedPromotionComponent, {
+      itemId,
+      skuId: sku.skuId,
+      accountType,
+      capturedAt: startedAt,
+    });
+    const explicitResolution = selectAuthoritativePriceResolution(networkResolution, embeddedPromotionResolution);
+    return [String(sku.skuId), selectAuthoritativePriceResolution(explicitResolution, embeddedResolutions.get(String(sku.skuId)))];
+  }));
   const finalPricePayloads = [...(page.networkPayloads || []), ...(mobilePromotionCapture.networkPayloads || [])];
-  if (shouldRequireTmallPriceAuthorization(finalPricePayloads, embeddedResolutions)) {
+  if (shouldRequireTmallPriceAuthorization(finalPricePayloads, currentSkuResolutions)) {
     throw tmallPriceAuthRequiredError();
   }
   const excludedPromotionSkuImages = new Set(structuredSku.skuPrices
@@ -2032,28 +2394,7 @@ export async function scrapeTmallProduct(product, authSession, { renderPage = ge
   ));
   structuredSku.skuImages = structuredSku.skuImages.filter((image) => !excludedPromotionSkuImages.has(image));
   structuredSku.skuPrices = structuredSku.skuPrices.map((sku) => {
-    const skuPayloads = [
-      ...(page.skuNetworkPayloads?.[sku.skuId] || []),
-      ...(mobilePromotionCapture.skuNetworkPayloads?.[sku.skuId] || []),
-    ];
-    const selection = mobilePromotionCapture.selectionResults.find((item) => String(item.skuId) === String(sku.skuId));
-    const resolution = resolveSkuPriceEvidence(skuPayloads, {
-      itemId,
-      skuId: sku.skuId,
-      accountType,
-      selectedSkuVerified: Boolean(selection?.responseObserved),
-      capturedAt: startedAt,
-    });
-    const embeddedResolution = embeddedResolutions.get(String(sku.skuId));
-    const embeddedPromotionResolution = resolveEmbeddedPromotionPriceEvidence(embeddedPromotionComponent, {
-      itemId,
-      skuId: sku.skuId,
-      accountType,
-      capturedAt: startedAt,
-    });
-    const explicitResolution = selectAuthoritativePriceResolution(resolution, embeddedPromotionResolution);
-    const authoritativeResolution = selectAuthoritativePriceResolution(explicitResolution, embeddedResolution);
-    const scopedResolution = applyItemScopedNewCustomerGift(authoritativeResolution, embeddedPromotionComponent, {
+    const scopedResolution = applyItemScopedNewCustomerGift(currentSkuResolutions.get(String(sku.skuId)), embeddedPromotionComponent, {
       itemId,
       skuId: sku.skuId,
       accountType,
@@ -2081,6 +2422,7 @@ export async function scrapeTmallProduct(product, authSession, { renderPage = ge
     knownPrimaryImages,
     product.knownGalleryImages || [],
     product.knownVideoUrls || [],
+    page.mediaObservations,
   );
   const sellerId = extractSellerId(html) || sellerIdFromProductMedia([...media.mainImages, ...skuImages]);
   const accountSessionId = authSession?.id || "guest";
@@ -2158,6 +2500,9 @@ export async function scrapeTmallProduct(product, authSession, { renderPage = ge
       verifiedSkuSelectionCount: mobilePromotionCapture.selectionResults.filter((item) => item.responseObserved).length,
       skuSelectionCount: mobilePromotionCapture.selectionResults.length,
       skuSelectionResults: mobilePromotionCapture.selectionResults,
+      retriedSkuSelectionCount: retrySkuIds.size,
+      unresolvedSkuSelectionCount: retryableSelectionSkuIds(promotionCaptureSkus, mobilePromotionCapture.selectionResults).length,
+      promotionCaptureError: mobilePromotionCapture.captureError || "",
       observedSkuCount,
       outputSkuCount: skuPrices.length,
       verifiedPriceSkuCount: verifiedSkuCount,
@@ -2174,4 +2519,10 @@ export async function scrapeTmallProduct(product, authSession, { renderPage = ge
       networkAccessedAfterLocalSave: false,
     },
   }, product.captureMediaAssets);
+  } catch (error) {
+    error.browserEvidenceId ||= reloaded.captureId;
+    error.browserEvidenceFile ||= reloaded.sourceFile;
+    error.failureStage ||= "local-price-parse";
+    throw error;
+  }
 }

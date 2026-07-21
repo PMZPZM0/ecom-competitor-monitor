@@ -45,7 +45,7 @@ export function BatchCaptureCard({ sessions, busy, onRun, onRequireAuth }: Props
     : [...new Set(entries.map(normalizeProductUrlIfPossible))], [entries, inputMode, platform])
 
   async function submit() {
-    setStatus({ tone: 'progress', message: `正在按队列后台采集 ${urls.length} 个商品${captureMediaAssets ? '，包含完整素材' : ''}${captureBuyerShows ? '，包含买家秀' : ''}；每个商品采集后都会脱敏保存并从本地文件解析...` })
+    setStatus({ tone: 'progress', message: `正在按队列后台采集 ${urls.length} 个商品的价格、800 主图和 SKU 图；每个商品采集后都会脱敏保存并从本地文件解析...` })
     try {
       if (!entries.length) throw new Error(inputMode === 'id' ? '请至少输入一个商品 ID。' : '请粘贴至少一个商品链接。')
       if (entries.length > 30) throw new Error('单次最多添加 30 个商品。')
@@ -116,14 +116,15 @@ export function BatchCaptureCard({ sessions, busy, onRun, onRequireAuth }: Props
           <label className="flex min-h-12 cursor-pointer items-center gap-2 rounded-md bg-slate-50 px-3 text-sm text-slate-700">
             <input type="checkbox" checked={captureMediaAssets} onChange={(event) => setCaptureMediaAssets(event.target.checked)} className="h-4 w-4 accent-blue-600" />
             <Archive className="h-4 w-4 shrink-0 text-slate-500" />
-            <span><span className="block font-medium">抓取完整素材</span><span className="block text-xs text-slate-400">750 主图、详情图、视频</span></span>
+            <span><span className="block font-medium">启用完整素材</span><span className="block text-xs text-slate-400">添加后按需单独抓取</span></span>
           </label>
           <label className="flex min-h-12 cursor-pointer items-center gap-2 rounded-md bg-slate-50 px-3 text-sm text-slate-700">
             <input type="checkbox" checked={captureBuyerShows} onChange={(event) => setCaptureBuyerShows(event.target.checked)} className="h-4 w-4 accent-blue-600" />
             <Images className="h-4 w-4 shrink-0 text-slate-500" />
-            <span><span className="block font-medium">同时抓取买家秀</span><span className="block text-xs text-slate-400">整批统一，独立可选</span></span>
+            <span><span className="block font-medium">启用买家秀</span><span className="block text-xs text-slate-400">添加后按需单独抓取</span></span>
           </label>
         </div>
+        {(captureMediaAssets || captureBuyerShows) && <div className="rounded-md bg-sky-50 px-3 py-2 text-xs leading-5 text-sky-800">勾选仅启用整批商品的对应功能，不随首次抓价连续访问。抓取成功落盘后，可在商品卡片直接“本地解析”。</div>}
         <div className="mt-auto grid gap-2 pt-1"><Button type="button" onClick={submit} disabled={busy || entries.length === 0} className="w-full"><Play className="h-4 w-4" />{busy ? '自动采集队列运行中' : `自动采集并本地解析 ${entries.length} 个`}</Button>{status && <div className={`flex min-w-0 items-center gap-1.5 text-xs ${status.tone === 'progress' ? 'text-blue-700' : status.tone === 'success' ? 'text-emerald-700' : 'text-red-700'}`} role={status.tone === 'error' ? 'alert' : 'status'} aria-live="polite">{status.tone === 'progress' ? <LoaderCircle className="h-4 w-4 shrink-0 animate-spin" /> : status.tone === 'success' ? <CircleCheck className="h-4 w-4 shrink-0" /> : <CircleAlert className="h-4 w-4 shrink-0" />}<span className="line-clamp-2">{status.message}</span></div>}</div>
       </CardContent>
     </Card>

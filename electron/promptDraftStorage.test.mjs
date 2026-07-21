@@ -52,7 +52,7 @@ test("prompt draft recovery accepts valid fields and falls back per invalid fiel
     assert.equal(recovered.copy.mode, fallback.copy.mode);
     assert.equal(recovered.copy.title, "夏日上新");
     assert.deepEqual(recovered.copy.sellingPoints, []);
-    assert.deepEqual(recovered.parameters, { ratio: "1:1", resolution: "4k", quality: "high", background: "transparent" });
+    assert.deepEqual(recovered.parameters, { ratio: "2:3", resolution: "4k", quality: "high", background: "transparent" });
     assert.deepEqual(recovered.taskFields, { scene: "现代厨房" });
     assert.equal(recovered.factsConfirmed, false);
 

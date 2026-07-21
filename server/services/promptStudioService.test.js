@@ -150,7 +150,7 @@ test("product facts, style, copy, parameters, and edit boundaries reject invalid
   const cases = [
     { ...validInput(), productFacts: { ...validInput().productFacts, productType: "" } },
     { ...validInput(), style: { ...validInput().style, description: "" } },
-    { ...validInput(), parameters: { ...validInput().parameters, ratio: "2:3" } },
+    { ...validInput(), parameters: { ...validInput().parameters, ratio: "5:7" } },
     { ...validInput(), copy: { ...validInput().copy, mode: "reserved" } },
     { ...validInput(), userRequest: "不要文字，只要产品图" },
     { ...validInput(), style: { ...validInput().style, forbidden: ["无 Logo"] } },

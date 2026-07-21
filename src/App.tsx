@@ -1,4 +1,4 @@
-import { lazy, Suspense, useCallback, useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { BookOpen, CircleAlert, CircleCheck, Database, Image as ImageIcon, LoaderCircle, PackageSearch, Search, Settings, Type, WandSparkles, X } from 'lucide-react'
 import { api } from './lib/api'
 import { Button } from './components/ui/button'
@@ -12,6 +12,7 @@ import { ProductMonitoringWorkspace } from './features/monitoring/ProductMonitor
 import { HelpCenter } from './features/help/HelpCenter'
 import { UpdateDialog } from './features/updates/UpdateDialog'
 import { ImageWorkbench, type ImageWorkbenchDraftTransfer } from './features/image-generation/ImageWorkbench'
+import { PromptWorkbench } from './features/prompt-studio/PromptWorkbench'
 import { SettingsCenter, type SettingsSection } from './features/settings/SettingsCenter'
 import { AppearanceSettings } from './features/settings/AppearanceSettings'
 import { loadCustomWallpaper } from './features/settings/customWallpaperStore'
@@ -26,8 +27,6 @@ const primaryNavItems = [
   { id: 'records', label: '数据记录', icon: Database, title: '数据记录', subtitle: '查看运行日志、价格历史、本地证据并重试失败商品。' },
 ] as const
 const pageItems = [guidePage, ...primaryNavItems] as const
-
-const PromptWorkbench = lazy(() => import('./features/prompt-studio/PromptWorkbench').then((module) => ({ default: module.PromptWorkbench })))
 
 type PageId = (typeof pageItems)[number]['id']
 type FontSize = 'small' | 'standard' | 'large'
@@ -205,6 +204,19 @@ function App() {
     return overview?.authSessions.some((session) => session.source === 'taobao-browser' && (session.enabled ?? session.active) && session.loginStatus !== 'expired' && (!accountType || (session.accountType || 'normal') === accountType)) === true
   }
 
+  function hasDegradedTmallAccount(accountType: AccountType) {
+    const sessions = overview?.authSessions.filter((session) => session.source === 'taobao-browser' && (session.enabled ?? session.active) && session.loginStatus !== 'expired' && (session.accountType || 'normal') === accountType) || []
+    return sessions.length > 0 && sessions.every((session) => session.tmallPriceStatus === 'degraded')
+  }
+
+  async function prepareDegradedTmallAccounts(accountType: AccountType) {
+    const sessions = overview?.authSessions.filter((session) => session.source === 'taobao-browser' && (session.enabled ?? session.active) && session.loginStatus !== 'expired' && session.tmallPriceStatus === 'degraded' && (session.accountType || 'normal') === accountType) || []
+    for (const session of sessions) {
+      const result = await api.reauthorizeAuthSession(session.id)
+      if (result.mode !== 'silent') throw new Error('账号登录状态已变化，请完成淘宝扫码后再抓取。')
+    }
+  }
+
   function showAuthGuide(accountType: AccountType) {
     setNotice('')
     setError('')
@@ -217,21 +229,23 @@ function App() {
       throw new Error('尚未授权可用的淘宝扫码账号。')
     }
     setError('')
-    setNotice(`正在后台自动采集价格、800 主图和 SKU 图${payload.captureMediaAssets ? '、完整素材' : ''}${payload.captureBuyerShows ? '、买家秀' : ''}；采集后将脱敏保存并从本地证据解析...`)
+    setNotice(hasDegradedTmallAccount(payload.accountType)
+      ? '正在保留当前登录状态并后台静默恢复天猫价格授权...'
+      : '正在后台采集价格、800 主图和 SKU 图；采集后将脱敏保存并从本地证据解析...')
     try {
+      if (hasDegradedTmallAccount(payload.accountType)) await prepareDegradedTmallAccounts(payload.accountType)
+      setNotice('正在后台采集价格、800 主图和 SKU 图；采集后将脱敏保存并从本地证据解析...')
       const product = await api.addProduct(payload)
       setBusyProductId(product.id)
-      const result = await api.captureProduct(product.id)
-      const followups = await Promise.all([
-        ...(payload.captureMediaAssets ? [api.captureProduct(product.id, 'materials')] : []),
-        ...(payload.captureBuyerShows ? [api.captureProduct(product.id, 'buyer-show')] : []),
-      ])
-      setNotice([result.run.message, ...followups.map((item) => item.run.message)].join(' '))
+      const result = await api.captureProduct(product.id, 'price', true)
+      const enabledFeatures = [payload.captureMediaAssets ? '完整素材' : '', payload.captureBuyerShows ? '买家秀' : ''].filter(Boolean).join('、')
+      setNotice(`${result.run.message}${enabledFeatures ? ` 已启用${enabledFeatures}，请在商品卡片中按需单独抓取；为避免挤号，不再紧接抓价连续打开淘宝页面。` : ''}`)
       await refresh()
       return result.product
     } catch (err) {
       setNotice('')
       setError(err instanceof Error ? err.message : '添加商品失败')
+      await refresh().catch(() => undefined)
       throw err
     } finally {
       setBusyProductId('')
@@ -245,8 +259,12 @@ function App() {
     }
     setBusy(true)
     setError('')
-    setNotice(`正在按队列自动采集 ${payload.urls.length} 个新商品${payload.captureMediaAssets ? '（包含完整素材）' : ''}${payload.captureBuyerShows ? '（包含买家秀）' : ''}；每个商品采集后都会脱敏保存并从本地证据解析...`)
+    setNotice(hasDegradedTmallAccount(payload.accountType)
+      ? '正在保留当前登录状态并后台静默恢复天猫价格授权...'
+      : `正在按队列采集 ${payload.urls.length} 个新商品的价格、800 主图和 SKU 图；每个商品采集后都会脱敏保存并从本地证据解析...`)
     try {
+      if (hasDegradedTmallAccount(payload.accountType)) await prepareDegradedTmallAccounts(payload.accountType)
+      setNotice(`正在按队列采集 ${payload.urls.length} 个新商品的价格、800 主图和 SKU 图；每个商品采集后都会脱敏保存并从本地证据解析...`)
       const result = await api.addProductsBatch(payload)
       setNotice(result.message)
       await refresh()
@@ -334,6 +352,33 @@ function App() {
       const result = await api.retryBuyerShows(product.id)
       await refresh()
       return result.product
+    } finally {
+      setBusyProductId('')
+    }
+  }
+
+  async function captureSearchMainImage(product: Product) {
+    requireOnlineCapture(product)
+    if (!hasCaptureAccount()) {
+      showAuthGuide(product.accountType || 'normal')
+      throw new Error('请先授权并启用可用的淘宝扫码账号。')
+    }
+    setBusyProductId(product.id)
+    try {
+      const result = await api.captureSearchMainImage(product.id, true)
+      await refresh()
+      return result
+    } finally {
+      setBusyProductId('')
+    }
+  }
+
+  async function reparseProductLocalEvidence(product: Product, kind: 'materials' | 'buyer-show' | 'search-main-image') {
+    setBusyProductId(product.id)
+    try {
+      const result = await api.reparseProductLocalEvidence(product.id, kind)
+      await refresh()
+      return result
     } finally {
       setBusyProductId('')
     }
@@ -524,7 +569,7 @@ function App() {
   )
 
   const modelConfigPanel = <ModelConfigPanel purpose="creation" config={data.modelConfig} onSave={saveModelConfig} onDiscover={api.modelCatalog} onTest={testModelConfig} />
-  const promptWorkbench = <Suspense fallback={<div className="creative-surface flex min-h-[420px] items-center justify-center gap-2 rounded-md border border-white/70 text-sm text-slate-500"><LoaderCircle className="h-5 w-5 animate-spin" />正在加载专业提示词工作台</div>}><PromptWorkbench presentation="professional" config={data.modelConfig} onLoadWorkspace={api.promptStudio} onAnalyzeProduct={api.analyzePromptProduct} onGenerate={api.generatePromptSet} onQuickGenerate={api.quickGeneratePrompt} onOpenModelSettings={() => openSettings('models')} onSaveProductProfile={savePromptProductProfile} onDeleteProductProfile={api.deletePromptProductProfile} onSaveStylePreset={savePromptStylePreset} onDeleteStylePreset={api.deletePromptStylePreset} onToggleLibraryFavorite={api.togglePromptLibraryFavorite} onToggleFavoriteHistory={togglePromptHistoryFavorite} onRenameHistory={renamePromptHistory} onDeleteHistory={api.deletePromptHistory} onSyncToImageWorkbench={syncPromptToImageWorkbench} onExitProfessional={() => setAiCreationView('compose')} /></Suspense>
+  const promptWorkbench = <PromptWorkbench presentation="professional" config={data.modelConfig} onLoadWorkspace={api.promptStudio} onAnalyzeProduct={api.analyzePromptProduct} onGenerate={api.generatePromptSet} onQuickGenerate={api.quickGeneratePrompt} onOpenModelSettings={() => openSettings('models')} onSaveProductProfile={savePromptProductProfile} onDeleteProductProfile={api.deletePromptProductProfile} onSaveStylePreset={savePromptStylePreset} onDeleteStylePreset={api.deletePromptStylePreset} onToggleLibraryFavorite={api.togglePromptLibraryFavorite} onToggleFavoriteHistory={togglePromptHistoryFavorite} onRenameHistory={renamePromptHistory} onDeleteHistory={api.deletePromptHistory} onSyncToImageWorkbench={syncPromptToImageWorkbench} onExitProfessional={() => setAiCreationView('compose')} />
   const imageWorkbench = <ImageWorkbench active={activePage === 'image-workbench' && aiCreationView === 'compose'} config={data.modelConfig} onOpenModelSettings={() => openSettings('models')} incomingDraft={incomingImageDraft} onEnhancePrompt={api.enhanceImagePrompt} onOpenProfessionalPrompt={() => { setProfessionalPromptMounted(true); setAiCreationView('professional') }} />
 
   function renderPage() {
@@ -544,6 +589,8 @@ function App() {
           onSaveSkuMonitorPrice={saveSkuMonitorPrice}
           onCapture={captureProduct}
           onRetryBuyerShows={retryBuyerShows}
+          onCaptureSearchMainImage={captureSearchMainImage}
+          onReparseLocalEvidence={reparseProductLocalEvidence}
           onLocalImport={openLocalImport}
           onDelete={deleteProduct}
           onDeleteBatch={deleteProductsBatch}
@@ -658,13 +705,25 @@ function App() {
             <div className="flex items-start justify-between gap-4">
               <div className="flex items-start gap-3">
                 <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-md bg-blue-50 text-blue-700"><Settings className="h-5 w-5" /></div>
-                <div><h2 id="auth-guide-title" className="text-lg font-semibold text-slate-950">先完成账号授权</h2><p className="mt-1 text-sm leading-6 text-slate-600">当前没有可用的淘宝扫码账号。授权并检测在线后，再开始抓取商品。</p></div>
+                <div>
+                  <h2 id="auth-guide-title" className="text-lg font-semibold text-slate-950">
+                    {hasDegradedTmallAccount(authGuideAccountType) ? '后台修复价格同步' : '先完成账号授权'}
+                  </h2>
+                  <p className="mt-1 text-sm leading-6 text-slate-600">
+                    {hasDegradedTmallAccount(authGuideAccountType)
+                      ? '淘宝账号仍在线，无需重新登录。请在账号卡片点击“静默修复”，软件会保留 Cookie 并在下一次抓价时后台重新同步。'
+                      : '当前没有可用的淘宝扫码账号。授权并检测在线后，再开始抓取商品。'}
+                  </p>
+                </div>
               </div>
               <button type="button" className="inline-flex h-8 w-8 shrink-0 items-center justify-center rounded text-slate-400 hover:bg-slate-100 hover:text-slate-700" onClick={() => setAuthGuideAccountType(null)} aria-label="关闭账号授权引导" title="关闭"><X className="h-4 w-4" /></button>
             </div>
             <div className="mt-5 flex justify-end gap-2">
               <Button type="button" variant="secondary" onClick={() => setAuthGuideAccountType(null)}>稍后设置</Button>
-              <Button type="button" onClick={() => { setAuthGuideAccountType(null); openSettings('accounts') }}><Settings className="h-4 w-4" />去账号授权</Button>
+              <Button type="button" onClick={() => { setAuthGuideAccountType(null); openSettings('accounts') }}>
+                <Settings className="h-4 w-4" />
+                {hasDegradedTmallAccount(authGuideAccountType) ? '去静默修复' : '去账号授权'}
+              </Button>
             </div>
           </div>
         </div>

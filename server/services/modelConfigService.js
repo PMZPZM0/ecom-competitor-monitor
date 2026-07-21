@@ -532,19 +532,31 @@ export async function testPromptModel(config = {}, {
   now = () => new Date().toISOString(),
   signal,
   timeoutMs = 15_000,
+  sleep = (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds)),
 } = {}) {
   const resolved = resolveModelConfig(config, { env });
-  const data = await requestModelApiJson(`${resolved.baseUrl}/chat/completions`, {
-    apiKey: resolved.apiKey,
-    fetchImpl,
-    label: "提示词模型连接测试",
-    signal,
-    timeoutMs,
-    body: {
-      model: resolved.model,
-      messages: [{ role: "user", content: "只回复 OK" }],
-    },
-  });
+  let data;
+  const retryDelays = [400, 1_200];
+  for (let attempt = 0; ; attempt += 1) {
+    try {
+      data = await requestModelApiJson(`${resolved.baseUrl}/chat/completions`, {
+        apiKey: resolved.apiKey,
+        fetchImpl,
+        label: "提示词模型连接测试",
+        signal,
+        timeoutMs,
+        body: {
+          model: resolved.model,
+          messages: [{ role: "user", content: "只回复 OK" }],
+        },
+      });
+      break;
+    } catch (error) {
+      const delay = retryDelays[attempt];
+      if (![502, 503, 504].includes(error?.status) || delay === undefined || signal?.aborted) throw error;
+      await sleep(delay);
+    }
+  }
   if (!modelResponseText(data)) {
     throw new ModelApiError("提示词模型连接测试没有返回文字。", {
       code: "MODEL_API_INVALID_RESPONSE",

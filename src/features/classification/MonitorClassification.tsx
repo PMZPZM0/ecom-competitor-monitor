@@ -31,6 +31,8 @@ type Props = {
   onSaveSkuMonitorPrice: (product: Product, skuId: string, value: number | null, channel?: MonitorChannel) => Promise<void>
   onCapture: (product: Product, options?: ProductCaptureOptions) => Promise<Product | void>
   onRetryBuyerShows: (product: Product) => Promise<Product>
+  onCaptureSearchMainImage: (product: Product) => Promise<{ ok: boolean; status: NonNullable<Product['searchMainImageStatus']>; product: Product; message: string }>
+  onReparseLocalEvidence: (product: Product, kind: 'materials' | 'buyer-show' | 'search-main-image') => Promise<{ ok: boolean; product: Product; message: string }>
   onLocalImport: (product?: Product) => void
   onDelete: (product: Product) => Promise<void>
   onDeleteBatch: (products: Product[]) => Promise<void>
@@ -142,7 +144,7 @@ function productState(product: Product, monitor: Overview['monitor']) {
   }
 }
 
-export function MonitorClassification({ products, monitor, onToggle, onSchedule, onMediaPreference, onSaveSkuMonitorPrice, onCapture, onRetryBuyerShows, onLocalImport, onDelete, onDeleteBatch, onCaptureBatch, onRequestAdd, batchBusy, busyProductId }: Props) {
+export function MonitorClassification({ products, monitor, onToggle, onSchedule, onMediaPreference, onSaveSkuMonitorPrice, onCapture, onRetryBuyerShows, onCaptureSearchMainImage, onReparseLocalEvidence, onLocalImport, onDelete, onDeleteBatch, onCaptureBatch, onRequestAdd, batchBusy, busyProductId }: Props) {
   const [preview, setPreview] = useState<Preview | null>(null)
   const [query, setQuery] = useState('')
   const [shopFilter, setShopFilter] = useState('')
@@ -378,6 +380,8 @@ export function MonitorClassification({ products, monitor, onToggle, onSchedule,
                       onSaveSkuMonitorPrice={onSaveSkuMonitorPrice}
                       onCapture={onCapture}
                       onRetryBuyerShows={onRetryBuyerShows}
+                      onCaptureSearchMainImage={onCaptureSearchMainImage}
+                      onReparseLocalEvidence={onReparseLocalEvidence}
                       onLocalImport={onLocalImport}
                       onDelete={onDelete}
                       busy={busyProductId === product.id}

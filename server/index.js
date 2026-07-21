@@ -13,14 +13,15 @@ import { loadEnv } from "./utils/env.js";
 import { dbRuntimeInfo, newId, readDb, updateDb } from "./storage/db.js";
 import { analyzeData } from "./services/analysisService.js";
 import { buildTaobaoOAuthUrl } from "./services/authService.js";
-import { clearFailedCaptureJobs, clearFinishedCaptureJobs, clearStaleCaptureQueueJobs, deleteCaptureQueueJob, getCaptureQueueStatus, recoverCaptureQueue, rescheduleMonitor, resumeAuthRequiredCaptureJobs, resumeCaptureJob, runBuyerShowOnce, runCaptureBatchOnce, runProductOnce, scheduleProduct, sessionsForProduct, setSkuMonitorPrice, snapshotHasVerifiedNormalPrice, startScheduler, stopCaptureQueue, stopScheduler, withProtectedBrowserCapture } from "./services/monitorService.js";
+import { clearFailedCaptureJobs, clearFinishedCaptureJobs, clearStaleCaptureQueueJobs, deleteCaptureQueueJob, getCaptureQueueStatus, recoverCaptureQueue, reparseProductLocalEvidence, rescheduleMonitor, resumeAuthRequiredCaptureJobs, resumeCaptureJob, runBuyerShowOnce, runCaptureBatchOnce, runProductOnce, runSearchMainImageOnce, scheduleProduct, sessionsForProduct, setSkuMonitorPrice, snapshotHasVerifiedNormalPrice, startScheduler, stopCaptureQueue, stopScheduler, withProtectedBrowserCapture } from "./services/monitorService.js";
 import { monitorChannelSupported } from "./services/monitorRuleService.js";
 import { createNotificationLog, effectivePriceForSku, publicFeishuConfig, sendFeishuNotification, updateFeishuConfig } from "./services/feishuService.js";
 import { appendPriceDocument, cliStatus, createPriceDocument, readAuthQr, startCliLogin, startCliSetup } from "./services/larkCliService.js";
-import { browserRuntimeInfo, checkTaobaoSession, closeAccountBrowser, findAvailableBrowserPort, getTaobaoAuthState, isTaobaoLoginUrl, keepAccountBrowserWarm, minimizeAccountBrowser, openProductInAccountChrome, openTaobaoLogin, openTmallLogin, resetTmallSession } from "./services/browserService.js";
+import { browserRuntimeInfo, checkTaobaoSession, closeAccountBrowser, closeAccountTab, findAvailableBrowserPort, getTaobaoAuthState, isTaobaoLoginUrl, isTmallLoginPageUrl, keepAccountBrowserWarm, minimizeAccountBrowser, openProductInAccountChrome, openTaobaoLogin, resetTmallSsoRefreshWindow } from "./services/browserService.js";
 import { scrapeTmallProduct, SCRAPER_VERSION } from "./services/tmallScraper.js";
 import { normalizeProductUrl } from "./utils/productUrl.js";
 import { checkForUpdate } from "./services/updateService.js";
+import { getExcelSyncStatus, syncPriceWorkbook } from "./services/excelSyncService.js";
 import {
   deleteGeneratedImage,
   imageGenerationLimits,
@@ -240,14 +241,29 @@ function reserveImageGeneration(req, res, next) {
 }
 
 function publicAuthSession(session) {
+  const identityOnline = session.loginStatus === "valid";
+  const priceUsable = identityOnline && session.tmallPriceStatus === TMALL_PRICE_STATUS.VALID;
+  const availabilityStatus = session.loginStatus === "expired"
+    ? "login-expired"
+    : priceUsable
+      ? "ready"
+      : session.tmallPriceStatus === TMALL_PRICE_STATUS.DEGRADED
+        ? "price-unavailable"
+        : "price-unverified";
   const result = {
     ...session,
     cookie: session.cookie ? "configured" : "",
-    // `loginStatus` is the Taobao identity check. Price capability is kept
-    // separate and starts unknown until a real, local-evidence price capture.
-    tmallPriceStatus: session.tmallPriceStatus === TMALL_PRICE_STATUS.COOLDOWN
-      ? TMALL_PRICE_STATUS.UNKNOWN
-      : session.tmallPriceStatus || TMALL_PRICE_STATUS.UNKNOWN,
+    tmallPriceStatus: session.tmallPriceStatus || TMALL_PRICE_STATUS.UNKNOWN,
+    identityOnline,
+    priceUsable,
+    availabilityStatus,
+    availabilityReason: availabilityStatus === "ready"
+      ? "淘宝身份与商品价格响应均已验证。"
+      : availabilityStatus === "login-expired"
+        ? "淘宝登录已失效，需要重新扫码。"
+        : availabilityStatus === "price-unavailable"
+          ? "淘宝身份仍在，但商品页价格能力不可用。"
+          : "淘宝身份已同步，尚未用真实商品价格响应完成验证。",
   };
   delete result.cooldownUntil;
   if (result.healthStatus === "cooldown") result.healthStatus = "degraded";
@@ -522,6 +538,11 @@ app.delete("/api/local-evidence", async (_req, res) => {
       current.products = current.products.map((product) => ({
         ...product,
         lastSnapshot: clearDeletedReference(product.lastSnapshot),
+        ...(deletedCaptureIds.has(product.searchMainImageEvidenceId) ? {
+          searchMainImageEvidenceId: "",
+          searchMainImageEvidenceFile: "",
+          searchMainImageLocalFirst: undefined,
+        } : {}),
       }));
       return current;
     });
@@ -680,7 +701,7 @@ export async function captureSanitizedDataPreview(input, { scraper = scrapeTmall
     throw localImportError("BROWSER_SESSION_NOT_FOUND", "请选择一个已经扫码授权的账号浏览器。", 409);
   }
   if (!(session.enabled ?? session.active ?? true) || session.loginStatus === "expired") {
-    throw localImportError("BROWSER_SESSION_UNAVAILABLE", "该账号当前不可用，请先检测登录或重新授权。", 409);
+    throw localImportError("BROWSER_SESSION_UNAVAILABLE", "该账号当前不可用，请先检测登录；只有明确显示登录失效时才需要重新扫码。", 409);
   }
   const url = input.url;
   const itemId = input.itemId;
@@ -781,10 +802,12 @@ app.post("/api/raw-data/capture", async (req, res) => {
 app.post("/api/products", async (req, res) => {
   const parsed = productSchema.parse(req.body);
   parsed.url = normalizeProductUrl(parsed.url);
-  parsed.name ||= `待识别商品 ${itemIdFromUrl(parsed.url)}`;
+  const itemId = itemIdFromUrl(parsed.url);
+  parsed.name ||= `待识别商品 ${itemId}`;
   const product = {
     id: newId("prod"),
     ...parsed,
+    itemId,
     enabled: false,
     mainImage: "",
     lastStatus: "pending",
@@ -792,12 +815,37 @@ app.post("/api/products", async (req, res) => {
     createdAt: new Date().toISOString(),
     updatedAt: new Date().toISOString(),
   };
+  let duplicate = null;
   await updateDb((db) => {
+    duplicate = db.products.find((item) => String(item.itemId || itemIdFromUrl(item.url)) === itemId) || null;
+    if (duplicate) return db;
     db.products.unshift(product);
     return db;
   });
+  if (duplicate) {
+    res.status(409).json({ message: `商品 ${itemId} 已在监控列表中，请直接使用现有卡片抓取。`, productId: duplicate.id });
+    return;
+  }
   await rescheduleMonitor();
   res.status(201).json(product);
+});
+
+app.get("/api/excel-sync", async (_req, res) => {
+  res.json(await getExcelSyncStatus());
+});
+
+app.post("/api/excel-sync/run", async (_req, res) => {
+  res.json(await syncPriceWorkbook());
+});
+
+app.post("/api/excel-sync/open", async (_req, res) => {
+  if (!process.versions.electron) return res.status(501).json({ message: "网页版无法直接打开本机 Excel 文件，请按页面显示的路径打开。" });
+  const status = await getExcelSyncStatus();
+  if (!status.exists) await syncPriceWorkbook();
+  const { shell } = await import("electron");
+  const error = await shell.openPath(status.path);
+  if (error) throw localImportError("OPEN_EXCEL_SYNC_FAILED", error, 500);
+  res.json({ ok: true, path: status.path });
 });
 
 app.post("/api/products/batch", async (req, res) => {
@@ -815,11 +863,12 @@ app.post("/api/products/batch", async (req, res) => {
     if (!/(^|\.)(taobao|tmall)\.com$/i.test(hostname)) return res.status(400).json({ message: `不是淘宝或天猫商品链接：${value}` });
   }
   const db = await readDb();
-  const existingUrls = new Set(db.products.map((product) => product.url));
-  const created = uniqueUrls.filter((url) => !existingUrls.has(url)).map((url, index) => ({
+  const existingItemIds = new Set(db.products.map((product) => String(product.itemId || itemIdFromUrl(product.url))).filter(Boolean));
+  const created = uniqueUrls.filter((url) => !existingItemIds.has(itemIdFromUrl(url))).map((url, index) => ({
     id: newId("prod"),
     name: `批量商品 ${index + 1}`,
     url,
+    itemId: itemIdFromUrl(url),
     group: parsed.group,
     accountType: parsed.accountType,
     captureBuyerShows: parsed.captureBuyerShows,
@@ -836,33 +885,51 @@ app.post("/api/products/batch", async (req, res) => {
     return current;
   });
   let queueResult = null;
-  let followupRuns = [];
   if (created.length) {
     const createdIds = created.map((product) => product.id);
     queueResult = await runCaptureBatchOnce({ source: "manual-batch", productIds: createdIds, includeDisabled: true, captureKind: "price" });
-    const successfulIds = (queueResult.run?.items || []).filter((item) => item.status !== "failed").map((item) => item.productId);
-    if (successfulIds.length) {
-      const followups = [];
-      if (parsed.captureMediaAssets) followups.push(runCaptureBatchOnce({ source: "manual-batch-materials", productIds: successfulIds, includeDisabled: true, captureKind: "materials" }));
-      if (parsed.captureBuyerShows) followups.push(runCaptureBatchOnce({ source: "manual-batch-buyer-show", productIds: successfulIds, includeDisabled: true, captureKind: "buyer-show" }));
-      followupRuns = (await Promise.all(followups)).map((result) => result.run);
-    }
+  }
+  const results = queueResult?.results || [];
+  const successfulIds = new Set(results.filter((result) => result.snapshot).map((result) => result.product?.id).filter(Boolean));
+  const failedCreatedIds = new Set(created.filter((product) => !successfulIds.has(product.id)).map((product) => product.id));
+  if (failedCreatedIds.size) {
+    await removePersistedProducts(failedCreatedIds);
+    await clearStaleCaptureQueueJobs();
   }
   await rescheduleMonitor();
-  const results = queueResult?.results || [];
   const success = results.filter((result) => result.snapshot).length;
   res.status(201).json({
     total: uniqueUrls.length,
-    created: created.length,
+    created: created.length - failedCreatedIds.size,
     skipped: uniqueUrls.length - created.length,
     success,
-    failed: results.length - success,
+    failed: failedCreatedIds.size,
     run: queueResult?.run || null,
-    followupRuns,
+    followupRuns: [],
     items: queueResult?.run?.items || [],
-    message: `提交 ${uniqueUrls.length} 条，新建 ${created.length} 条，价格抓取成功 ${success} 条，失败 ${results.length - success} 条，重复跳过 ${uniqueUrls.length - created.length} 条。${followupRuns.length ? ` 已分别完成 ${followupRuns.length} 类独立素材任务。` : ""}`,
+    message: `提交 ${uniqueUrls.length} 条，成功加入 ${created.length - failedCreatedIds.size} 条，价格抓取成功 ${success} 条，失败 ${failedCreatedIds.size} 条且未留下空商品，重复跳过 ${uniqueUrls.length - created.length} 条。${parsed.captureMediaAssets || parsed.captureBuyerShows ? " 已保留素材选项，请在商品卡片中按需单独抓取，避免连续访问挤号。" : ""}`,
   });
 });
+
+function removeProductRecords(selectedIds, db) {
+  const ids = selectedIds instanceof Set ? selectedIds : new Set(selectedIds);
+  const deleted = db.products.filter((product) => ids.has(product.id)).length;
+  db.products = db.products.filter((product) => !ids.has(product.id));
+  db.snapshots = db.snapshots.filter((snapshot) => !ids.has(snapshot.productId));
+  db.notificationLogs = db.notificationLogs.filter((log) => !ids.has(log.productId));
+  db.notificationOutbox = (db.notificationOutbox || []).filter((job) => !ids.has(job.payload?.product?.id));
+  for (const productId of ids) delete db.alertStates?.[productId];
+  return deleted;
+}
+
+async function removePersistedProducts(selectedIds) {
+  let deleted = 0;
+  await updateDb((db) => {
+    deleted = removeProductRecords(selectedIds, db);
+    return db;
+  });
+  return deleted;
+}
 
 app.post("/api/products/batch-delete", async (req, res) => {
   const { ids } = z.object({
@@ -871,12 +938,7 @@ app.post("/api/products/batch-delete", async (req, res) => {
   const selectedIds = new Set(ids);
   let deleted = 0;
   await updateDb((db) => {
-    deleted = db.products.filter((product) => selectedIds.has(product.id)).length;
-    db.products = db.products.filter((product) => !selectedIds.has(product.id));
-    db.snapshots = db.snapshots.filter((snapshot) => !selectedIds.has(snapshot.productId));
-    db.notificationLogs = db.notificationLogs.filter((log) => !selectedIds.has(log.productId));
-    db.notificationOutbox = (db.notificationOutbox || []).filter((job) => !selectedIds.has(job.payload?.product?.id));
-    for (const productId of selectedIds) delete db.alertStates?.[productId];
+    deleted = removeProductRecords(selectedIds, db);
     return db;
   });
   await clearStaleCaptureQueueJobs();
@@ -1124,9 +1186,24 @@ app.delete("/api/products/:id", async (req, res) => {
 });
 
 app.post("/api/products/:id/capture", async (req, res) => {
-  const { captureKind } = z.object({ captureKind: z.enum(["price", "buyer-show", "materials"]).optional().default("price") }).parse(req.body || {});
+  const { captureKind, rollbackUninitialized } = z.object({
+    captureKind: z.enum(["price", "buyer-show", "materials"]).optional().default("price"),
+    rollbackUninitialized: z.boolean().optional().default(false),
+  }).parse(req.body || {});
   const source = captureKind === "materials" ? "manual-materials" : captureKind === "buyer-show" ? "manual-buyer-show" : "manual-product";
-  res.json(await runProductOnce(req.params.id, { source, captureKind }));
+  const result = await runProductOnce(req.params.id, { source, captureKind });
+  if (rollbackUninitialized && captureKind === "price" && !result.snapshot && !result.product?.lastSnapshot) {
+    await removePersistedProducts(new Set([req.params.id]));
+    await clearStaleCaptureQueueJobs();
+    await rescheduleMonitor();
+    res.status(422).json({
+      message: `首次抓取未成功，已自动撤销空商品，不会在列表留下“0 SKU”卡片。${result.product?.lastError ? ` ${result.product.lastError}` : " 请检查账号授权后重试。"}`,
+      rolledBack: true,
+      run: result.run,
+    });
+    return;
+  }
+  res.json(result);
 });
 
 app.post("/api/products/:id/capture-all-accounts", async (req, res) => {
@@ -1135,6 +1212,16 @@ app.post("/api/products/:id/capture-all-accounts", async (req, res) => {
 
 app.post("/api/products/:id/buyer-shows/retry", async (req, res) => {
   res.json(await runBuyerShowOnce(req.params.id, { source: "manual-buyer-show" }));
+});
+
+app.post("/api/products/:id/search-main-image", async (req, res) => {
+  const { force } = z.object({ force: z.boolean().optional().default(false) }).parse(req.body || {});
+  res.json(await runSearchMainImageOnce(req.params.id, { force }));
+});
+
+app.post("/api/products/:id/reparse-local-evidence", async (req, res) => {
+  const { kind } = z.object({ kind: z.enum(["materials", "buyer-show", "search-main-image"]) }).parse(req.body || {});
+  res.json(await reparseProductLocalEvidence(req.params.id, kind));
 });
 
 app.post("/api/products/:id/open", async (req, res) => {
@@ -1803,10 +1890,53 @@ app.post("/api/auth/sessions/:id/reauthorize", async (req, res) => {
   const session = db.authSessions.find((item) => item.id === req.params.id);
   if (!session) return res.status(404).json({ message: "账号不存在。" });
   if (session.source !== "taobao-browser" || !session.browserProfileKey || !session.browserPort) {
-    return res.status(400).json({ message: "手动 Cookie 账号请在左侧重新粘贴 Cookie；只有扫码账号支持重新授权。" });
+    return res.status(400).json({ message: "旧 Cookie 账号不支持自动恢复，请删除后改用扫码账号。" });
   }
-  await resetTmallSession({ profileKey: session.browserProfileKey, port: session.browserPort });
-  const login = await openTmallLogin({ profileKey: session.browserProfileKey, port: session.browserPort });
+
+  if (session.loginStatus !== "expired") {
+    const browserOptions = { profileKey: session.browserProfileKey, port: session.browserPort };
+    resetTmallSsoRefreshWindow(browserOptions);
+    let updated;
+    await updateDb((current) => {
+      current.authSessions = current.authSessions.map((item) => {
+        if (item.id !== session.id) return item;
+        updated = {
+          ...item,
+          tmallPriceStatus: item.tmallPriceStatus === TMALL_PRICE_STATUS.VALID
+            ? TMALL_PRICE_STATUS.VALID
+            : TMALL_PRICE_STATUS.DEGRADED,
+          tmallPriceCooldownUntil: null,
+          tmallPriceDeviceCooldownUntil: null,
+          tmallPriceFailureReason: item.tmallPriceStatus === TMALL_PRICE_STATUS.VALID
+            ? null
+            : item.tmallPriceFailureReason || "PRICE_REVALIDATION_REQUIRED",
+          healthStatus: item.tmallPriceStatus === TMALL_PRICE_STATUS.VALID ? "healthy" : "degraded",
+        };
+        return updated;
+      });
+      return current;
+    });
+    const authState = await getTaobaoAuthState(browserOptions).catch(() => null);
+    for (const target of authState?.targets || []) {
+      if (target.type === "page" && isTmallLoginPageUrl(target.url)) {
+        await closeAccountTab(target.id, browserOptions).catch(() => undefined);
+      }
+    }
+    await minimizeAccountBrowser(browserOptions).catch(() => undefined);
+    return res.json({
+      ok: true,
+      mode: "silent",
+      url: "",
+      profileKey: session.browserProfileKey,
+      port: session.browserPort,
+      session: publicAuthSession(updated),
+      message: updated.tmallPriceStatus === TMALL_PRICE_STATUS.VALID
+        ? "当前账号已经通过真实商品价格验证，无需修复；登录和浏览器会继续保留。"
+        : "已保留当前登录和浏览器，没有打开登录页或删除 Cookie；这一步只准备价格复检，不代表账号已经可用，请手动抓取一个商品完成真实价格验证。",
+    });
+  }
+
+  const login = await openTaobaoLogin({ profileKey: session.browserProfileKey, port: session.browserPort });
   await rememberPendingScan({
     sessionId: session.id,
     name: session.name,
@@ -1816,7 +1946,7 @@ app.post("/api/auth/sessions/:id/reauthorize", async (req, res) => {
     loginTargetId: login.targetId,
     createdAt: Date.now(),
   });
-  res.json(login);
+  res.json({ ...login, mode: "interactive" });
 });
 
 async function syncPendingScan(profileKey) {
@@ -1856,9 +1986,8 @@ async function syncPendingScan(profileKey) {
           active: true,
           enabled: true,
           loginStatus: "valid",
-          // Reauthorizing clears the Tmall session. Do not claim price access
-          // until a real product response has been captured and parsed from
-          // the sanitized local evidence file.
+          // A real product response must still verify Tmall price access after
+          // the account login has been restored.
           tmallPriceStatus: TMALL_PRICE_STATUS.UNKNOWN,
           tmallPriceCheckedAt: null,
           tmallPriceCooldownUntil: null,
@@ -1867,7 +1996,7 @@ async function syncPendingScan(profileKey) {
           tmallPriceFailureReason: null,
           tmallPriceFailureCount: 0,
           lastCheckedAt: new Date().toISOString(),
-          healthStatus: "healthy",
+          healthStatus: "degraded",
           consecutiveFailures: 0,
           lastFailureAt: null,
         };
@@ -1893,7 +2022,7 @@ async function syncPendingScan(profileKey) {
         tmallPriceFailureReason: null,
         tmallPriceFailureCount: 0,
         lastCheckedAt: new Date().toISOString(),
-        healthStatus: "healthy",
+        healthStatus: "degraded",
         createdAt: new Date().toISOString(),
       };
       db.authSessions.unshift(session);
@@ -1902,6 +2031,7 @@ async function syncPendingScan(profileKey) {
     return db;
   });
   pendingScans.delete(profileKey);
+  await closeAccountTab(pending.loginTargetId, { profileKey: pending.profileKey, port: pending.browserPort });
   await minimizeAccountBrowser({ profileKey: pending.profileKey, port: pending.browserPort }).catch((error) => console.error("[browser-minimize]", error.message));
   await resumeAuthRequiredCaptureJobs();
   return { status: "synced", session };
@@ -1920,6 +2050,7 @@ async function checkAuthSession(session) {
     : session.tmallPriceStatus === TMALL_PRICE_STATUS.COOLDOWN
       ? TMALL_PRICE_STATUS.UNKNOWN
       : session.tmallPriceStatus || TMALL_PRICE_STATUS.UNKNOWN;
+  const priceUsable = loginStatus === "valid" && tmallPriceStatus === TMALL_PRICE_STATUS.VALID;
   let updated;
   await updateDb((db) => {
     db.authSessions = db.authSessions.map((item) => {
@@ -1935,21 +2066,23 @@ async function checkAuthSession(session) {
           tmallPriceDeviceCooldownUntil: null,
         } : {}),
         lastCheckedAt: checkedAt,
-        healthStatus: status === "valid" ? "healthy" : "degraded",
-        consecutiveFailures: status === "valid" && tmallPriceStatus === TMALL_PRICE_STATUS.VALID ? 0 : item.consecutiveFailures,
+        healthStatus: priceUsable ? "healthy" : "degraded",
+        consecutiveFailures: priceUsable ? 0 : item.consecutiveFailures,
       };
       return updated;
     });
     return db;
   });
   const message = status === "valid"
-    ? tmallPriceStatus === TMALL_PRICE_STATUS.VALID
-      ? "淘宝登录有效；天猫价格能力已通过真实商品价格响应验证。"
-      : "淘宝登录有效；天猫价格能力尚未验证，需通过真实商品价格响应确认。"
+    ? priceUsable
+      ? "账号可用：淘宝身份在线，商品价格响应已经过真实抓取验证。"
+      : tmallPriceStatus === TMALL_PRICE_STATUS.DEGRADED
+        ? "账号暂不可用于采价：淘宝身份仍在线，但最近商品页没有返回可用价格数据；请手动抓取一个商品复检。"
+        : "账号尚未完成采价验证：淘宝身份在线，但必须成功抓取一个真实商品价格后才会显示可用。"
     : status === "expired"
-      ? "登录已明确失效，请重新授权。"
+      ? "登录已明确失效，请重新扫码。"
       : "账号浏览器仍保留，检测页面暂时异常；本次仅标记为待复检，不会清除登录状态。";
-  return { id: session.id, status, loginStatus, tmallPriceStatus, checkedAt, message, session: publicAuthSession(updated) };
+  return { id: session.id, status, loginStatus, tmallPriceStatus, priceUsable, checkedAt, message, session: publicAuthSession(updated) };
 }
 
 app.post("/api/auth/sessions/check-all", async (_req, res) => {
@@ -1964,7 +2097,8 @@ app.post("/api/auth/sessions/check-all", async (_req, res) => {
     }
     res.json({
       total: results.length,
-      valid: results.filter((result) => result.status === "valid").length,
+      valid: results.filter((result) => result.priceUsable === true).length,
+      identityOnline: results.filter((result) => result.loginStatus === "valid").length,
       degraded: results.filter((result) => result.status === "degraded").length,
       expired: results.filter((result) => result.status === "expired").length,
       manual: results.filter((result) => result.loginStatus === "manual").length,
@@ -2406,8 +2540,7 @@ export async function startServer({ host = "127.0.0.1", port = Number(process.en
   const actualPort = typeof address === "object" && address ? address.port : port;
   console.log(`电商竞品监控服务已启动：http://${host}:${actualPort}`);
   console.log("[runtime]", runtimeInfo());
-  const eagerBrowserWarmup = process.env.ECOM_MONITOR_EAGER_BROWSER_WARMUP === "1"
-    || (process.env.ECOM_MONITOR_EAGER_BROWSER_WARMUP !== "0" && process.platform !== "darwin");
+  const eagerBrowserWarmup = process.env.ECOM_MONITOR_EAGER_BROWSER_WARMUP === "1";
   if (eagerBrowserWarmup) {
     const warmupTimer = setTimeout(() => {
       readDb()

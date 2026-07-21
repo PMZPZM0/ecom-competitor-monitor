@@ -53,7 +53,8 @@ test("persistent image job routes enqueue immediately, serialize work, recover a
   let baseUrl = `http://127.0.0.1:${address.port}`;
   const nativeFetch = globalThis.fetch.bind(globalThis);
   const png = await sharp({ create: { width: 24, height: 24, channels: 4, background: "#557799" } }).png().toBuffer();
-  const successResponse = () => new Response(JSON.stringify({ data: [{ b64_json: png.toString("base64") }] }), {
+  const editedPng = await sharp({ create: { width: 24, height: 24, channels: 4, background: "#dd8844" } }).png().toBuffer();
+  const successResponse = (buffer = png) => new Response(JSON.stringify({ data: [{ b64_json: buffer.toString("base64") }] }), {
     status: 200,
     headers: { "content-type": "application/json" },
   });
@@ -63,13 +64,13 @@ test("persistent image job routes enqueue immediately, serialize work, recover a
     let firstStarted;
     const firstStartedPromise = new Promise((resolve) => { firstStarted = resolve; });
     let upstreamCalls = 0;
-    globalThis.fetch = async () => {
+    globalThis.fetch = async (_url, init) => {
       upstreamCalls += 1;
       if (upstreamCalls === 1) {
         firstStarted();
         await new Promise((resolve) => { releaseFirst = resolve; });
       }
-      return successResponse();
+      return successResponse(init?.body instanceof FormData ? editedPng : png);
     };
 
     const multipart = new FormData();

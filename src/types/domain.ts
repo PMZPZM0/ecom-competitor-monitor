@@ -41,6 +41,19 @@ export type Product = {
   }>
   enabled: boolean
   mainImage?: string
+  searchMainImage?: string
+  searchMainImageStatus?: 'verified' | 'unavailable' | 'failed'
+  searchMainImageSource?: 'taobao-search-exact-item-card' | ''
+  searchMainImageCapturedAt?: string
+  searchMainImageEvidenceId?: string
+  searchMainImageEvidenceFile?: string
+  searchMainImageLocalFirst?: {
+    sourceSaved: boolean
+    sourceSanitized: boolean
+    parsedFromDisk: boolean
+    networkAccessedAfterCapture: boolean
+  }
+  searchMainImageError?: string
   lastStatus: 'pending' | 'ok' | 'error'
   lastError?: string
   lastSnapshot?: Snapshot
@@ -66,6 +79,22 @@ export type PriceResolution = {
   normalLabel?: string
   parserVersion?: string
   evidenceHash?: string
+  displayedCents?: number
+  promotions?: Array<{
+    code: string
+    amountCents: number
+    kind: string
+    label: string
+  }>
+  evidence?: PriceEvidence[]
+  formulaInputs?: {
+    promotions?: Array<{
+      code: string
+      amountCents: number
+      kind: string
+      label: string
+    }>
+  }
   channels?: Partial<Record<'normal' | 'billion' | 'seckill' | 'government' | 'surprise' | 'gift' | 'vip88' | 'coin', PriceChannelResolution>>
 }
 
@@ -115,6 +144,9 @@ export type Snapshot = {
   productId: string
   browserEvidenceId?: string
   browserEvidenceFile?: string
+  materialEvidenceId?: string
+  materialEvidenceFile?: string
+  materialCapturedAt?: string
   buyerShowEvidenceId?: string
   buyerShowEvidenceFile?: string
   buyerShowLocalFirst?: {
@@ -344,13 +376,17 @@ export type AuthSession = {
   lastFailureAt?: string | null
   consecutiveFailures?: number
   loginStatus?: 'valid' | 'expired'
-  tmallPriceStatus?: 'unknown' | 'valid' | 'cooldown'
+  tmallPriceStatus?: 'unknown' | 'valid' | 'cooldown' | 'degraded'
   tmallPriceCheckedAt?: string | null
   tmallPriceCooldownUntil?: string | null
   tmallPriceDeviceCooldownUntil?: string | null
   tmallPriceLastFailureAt?: string | null
   tmallPriceFailureReason?: string | null
   tmallPriceFailureCount?: number
+  identityOnline?: boolean
+  priceUsable?: boolean
+  availabilityStatus?: 'ready' | 'login-expired' | 'price-unavailable' | 'price-unverified'
+  availabilityReason?: string
   lastCheckedAt?: string | null
   createdAt: string
 }
@@ -494,7 +530,9 @@ export type ImageGenerationRequest = {
   clientRequestId?: string
   prompt: string
   negativePrompt?: string
-  ratio: '1:1' | '3:4' | '4:3' | '16:9'
+  ratio: '1:1' | '4:5' | '3:4' | '2:3' | '9:16' | '4:3' | '3:2' | '16:9' | 'custom'
+  customWidth?: number
+  customHeight?: number
   resolution: '1k' | '2k' | '4k'
   quality: 'low' | 'medium' | 'high'
   format: 'png' | 'jpeg' | 'webp'
@@ -503,6 +541,12 @@ export type ImageGenerationRequest = {
   count: number
   sourceImageId?: string
   editMode?: 'mask' | 'annotation'
+  editIntent?: 'local' | 'background' | 'outpaint' | 'redraw'
+  compositionMode?: 'keep' | 'smart'
+  copyText?: string
+  copyPosition?: 'top' | 'center' | 'bottom'
+  copyStyle?: 'light' | 'dark'
+  copyScale?: 'small' | 'medium' | 'large'
 }
 
 export type ImageLibraryItem = {
@@ -513,6 +557,8 @@ export type ImageLibraryItem = {
   prompt: string
   negativePrompt?: string
   ratio: ImageGenerationRequest['ratio']
+  customWidth?: number
+  customHeight?: number
   resolution: ImageGenerationRequest['resolution']
   quality: ImageGenerationRequest['quality']
   format: ImageGenerationRequest['format']
@@ -524,13 +570,30 @@ export type ImageLibraryItem = {
   nativeSize?: string
   outputSize?: string
   upscaled?: boolean
-  processing?: 'native' | 'cropped' | 'upscaled'
+  processing?: 'native' | 'cropped' | 'upscaled' | 'fitted'
+  validation?: {
+    score: number
+    passed: boolean
+    changedRatio?: number
+    meanDelta?: number
+    protectedChangedRatio?: number
+    protectedMeanDelta?: number
+  }
   isFavorite: boolean
   isArchived: boolean
   revisedPrompt?: string
   parentImageId?: string | null
   referenceImageCount?: number
   maskApplied?: boolean
+  editIntent?: ImageGenerationRequest['editIntent']
+  compositionMode?: ImageGenerationRequest['compositionMode']
+  productMaskConfidence?: number
+  copy?: {
+    text: string
+    position: NonNullable<ImageGenerationRequest['copyPosition']>
+    style: NonNullable<ImageGenerationRequest['copyStyle']>
+    scale: NonNullable<ImageGenerationRequest['copyScale']>
+  }
 }
 
 export type ImageGenerationResponse = {
@@ -544,6 +607,11 @@ export type ImageGenerationResponse = {
     mode: 'generate' | 'edit'
     referenceImageCount: number
     maskApplied: boolean
+    editIntent?: ImageGenerationRequest['editIntent'] | null
+    compositionMode?: ImageGenerationRequest['compositionMode'] | null
+    candidateRankingApplied?: boolean
+    outpaintPrepared?: boolean
+    productMaskConfidence?: number | null
     ratio: ImageGenerationRequest['ratio']
     resolution: ImageGenerationRequest['resolution']
     nativeSize: string
@@ -646,6 +714,28 @@ export type LocalEvidenceStatus = {
   sourceFileCount: number
   totalBytes: number
   directoryPickerAvailable: boolean
+}
+
+export type ExcelSyncStatus = {
+  enabled: true
+  path: string
+  exists: boolean
+  size: number
+  modifiedAt: string | null
+  lastSyncedAt: string | null
+  lastError: string
+  calculationMs: number | null
+  workbookMs: number | null
+}
+
+export type ExcelSyncResult = {
+  path: string
+  currentRows: number
+  historyRows: number
+  promotionRows: number
+  calculationMs: number
+  workbookMs: number
+  syncedAt: string
 }
 
 export type Overview = {

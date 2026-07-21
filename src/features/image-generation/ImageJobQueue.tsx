@@ -126,7 +126,7 @@ export function ImageJobQueue({ jobs, loading, error, feedback, clearing, busyJo
                   <span className="truncate text-sm font-medium text-slate-800" title={visiblePrompt(job.request.prompt)}>{visiblePrompt(job.request.prompt) || '未命名生图任务'}</span>
                 </div>
                 <div className="mt-1 flex flex-wrap items-center gap-x-2 gap-y-1 text-[11px] text-slate-500">
-                  <span>{job.request.ratio}</span><span>{job.request.resolution.toUpperCase()}</span><span>{job.request.count} 张</span>{job.referenceImageCount > 0 && <span>{job.referenceImageCount} 张参考图</span>}<span>{jobSummary(job, now)}</span>{job.attempt > 1 && <span>第 {job.attempt} 次</span>}
+                  <span>{job.request.ratio === 'custom' ? `${job.request.customWidth}×${job.request.customHeight}` : job.request.ratio}</span><span>{job.request.resolution.toUpperCase()}</span><span>{job.request.count} 张</span>{job.request.editIntent && <span>{({ local: '局部编辑', background: '换背景', outpaint: '智能扩图', redraw: '自由重绘' } as const)[job.request.editIntent]}</span>}{job.referenceImageCount > 0 && <span>{job.referenceImageCount} 张参考图</span>}<span>{jobSummary(job, now)}</span>{job.attempt > 1 && <span>第 {job.attempt} 次</span>}
                 </div>
                 {job.status === 'failed' && job.error?.message && <p className="mt-1 line-clamp-2 text-xs text-red-600">{job.error.message}</p>}
               </div>

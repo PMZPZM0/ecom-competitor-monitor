@@ -12,7 +12,14 @@ files:
   - public/app-icon.png
   - package.json
   - '!server/data/**'
+  - '!server/**/account-profiles/**'
+  - '!server/**/capture-evidence/**'
+  - '!server/**/generated-images/**'
+  - '!server/**/db.json*'
+  - '!server/**/.env'
+  - '!server/**/.env.*'
   - '!server/**/*.test.js'
+  - '!release/**'
   - '!output/**'
   - '!canvas/**'
 asarUnpack:

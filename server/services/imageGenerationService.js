@@ -13,24 +13,24 @@ import {
 
 const IMAGE_RATIOS = {
   "1:1": { nativeSize: "1024x1024", width: 1, height: 1 },
+  "4:5": { nativeSize: "1024x1536", width: 4, height: 5 },
   "3:4": { nativeSize: "1024x1536", width: 3, height: 4 },
+  "2:3": { nativeSize: "1024x1536", width: 2, height: 3 },
+  "9:16": { nativeSize: "1024x1536", width: 9, height: 16 },
   "4:3": { nativeSize: "1536x1024", width: 4, height: 3 },
+  "3:2": { nativeSize: "1536x1024", width: 3, height: 2 },
   "16:9": { nativeSize: "1536x1024", width: 16, height: 9 },
 };
 const RESOLUTION_LONG_EDGES = { "1k": 1024, "2k": 2048, "4k": 4096 };
 const QUALITIES = new Set(["low", "medium", "high"]);
 const FORMATS = new Set(["png", "jpeg", "webp"]);
 const BACKGROUNDS = new Set(["auto", "opaque", "transparent"]);
-const IMAGE_TEXT_CLARITY_PROMPT = "生图规范：如果画面包含文字，保证文字清晰、准确、完整可见。";
-const IMAGE_REFERENCE_BASE_PROMPTS = {
-  source: "严格参考图编辑任务。第一张图片是待编辑原图，也是产品身份和原始画面的唯一事实依据。除用户明确要求修改的项目外，必须保持原图中的产品身份、外形、比例、结构、零部件、按键、Logo、既有文字、材质、颜色、镜头角度、透视、构图、裁切和宽高比不变。若用户明确要求新增、删除或替换原图文字，仅允许修改用户指定的文字和对应区域；新增或替换的内容必须与用户原文逐字一致，其他既有文字及其字体风格、字号、颜色、排版和位置必须保持不变。若用户未明确要求改字，禁止改写、翻译、删除或新增既有文字。若请求的输出尺寸与原图宽高比不同，该尺寸选择视为用户明确要求，仅允许为适配新画布做必要的扩图或裁切，产品本身仍须完整保真。只实施用户明确要求的变化；禁止替换产品、整体重设计、虚构或增删结构以及新增品牌。其余参考图仅用于用户指定的材质、风格或场景参考，不得覆盖第一张原图的产品事实。",
-  reference: "普通参考图任务。参考图用于约束用户指定的产品、风格、材质或构图，但不默认把第一张图片视为待编辑原图。若用户未明确要求重新设计，必须保留参考图中核心产品可辨识的身份、外形、比例、结构、按键、Logo、既有文字、材质和颜色。若用户明确要求基于参考图新增、删除或替换文字，仅允许修改用户指定的文字和对应区域；新增或替换的内容必须与用户原文逐字一致，其他既有文字及其字体风格、字号、颜色、排版和位置必须保持不变。若用户未明确要求改字，禁止改写、翻译、删除或新增既有文字。只实施用户明确要求的变化，禁止替换产品、虚构或增删结构以及新增品牌。若用户明确说明参考图只用于风格，则仅提取相关风格，不要求复刻其主体或构图。",
-};
-const IMAGE_EDIT_BASE_PROMPTS = {
-  mask: "局部蒙版编辑任务。第一张图片是待编辑原图，也是产品身份和原始画面的唯一事实依据；其他参考图仅用于用户指定的材质或风格参考。透明蒙版区域是唯一允许修改的范围，必须在该范围内实质执行用户要求。若用户提供了明确目标文字，必须逐字准确生成；若用户要求润色、改写或优化但没有提供目标文字，必须先读取蒙版内现有文字，在保持核心含义的前提下完成可见的文案改写，不得原样返回。蒙版外和未指定修改的既有文字必须保持不变。严格保持蒙版外的产品身份、外形、比例、结构、零部件、按键、Logo、既有文字、材质、颜色、镜头角度、透视、构图、裁切、宽高比、背景和清晰度不变；禁止替换产品、整体重设计、虚构或增删结构、新增品牌，以及移动、重画、增删或裁切蒙版外内容。修改区域必须与周围自然衔接。",
-  annotation: "局部批注编辑任务。第一张图片是待编辑原图，也是产品身份和原始画面的唯一事实依据；最后一张带编号框选或备注点的图片只用于指示修改位置；透明蒙版进一步限定唯一允许修改的区域。最后一张批注图中的编号必须与修改内容中的相同编号逐条对应，按编号分别执行，不得合并、错配或漏改；框线、编号和备注点不得出现在最终图片中。若某编号提供了明确目标文字，必须在对应区域逐字准确生成；若某编号只要求润色、改写或优化，必须先读取该区域现有文字，在保持核心含义的前提下实质改写，不得原样返回。其他编号、未标注区域和未指定修改的既有文字必须保持不变。严格保持未标注区域的产品身份、外形、比例、结构、零部件、按键、Logo、既有文字、材质、颜色、镜头角度、透视、构图、裁切、宽高比、背景和清晰度不变；禁止替换产品、整体重设计、虚构或增删结构、新增品牌。修改区域必须与周围自然衔接。",
-};
-const COPY_REWRITE_INTENT_PATTERN = /润色|改写|重写|优化|精简|扩写|文案.{0,8}(?:高级|简洁|有力|吸引)|(?:标题|文字).{0,8}(?:高级|简洁|有力|吸引)/i;
+const IMAGE_EDIT_MODES = new Set(["mask", "annotation"]);
+const IMAGE_EDIT_INTENTS = new Set(["local", "background", "outpaint", "redraw"]);
+const COMPOSITION_MODES = new Set(["keep", "smart"]);
+const COPY_POSITIONS = new Set(["top", "center", "bottom"]);
+const COPY_STYLES = new Set(["light", "dark"]);
+const COPY_SCALES = new Set(["small", "medium", "large"]);
 const MIME_BY_FORMAT = { png: "image/png", jpeg: "image/jpeg", webp: "image/webp" };
 const FORMAT_BY_MIME = { "image/png": "png", "image/jpeg": "jpeg", "image/webp": "webp" };
 const IMAGE_ID_PATTERN = /^image_[a-f0-9]{32}$/;
@@ -75,23 +75,17 @@ function imageError(message, { code = "IMAGE_REQUEST_INVALID", status = 400, ret
 export function mergeImagePrompt(prompt, negativePrompt = "", referenceMode) {
   const positive = requiredText(prompt, "正向提示词", 32_000);
   const negative = optionalText(negativePrompt, "负面提示词", 4_000);
-  const reference = referenceMode ? IMAGE_REFERENCE_BASE_PROMPTS[referenceMode] : "";
-  if (referenceMode && !reference) throw new Error("参考图方式无效。");
-  const merged = [reference, positive, IMAGE_TEXT_CLARITY_PROMPT].filter(Boolean).join("\n\n");
-  return negative ? `${merged}\n\n用户排除要求：${negative}` : merged;
+  if (referenceMode && !["source", "reference"].includes(referenceMode)) throw new Error("参考图方式无效。");
+  return negative ? `${positive}\n\n负面要求：${negative}` : positive;
 }
 
 export function mergeImageEditPrompt(instruction, mode) {
-  const base = IMAGE_EDIT_BASE_PROMPTS[mode];
-  if (!base) throw new Error("图片编辑方式无效。");
-  const requestedChange = requiredText(instruction, "修改内容", 4_000);
-  const copyRule = COPY_REWRITE_INTENT_PATTERN.test(requestedChange)
-    ? "本次包含文案润色或改写要求：必须让目标区域的文字内容发生可见且有意义的变化，同时保持原意、语言风格和版面容纳长度；不要把原文原样返回。只有用户明确给出目标文案时才逐字照写。"
-    : "本次按用户给出的修改内容精确执行；若包含明确目标文案，字符、标点和换行必须与目标文案一致。";
-  return `${base}\n\n${copyRule}\n\n修改内容：${requestedChange}`;
+  if (!IMAGE_EDIT_MODES.has(mode)) throw new Error("图片编辑方式无效。");
+  return requiredText(instruction, "修改内容", 4_000);
 }
 
 export function targetImageSize(ratio = "1:1", resolution = "1k") {
+  if (ratio === "custom") throw new Error("自定义尺寸需要同时提供宽度和高度。");
   const ratioConfig = IMAGE_RATIOS[ratio];
   const longEdge = RESOLUTION_LONG_EDGES[resolution];
   if (!ratioConfig) throw new Error("画面比例无效。");
@@ -102,10 +96,30 @@ export function targetImageSize(ratio = "1:1", resolution = "1k") {
   return { width: Math.round(longEdge * ratioConfig.width / ratioConfig.height), height: longEdge };
 }
 
+export function resolveTargetImageSize(input = {}) {
+  if (input.ratio !== "custom") return targetImageSize(input.ratio || "1:1", input.resolution || "1k");
+  const width = Number(input.customWidth);
+  const height = Number(input.customHeight);
+  if (!Number.isInteger(width) || !Number.isInteger(height) || width < 512 || width > 4096 || height < 512 || height > 4096) {
+    throw new Error("自定义宽高必须是 512 到 4096 之间的整数。");
+  }
+  if (width * height > 16_777_216) throw new Error("自定义画布不能超过 1677 万像素。");
+  return { width, height };
+}
+
+function nativeImageSize(input = {}) {
+  if (input.ratio !== "custom") return IMAGE_RATIOS[input.ratio || "1:1"]?.nativeSize;
+  const target = resolveTargetImageSize(input);
+  const ratio = target.width / target.height;
+  if (ratio < 0.84) return "1024x1536";
+  if (ratio > 1.19) return "1536x1024";
+  return "1024x1024";
+}
+
 export function buildImageGenerationRequest(input = {}, imageModel = "gpt-image-2") {
   const ratio = input.ratio || "1:1";
-  const ratioConfig = IMAGE_RATIOS[ratio];
-  if (!ratioConfig) throw new Error("画面比例无效。");
+  if (ratio !== "custom" && !IMAGE_RATIOS[ratio]) throw new Error("画面比例无效。");
+  resolveTargetImageSize({ ...input, ratio });
   if (!RESOLUTION_LONG_EDGES[input.resolution || "1k"]) throw new Error("输出分辨率无效。");
   const quality = oneOf(input.quality, QUALITIES, "生成质量", "medium");
   const outputFormat = oneOf(input.format, FORMATS, "输出格式", "png");
@@ -117,20 +131,68 @@ export function buildImageGenerationRequest(input = {}, imageModel = "gpt-image-
   if (!Number.isInteger(compression) || compression < 0 || compression > 100) throw new Error("图片压缩率必须为 0 到 100 之间的整数。");
   const referenceMode = input.referenceMode || (!input.editMode && input.sourceImageId ? "source" : undefined);
 
+  const mergedPrompt = mergeImagePrompt(
+    input.editMode ? mergeImageEditPrompt(input.prompt, input.editMode) : input.prompt,
+    input.negativePrompt,
+    referenceMode,
+  );
   return {
     model: String(imageModel || "").trim(),
-    prompt: mergeImagePrompt(
-      input.editMode ? mergeImageEditPrompt(input.prompt, input.editMode) : input.prompt,
-      input.negativePrompt,
-      referenceMode,
-    ),
-    size: ratioConfig.nativeSize,
+    prompt: optionalText(input.copyText, "成品文案", 500)
+      ? `${mergedPrompt}\n\n只生成无文字底图，不要在图片中绘制任何文字；成品文案由应用使用真实字体排版。`
+      : mergedPrompt,
+    size: nativeImageSize({ ...input, ratio }),
     quality,
     output_format: outputFormat,
     background,
     n: count,
     ...((outputFormat === "jpeg" || outputFormat === "webp") ? { output_compression: compression } : {}),
   };
+}
+
+function escapeSvgText(value) {
+  return String(value).replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;").replaceAll('"', "&quot;");
+}
+
+function wrapCopyText(value, maxUnits) {
+  const output = [];
+  for (const paragraph of String(value).split(/\r?\n/)) {
+    const characters = Array.from(paragraph.trim());
+    if (!characters.length) continue;
+    for (let index = 0; index < characters.length; index += maxUnits) output.push(characters.slice(index, index + maxUnits).join(""));
+  }
+  return output.slice(0, 6);
+}
+
+async function applyCopyLayer(image, input) {
+  const copyText = optionalText(input.copyText, "成品文案", 500);
+  if (!copyText) return image;
+  const position = oneOf(input.copyPosition, COPY_POSITIONS, "文案位置", "bottom");
+  const style = oneOf(input.copyStyle, COPY_STYLES, "文案样式", "light");
+  const scale = oneOf(input.copyScale, COPY_SCALES, "文案字号", "medium");
+  const shortEdge = Math.min(image.width, image.height);
+  const fontRatio = { small: 0.038, medium: 0.052, large: 0.068 }[scale];
+  const fontSize = Math.max(24, Math.round(shortEdge * fontRatio));
+  const lineHeight = Math.round(fontSize * 1.28);
+  const lines = wrapCopyText(copyText, Math.max(8, Math.floor(image.width / fontSize * 1.7)));
+  if (!lines.length) return image;
+  const blockHeight = lineHeight * lines.length;
+  const padding = Math.round(shortEdge * 0.055);
+  const baseline = position === "top"
+    ? padding + fontSize
+    : position === "center"
+      ? Math.round((image.height - blockHeight) / 2) + fontSize
+      : image.height - padding - blockHeight + fontSize;
+  const fill = style === "light" ? "#ffffff" : "#111827";
+  const stroke = style === "light" ? "rgba(15,23,42,0.72)" : "rgba(255,255,255,0.82)";
+  const tspans = lines.map((line, index) => `<tspan x="${padding}" y="${baseline + index * lineHeight}">${escapeSvgText(line)}</tspan>`).join("");
+  const overlay = Buffer.from(`<svg xmlns="http://www.w3.org/2000/svg" width="${image.width}" height="${image.height}"><text font-family="Microsoft YaHei, PingFang SC, Noto Sans CJK SC, Arial, sans-serif" font-size="${fontSize}" font-weight="800" fill="${fill}" stroke="${stroke}" stroke-width="${Math.max(1, Math.round(fontSize * 0.045))}" paint-order="stroke" letter-spacing="0">${tspans}</text></svg>`);
+  let pipeline = sharp(image.buffer, { limitInputPixels: MAX_INPUT_PIXELS, animated: false }).composite([{ input: overlay, top: 0, left: 0 }]);
+  const compression = input.compression ?? 90;
+  if (input.format === "jpeg") pipeline = pipeline.flatten({ background: "#ffffff" }).jpeg({ quality: compression, chromaSubsampling: "4:4:4", mozjpeg: true });
+  else if (input.format === "webp") pipeline = pipeline.webp({ quality: compression, smartSubsample: true });
+  else pipeline = pipeline.png({ compressionLevel: 9, adaptiveFiltering: true });
+  return { ...image, buffer: await pipeline.toBuffer(), copy: { text: copyText, position, style, scale } };
 }
 
 export function imageGenerationEndpoint(baseUrl) {
@@ -403,17 +465,23 @@ async function transformGeneratedImage(image, input, { fetchImpl, signal, remote
   if (!native.width || !native.height || native.width * native.height > MAX_INPUT_PIXELS) {
     throw imageError("图片模型返回的图片超过 4000 万像素。", { code: "IMAGE_RESULT_PIXELS_EXCEEDED", status: 502 });
   }
-  const target = targetImageSize(input.ratio, input.resolution || "1k");
+  const target = resolveTargetImageSize(input);
   const upscaled = target.width > native.width || target.height > native.height;
   const nativeRatio = native.width / native.height;
   const targetRatio = target.width / target.height;
   const unchanged = native.width === target.width && native.height === target.height && Math.abs(nativeRatio - targetRatio) < 0.0001;
-  const processing = upscaled ? "upscaled" : unchanged ? "native" : "cropped";
+  const preserveCanvas = input.editIntent === "outpaint";
+  const processing = upscaled ? "upscaled" : unchanged ? "native" : preserveCanvas ? "fitted" : "cropped";
   const outputFormat = input.format || "png";
   const compression = input.compression ?? 90;
   let pipeline = sharp(sourceBuffer, { limitInputPixels: MAX_INPUT_PIXELS, animated: false })
     .rotate()
-    .resize(target.width, target.height, { fit: "cover", position: "centre", kernel: sharp.kernel.lanczos3 });
+    .resize(target.width, target.height, {
+      fit: preserveCanvas ? "contain" : "cover",
+      position: "centre",
+      background: outputFormat === "jpeg" ? "#ffffff" : { r: 255, g: 255, b: 255, alpha: input.background === "transparent" ? 0 : 1 },
+      kernel: sharp.kernel.lanczos3,
+    });
   if (outputFormat === "jpeg") {
     pipeline = pipeline.flatten({ background: "#ffffff" }).jpeg({ quality: compression, chromaSubsampling: "4:4:4", mozjpeg: true });
   } else if (outputFormat === "webp") {
@@ -422,6 +490,11 @@ async function transformGeneratedImage(image, input, { fetchImpl, signal, remote
     pipeline = pipeline.png({ compressionLevel: 9, adaptiveFiltering: true });
   }
   const buffer = await pipeline.toBuffer();
+  const outputMetadata = await sharp(buffer, { limitInputPixels: MAX_INPUT_PIXELS, animated: false }).metadata();
+  const outputDimensions = orientedSize(outputMetadata);
+  if (outputDimensions.width !== target.width || outputDimensions.height !== target.height) {
+    throw imageError("图片输出尺寸与所选比例不一致，本次未保存。", { code: "IMAGE_RESULT_SIZE_MISMATCH", status: 502, retryable: true });
+  }
   return {
     buffer,
     mimeType: mimeType(outputFormat),
@@ -452,38 +525,114 @@ async function maskedEditChangeMetrics(sourceBuffer, outputBuffer, maskBuffer) {
   let editedPixels = 0;
   let changedPixels = 0;
   let totalDelta = 0;
+  let protectedPixels = 0;
+  let protectedChangedPixels = 0;
+  let protectedTotalDelta = 0;
   for (let index = 0; index < width * height; index += 1) {
-    if (mask.data[index * mask.info.channels + 3] >= 128) continue;
-    editedPixels += 1;
     const sourceOffset = index * source.info.channels;
     const outputOffset = index * output.info.channels;
     const red = Math.abs(source.data[sourceOffset] - output.data[outputOffset]);
     const green = Math.abs(source.data[sourceOffset + 1] - output.data[outputOffset + 1]);
     const blue = Math.abs(source.data[sourceOffset + 2] - output.data[outputOffset + 2]);
     const maxDelta = Math.max(red, green, blue);
-    totalDelta += (red + green + blue) / 3;
-    if (maxDelta >= 12) changedPixels += 1;
+    const mean = (red + green + blue) / 3;
+    if (mask.data[index * mask.info.channels + 3] < 128) {
+      editedPixels += 1;
+      totalDelta += mean;
+      if (maxDelta >= 12) changedPixels += 1;
+    } else {
+      protectedPixels += 1;
+      protectedTotalDelta += mean;
+      if (maxDelta >= 12) protectedChangedPixels += 1;
+    }
   }
   return {
     editedPixels,
     changedRatio: editedPixels ? changedPixels / editedPixels : 0,
     meanDelta: editedPixels ? totalDelta / editedPixels : 0,
+    protectedPixels,
+    protectedChangedRatio: protectedPixels ? protectedChangedPixels / protectedPixels : 0,
+    protectedMeanDelta: protectedPixels ? protectedTotalDelta / protectedPixels : 0,
   };
 }
 
-async function assertMaskedEditChanged(prepared, images) {
+async function referenceEditChangeMetrics(sourceBuffer, outputBuffer, target) {
+  const longEdge = 384;
+  const width = target.width >= target.height ? longEdge : Math.max(1, Math.round(longEdge * target.width / target.height));
+  const height = target.height >= target.width ? longEdge : Math.max(1, Math.round(longEdge * target.height / target.width));
+  const resize = { width, height, fit: "cover", position: "centre", kernel: sharp.kernel.lanczos3 };
+  const [source, output] = await Promise.all([
+    sharp(sourceBuffer, { limitInputPixels: MAX_INPUT_PIXELS, animated: false }).rotate().resize(resize).removeAlpha().raw().toBuffer({ resolveWithObject: true }),
+    sharp(outputBuffer, { limitInputPixels: MAX_INPUT_PIXELS, animated: false }).rotate().resize(resize).removeAlpha().raw().toBuffer({ resolveWithObject: true }),
+  ]);
+  let changedPixels = 0;
+  let totalDelta = 0;
+  const pixelCount = width * height;
+  for (let index = 0; index < pixelCount; index += 1) {
+    const sourceOffset = index * source.info.channels;
+    const outputOffset = index * output.info.channels;
+    const red = Math.abs(source.data[sourceOffset] - output.data[outputOffset]);
+    const green = Math.abs(source.data[sourceOffset + 1] - output.data[outputOffset + 1]);
+    const blue = Math.abs(source.data[sourceOffset + 2] - output.data[outputOffset + 2]);
+    totalDelta += (red + green + blue) / 3;
+    if (Math.max(red, green, blue) >= 12) changedPixels += 1;
+  }
+  return {
+    changedRatio: pixelCount ? changedPixels / pixelCount : 0,
+    meanDelta: pixelCount ? totalDelta / pixelCount : 0,
+  };
+}
+
+async function validateAndRankMaskedEdits(prepared, images) {
   if (!prepared.mask || !prepared.references[0] || !images.length) return;
+  const accepted = [];
+  let lastFailure = null;
   for (const image of images) {
     const metrics = await maskedEditChangeMetrics(prepared.references[0].buffer, image.buffer, prepared.mask.buffer);
     if (metrics.editedPixels < 16) {
-      throw imageError("框选区域太小，无法确认修改结果，请重新框选后再试。", {
+      lastFailure = imageError("框选区域太小，无法确认修改结果，请重新框选后再试。", {
         code: "IMAGE_EDIT_MASK_TOO_SMALL",
         status: 422,
         retryable: true,
       });
+      continue;
     }
     if (metrics.changedRatio < 0.01 && metrics.meanDelta < 3) {
-      throw imageError("模型返回的框选区域几乎没有变化，任务未标记为完成。请调整批注文字后重试。", {
+      lastFailure = imageError("模型返回的框选区域几乎没有变化，任务未标记为完成。请调整批注文字后重试。", {
+        code: "IMAGE_EDIT_NO_VISIBLE_CHANGE",
+        status: 422,
+        retryable: true,
+      });
+      continue;
+    }
+    if (metrics.protectedPixels >= 16 && metrics.protectedChangedRatio > 0.08 && metrics.protectedMeanDelta > 8) {
+      lastFailure = imageError("候选图改动了框选区域之外的内容，已自动淘汰。请缩小框选范围或重试。", {
+        code: "IMAGE_EDIT_OUTSIDE_MASK_CHANGED",
+        status: 422,
+        retryable: true,
+      });
+      continue;
+    }
+    const score = Math.max(0, Math.min(100, Math.round(
+      metrics.changedRatio * 45
+      + Math.min(1, metrics.meanDelta / 48) * 25
+      + (1 - metrics.protectedChangedRatio) * 20
+      + (1 - Math.min(1, metrics.protectedMeanDelta / 24)) * 10,
+    )));
+    accepted.push({ ...image, validation: { ...metrics, score, passed: true } });
+  }
+  if (!accepted.length) throw lastFailure || imageError("没有候选图通过局部编辑保护校验。", { code: "IMAGE_EDIT_VALIDATION_FAILED", status: 422, retryable: true });
+  accepted.sort((left, right) => right.validation.score - left.validation.score);
+  return accepted;
+}
+
+async function assertReferenceEditChanged(prepared, images, input) {
+  if (!prepared.references[0] || !images.length) return;
+  const target = resolveTargetImageSize(input);
+  for (const image of images) {
+    const metrics = await referenceEditChangeMetrics(prepared.references[0].buffer, image.buffer, target);
+    if (metrics.changedRatio < 0.015 && metrics.meanDelta < 2.5) {
+      throw imageError("图片模型返回的结果与原图几乎相同，本次未标记为完成。请重试或把修改目标写得更具体。", {
         code: "IMAGE_EDIT_NO_VISIBLE_CHANGE",
         status: 422,
         retryable: true,
@@ -531,8 +680,107 @@ async function prepareEditFiles(input, uploadedReferences, uploadedMask, sourceI
   return { references, mask };
 }
 
+async function prepareOutpaintFiles(prepared, nativeSize, compositionMode) {
+  if (!prepared.references[0]) throw imageError("扩图缺少待扩展的原图。", { code: "IMAGE_EDIT_SOURCE_MISSING" });
+  if (prepared.mask) throw imageError("扩图会自动建立保护区域，请不要同时上传局部蒙版。", { code: "IMAGE_EDIT_MODE_MISMATCH" });
+  const [canvasWidth, canvasHeight] = String(nativeSize).split("x").map(Number);
+  if (!canvasWidth || !canvasHeight) throw imageError("扩图画布尺寸无效。", { code: "IMAGE_RESULT_SIZE_MISMATCH" });
+  const source = prepared.references[0];
+  const scale = compositionMode === "smart" ? 0.78 : 0.92;
+  const resized = await sharp(source.buffer, { limitInputPixels: MAX_INPUT_PIXELS, animated: false })
+    .rotate()
+    .resize({
+      width: Math.max(1, Math.round(canvasWidth * scale)),
+      height: Math.max(1, Math.round(canvasHeight * scale)),
+      fit: "inside",
+      withoutEnlargement: false,
+      kernel: sharp.kernel.lanczos3,
+    })
+    .png()
+    .toBuffer({ resolveWithObject: true });
+  const left = Math.round((canvasWidth - resized.info.width) / 2);
+  const top = Math.round((canvasHeight - resized.info.height) / 2);
+  const canvas = await sharp({
+    create: { width: canvasWidth, height: canvasHeight, channels: 4, background: { r: 255, g: 255, b: 255, alpha: 0 } },
+  }).composite([{ input: resized.data, left, top }]).png().toBuffer();
+  const maskPixels = Buffer.alloc(canvasWidth * canvasHeight * 4);
+  for (let row = top; row < top + resized.info.height; row += 1) {
+    const start = (row * canvasWidth + left) * 4;
+    const end = start + resized.info.width * 4;
+    for (let offset = start; offset < end; offset += 4) maskPixels[offset + 3] = 255;
+  }
+  const maskBuffer = await sharp(maskPixels, { raw: { width: canvasWidth, height: canvasHeight, channels: 4 } }).png().toBuffer();
+  const [reference, mask] = await Promise.all([
+    validateReferenceFile({ buffer: canvas, mimetype: "image/png", originalname: "outpaint-source.png" }, { index: 0 }),
+    validateReferenceFile({ buffer: maskBuffer, mimetype: "image/png", originalname: "outpaint-mask.png" }, { mask: true }),
+  ]);
+  return { references: [reference, ...prepared.references.slice(1)], mask, outpaintPrepared: true };
+}
+
+async function createAutomaticProductMask(reference) {
+  const sample = await sharp(reference.buffer, { limitInputPixels: MAX_INPUT_PIXELS, animated: false })
+    .rotate()
+    .resize({ width: 384, height: 384, fit: "inside", withoutEnlargement: false, kernel: sharp.kernel.lanczos3 })
+    .ensureAlpha()
+    .raw()
+    .toBuffer({ resolveWithObject: true });
+  const { width, height, channels } = sample.info;
+  const cornerPoints = [[1, 1], [width - 2, 1], [1, height - 2], [width - 2, height - 2]];
+  const corners = cornerPoints.map(([x, y]) => {
+    const offset = (y * width + x) * channels;
+    return [sample.data[offset], sample.data[offset + 1], sample.data[offset + 2]];
+  });
+  const background = [0, 1, 2].map((channel) => Math.round(corners.reduce((sum, color) => sum + color[channel], 0) / corners.length));
+  const cornerSpread = Math.max(...corners.flatMap((color) => color.map((value, channel) => Math.abs(value - background[channel]))));
+  const maskPixels = Buffer.alloc(width * height * 4);
+  let subjectPixels = 0;
+  for (let index = 0; index < width * height; index += 1) {
+    const sourceOffset = index * channels;
+    const alpha = sample.data[sourceOffset + 3];
+    const distance = Math.max(
+      Math.abs(sample.data[sourceOffset] - background[0]),
+      Math.abs(sample.data[sourceOffset + 1] - background[1]),
+      Math.abs(sample.data[sourceOffset + 2] - background[2]),
+    );
+    const subject = alpha >= 48 && distance >= Math.max(22, cornerSpread * 1.7);
+    const targetOffset = index * 4;
+    if (subject) {
+      subjectPixels += 1;
+      maskPixels[targetOffset + 3] = 255;
+    }
+  }
+  const subjectRatio = subjectPixels / Math.max(1, width * height);
+  const backgroundScore = Math.max(0, 1 - cornerSpread / 64);
+  const coverageScore = subjectRatio >= 0.03 && subjectRatio <= 0.78 ? 1 : subjectRatio > 0.005 && subjectRatio < 0.92 ? 0.5 : 0;
+  const confidence = Math.round(backgroundScore * coverageScore * 100) / 100;
+  const maskBuffer = await sharp(maskPixels, { raw: { width, height, channels: 4 } })
+    .blur(1.2)
+    .resize(reference.width, reference.height, { fit: "fill", kernel: sharp.kernel.nearest })
+    .png()
+    .toBuffer();
+  return { maskBuffer, confidence, subjectRatio };
+}
+
+async function prepareBackgroundFiles(prepared, compositionMode) {
+  if (!prepared.references[0] || prepared.mask || compositionMode === "smart") return prepared;
+  const detected = await createAutomaticProductMask(prepared.references[0]);
+  if (detected.confidence < 0.48) {
+    throw imageError("自动主体保护置信度不足，本次未提交模型。请换一张主体边缘更清楚的原图，或在图片详情中使用“批注编辑”手动框选。", {
+      code: "IMAGE_PRODUCT_MASK_LOW_CONFIDENCE",
+      status: 422,
+      retryable: true,
+    });
+  }
+  const mask = await validateReferenceFile({
+    buffer: detected.maskBuffer,
+    mimetype: "image/png",
+    originalname: "automatic-product-mask.png",
+  }, { mask: true });
+  return { ...prepared, mask, productMaskConfidence: detected.confidence, productMaskSubjectRatio: detected.subjectRatio };
+}
+
 function generationWarnings(input, body, edit) {
-  const output = targetImageSize(input.ratio, input.resolution || "1k");
+  const output = resolveTargetImageSize(input);
   const warnings = [];
   if (body.size !== `${output.width}x${output.height}`) {
     warnings.push(`模型按原生尺寸 ${body.size} 生成，已由本机处理为 ${output.width}x${output.height}。`);
@@ -553,8 +801,10 @@ export async function generateImages(config = {}, input = {}, {
   sourceImageOverride = null,
 } = {}) {
   const resolved = resolveModelConfig(config, { env });
-  const prepared = await prepareEditFiles(input, referenceImages, maskImage, sourceImageOverride);
+  let prepared = await prepareEditFiles(input, referenceImages, maskImage, sourceImageOverride);
   const edit = prepared.references.length > 0;
+  const editIntent = edit ? oneOf(input.editIntent, IMAGE_EDIT_INTENTS, "图片编辑模式", prepared.mask ? "local" : "redraw") : undefined;
+  const compositionMode = edit ? oneOf(input.compositionMode, COMPOSITION_MODES, "主体构图方式", "keep") : undefined;
   if (prepared.mask && input.editMode && !["mask", "annotation"].includes(input.editMode)) {
     throw imageError("蒙版文件与当前图片编辑方式不匹配。", { code: "IMAGE_EDIT_MODE_MISMATCH" });
   }
@@ -566,8 +816,14 @@ export async function generateImages(config = {}, input = {}, {
     throw imageError("框选批注需要待编辑原图、批注图和编辑蒙版。", { code: "IMAGE_EDIT_ANNOTATION_MISSING" });
   }
   if (editMode && !edit) throw imageError("图片编辑缺少待编辑原图。", { code: "IMAGE_EDIT_SOURCE_MISSING" });
+  if (editIntent === "local" && !prepared.mask) {
+    throw imageError("局部编辑必须先框选或提供蒙版。", { code: "IMAGE_EDIT_MASK_MISSING" });
+  }
   const referenceMode = !editMode && edit ? (input.sourceImageId ? "source" : "reference") : undefined;
-  const body = buildImageGenerationRequest({ ...input, editMode, referenceMode }, resolved.imageModel);
+  const normalizedInput = { ...input, editMode, editIntent, compositionMode, referenceMode };
+  const body = buildImageGenerationRequest(normalizedInput, resolved.imageModel);
+  if (editIntent === "outpaint") prepared = await prepareOutpaintFiles(prepared, body.size, compositionMode);
+  else if (editIntent === "background") prepared = await prepareBackgroundFiles(prepared, compositionMode);
   let data;
   try {
     data = await requestModelApiJson(edit ? imageEditEndpoint(resolved.baseUrl) : imageGenerationEndpoint(resolved.baseUrl), {
@@ -586,14 +842,17 @@ export async function generateImages(config = {}, input = {}, {
   }
   const parsed = parseImageGenerationResponse(data, { format: body.output_format });
   const images = [];
-  for (const image of parsed) images.push(await transformGeneratedImage(image, input, { fetchImpl, signal, remoteImageTimeoutMs }));
-  if (editMode === "annotation") await assertMaskedEditChanged(prepared, images);
-  const output = targetImageSize(input.ratio, input.resolution || "1k");
+  for (const image of parsed) images.push(await transformGeneratedImage(image, normalizedInput, { fetchImpl, signal, remoteImageTimeoutMs }));
+  const validatedImages = prepared.mask ? await validateAndRankMaskedEdits(prepared, images) : images;
+  if (!prepared.mask && edit) await assertReferenceEditChanged(prepared, validatedImages, normalizedInput);
+  const composedImages = [];
+  for (const image of validatedImages) composedImages.push(await applyCopyLayer(image, normalizedInput));
+  const output = resolveTargetImageSize(normalizedInput);
   return {
-    images,
+    images: composedImages,
     model: resolved.imageModel,
     requestedCount: body.n,
-    generatedCount: images.length,
+    generatedCount: composedImages.length,
     size: `${output.width}x${output.height}`,
     nativeRequestSize: body.size,
     created: Number.isFinite(data.created) ? data.created : null,
@@ -603,6 +862,11 @@ export async function generateImages(config = {}, input = {}, {
       mode: edit ? "edit" : "generate",
       referenceImageCount: prepared.references.length,
       maskApplied: Boolean(prepared.mask),
+      editIntent: editIntent || null,
+      compositionMode: compositionMode || null,
+      candidateRankingApplied: Boolean(prepared.mask && images.length > 1),
+      outpaintPrepared: Boolean(prepared.outpaintPrepared),
+      productMaskConfidence: prepared.productMaskConfidence ?? null,
       ratio: input.ratio,
       resolution: input.resolution || "1k",
       nativeSize: body.size,
@@ -660,7 +924,9 @@ function normalizeStoredRecord(record) {
     format,
     prompt: String(record.prompt || "").slice(0, 4_000),
     negativePrompt: String(record.negativePrompt || "").slice(0, 2_000),
-    ratio: IMAGE_RATIOS[record.ratio] ? record.ratio : "1:1",
+    ratio: IMAGE_RATIOS[record.ratio] || record.ratio === "custom" ? record.ratio : "1:1",
+    customWidth: record.ratio === "custom" ? Number(record.customWidth) || undefined : undefined,
+    customHeight: record.ratio === "custom" ? Number(record.customHeight) || undefined : undefined,
     resolution: RESOLUTION_LONG_EDGES[record.resolution] ? record.resolution : "1k",
     quality: QUALITIES.has(record.quality) ? record.quality : "medium",
     background: BACKGROUNDS.has(record.background) ? record.background : "auto",
@@ -671,13 +937,30 @@ function normalizeStoredRecord(record) {
     nativeSize: String(record.nativeSize || ""),
     outputSize: String(record.outputSize || ""),
     upscaled: Boolean(record.upscaled),
-    processing: ["native", "cropped", "upscaled"].includes(record.processing) ? record.processing : "native",
+    processing: ["native", "cropped", "upscaled", "fitted"].includes(record.processing) ? record.processing : "native",
+    validation: record.validation && Number.isFinite(record.validation.score) ? {
+      score: Math.max(0, Math.min(100, Math.round(record.validation.score))),
+      passed: record.validation.passed !== false,
+      changedRatio: Number(record.validation.changedRatio) || 0,
+      meanDelta: Number(record.validation.meanDelta) || 0,
+      protectedChangedRatio: Number(record.validation.protectedChangedRatio) || 0,
+      protectedMeanDelta: Number(record.validation.protectedMeanDelta) || 0,
+    } : undefined,
     isFavorite: Boolean(record.isFavorite),
     isArchived: Boolean(record.isArchived),
     revisedPrompt: String(record.revisedPrompt || "").slice(0, 4_000),
     parentImageId: IMAGE_ID_PATTERN.test(record.parentImageId || "") ? record.parentImageId : null,
     referenceImageCount: Math.max(0, Math.min(MAX_REFERENCE_FILES, Number(record.referenceImageCount) || 0)),
     maskApplied: Boolean(record.maskApplied),
+    editIntent: IMAGE_EDIT_INTENTS.has(record.editIntent) ? record.editIntent : undefined,
+    compositionMode: COMPOSITION_MODES.has(record.compositionMode) ? record.compositionMode : undefined,
+    productMaskConfidence: Number.isFinite(record.productMaskConfidence) ? Math.max(0, Math.min(1, record.productMaskConfidence)) : undefined,
+    copy: record.copy && typeof record.copy.text === "string" ? {
+      text: record.copy.text.slice(0, 500),
+      position: COPY_POSITIONS.has(record.copy.position) ? record.copy.position : "bottom",
+      style: COPY_STYLES.has(record.copy.style) ? record.copy.style : "light",
+      scale: COPY_SCALES.has(record.copy.scale) ? record.copy.scale : "medium",
+    } : undefined,
   };
 }
 
@@ -757,6 +1040,8 @@ export async function saveGeneratedImages(images, context = {}) {
           prompt: context.prompt,
           negativePrompt: context.negativePrompt,
           ratio: context.ratio,
+          customWidth: context.customWidth,
+          customHeight: context.customHeight,
           resolution: context.resolution || "1k",
           quality: context.quality,
           background: context.background,
@@ -768,12 +1053,17 @@ export async function saveGeneratedImages(images, context = {}) {
           outputSize: image.outputSize,
           upscaled: image.upscaled,
           processing: image.processing,
+          validation: image.validation,
           isFavorite: false,
           isArchived: false,
           revisedPrompt: image.revisedPrompt,
           parentImageId: context.sourceImageId,
           referenceImageCount: context.referenceImageCount,
           maskApplied: context.maskApplied,
+          editIntent: context.editIntent,
+          compositionMode: context.compositionMode,
+          productMaskConfidence: context.productMaskConfidence,
+          copy: image.copy,
         }));
       }
       const manifest = await readManifest();

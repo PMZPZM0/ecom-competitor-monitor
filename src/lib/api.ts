@@ -1,4 +1,4 @@
-import type { Analysis, AuthSession, CaptureQueueStatus, ImageGenerationJob, ImageGenerationRequest, ImageGenerationResponse, ImageLibraryItem, LarkCliStatus, LocalEvidenceStatus, LocalImportCommitResult, LocalImportPreview, ModelCatalog, ModelCatalogRequest, ModelConfigPatch, ModelConfigTestPayload, ModelConfigTestResult, MonitorChannel, Overview, PhotoshopOpenResult, PhotoshopSyncResult, Product, RawDataCaptureResult, RunRecord, Snapshot, UpdateInfo } from '../types/domain'
+import type { Analysis, AuthSession, CaptureQueueStatus, ExcelSyncResult, ExcelSyncStatus, ImageGenerationJob, ImageGenerationRequest, ImageGenerationResponse, ImageLibraryItem, LarkCliStatus, LocalEvidenceStatus, LocalImportCommitResult, LocalImportPreview, ModelCatalog, ModelCatalogRequest, ModelConfigPatch, ModelConfigTestPayload, ModelConfigTestResult, MonitorChannel, Overview, PhotoshopOpenResult, PhotoshopSyncResult, Product, RawDataCaptureResult, RunRecord, Snapshot, UpdateInfo } from '../types/domain'
 import type { ProductRecognitionResult, PromptEnhancementResult, PromptGenerationRequest, PromptGenerationResult, PromptHistoryItem, PromptProductProfile, PromptReferenceFiles, PromptStudioWorkspace, PromptStylePreset, QuickPromptGenerationResult, QuickPromptRequest } from '../features/prompt-studio/types'
 
 const baseUrl = import.meta.env.VITE_API_BASE || ''
@@ -60,9 +60,11 @@ export const api = {
   deleteProduct: (id: string) => request<void>(`/api/products/${id}`, { method: 'DELETE' }),
   deleteProductsBatch: (ids: string[]) =>
     request<{ requested: number; deleted: number }>('/api/products/batch-delete', { method: 'POST', body: JSON.stringify({ ids }) }),
-  captureProduct: (id: string, captureKind: 'price' | 'buyer-show' | 'materials' = 'price') => request<{ product: Product; run: RunRecord }>(`/api/products/${id}/capture`, { method: 'POST', body: JSON.stringify({ captureKind }) }),
+  captureProduct: (id: string, captureKind: 'price' | 'buyer-show' | 'materials' = 'price', rollbackUninitialized = false) => request<{ product: Product; run: RunRecord }>(`/api/products/${id}/capture`, { method: 'POST', body: JSON.stringify({ captureKind, rollbackUninitialized }) }),
   captureAllAccountViews: (id: string) => request<{ product: Product; run: RunRecord }>(`/api/products/${id}/capture-all-accounts`, { method: 'POST' }),
   retryBuyerShows: (id: string) => request<{ ok: boolean; product: Product; capture: NonNullable<Snapshot['buyerShowCapture']> }>(`/api/products/${id}/buyer-shows/retry`, { method: 'POST' }),
+  captureSearchMainImage: (id: string, force = false) => request<{ ok: boolean; status: NonNullable<Product['searchMainImageStatus']>; product: Product; message: string; cached?: boolean }>(`/api/products/${id}/search-main-image`, { method: 'POST', body: JSON.stringify({ force }) }),
+  reparseProductLocalEvidence: (id: string, kind: 'materials' | 'buyer-show' | 'search-main-image') => request<{ ok: boolean; kind: string; product: Product; message: string }>(`/api/products/${id}/reparse-local-evidence`, { method: 'POST', body: JSON.stringify({ kind }) }),
   productSnapshots: (id: string) => request<Snapshot[]>(`/api/products/${id}/snapshots?limit=96`),
   openProduct: (id: string, sessionId?: string) => request<{ ok: boolean; url: string; accountName: string; accountType: 'normal' | 'gift' | 'vip88' }>(`/api/products/${id}/open`, { method: 'POST', body: JSON.stringify({ sessionId }) }),
   captureProductsBatch: (ids: string[], captureKind: 'price' | 'buyer-show' | 'materials' = 'price') => request<{ ok: boolean; run: RunRecord }>('/api/products/batch-capture', { method: 'POST', body: JSON.stringify({ ids, captureKind }) }),
@@ -173,6 +175,9 @@ export const api = {
   updateLocalEvidenceSettings: (directory: string | null) =>
     request<LocalEvidenceStatus>('/api/local-evidence', { method: 'PATCH', body: JSON.stringify({ directory }) }),
   deleteLocalEvidence: () => request<LocalEvidenceStatus>('/api/local-evidence', { method: 'DELETE' }),
+  excelSyncStatus: () => request<ExcelSyncStatus>('/api/excel-sync'),
+  syncExcelWorkbook: () => request<ExcelSyncResult>('/api/excel-sync/run', { method: 'POST', body: '{}' }),
+  openExcelWorkbook: () => request<{ ok: true; path: string }>('/api/excel-sync/open', { method: 'POST', body: '{}' }),
   runAnalysis: () => request<Analysis>('/api/analysis/run', { method: 'POST' }),
   taobaoOAuthUrl: () =>
     request<{ configured: boolean; url?: string; message?: string }>('/api/auth/taobao/oauth-url'),
@@ -184,8 +189,8 @@ export const api = {
     request<{ ok: boolean }>('/api/auth/taobao/scan/cancel', { method: 'POST', body: JSON.stringify({ profileKey }) }),
   activateAuthSession: (id: string) => request<AuthSession>(`/api/auth/sessions/${id}/activate`, { method: 'POST' }),
   checkAuthSession: (id: string) => request<{ id: string; status?: 'valid' | 'degraded' | 'expired'; loginStatus: 'valid' | 'expired' | 'manual'; checkedAt?: string; message: string; session?: AuthSession }>(`/api/auth/sessions/${id}/check`, { method: 'POST' }),
-  checkAllAuthSessions: () => request<{ total: number; valid: number; degraded: number; expired: number; manual: number }>('/api/auth/sessions/check-all', { method: 'POST' }),
-  reauthorizeAuthSession: (id: string) => request<{ ok: boolean; url: string; message: string; profileKey: string; port: number }>(`/api/auth/sessions/${id}/reauthorize`, { method: 'POST' }),
+  checkAllAuthSessions: () => request<{ total: number; valid: number; identityOnline: number; degraded: number; expired: number; manual: number }>('/api/auth/sessions/check-all', { method: 'POST' }),
+  reauthorizeAuthSession: (id: string) => request<{ ok: boolean; mode: 'silent' | 'interactive'; url: string; message: string; profileKey: string; port: number; session?: AuthSession }>(`/api/auth/sessions/${id}/reauthorize`, { method: 'POST' }),
   deleteAuthSession: (id: string) => request<void>(`/api/auth/sessions/${id}`, { method: 'DELETE' }),
   clearSnapshots: () => request<void>('/api/snapshots', { method: 'DELETE' }),
 }

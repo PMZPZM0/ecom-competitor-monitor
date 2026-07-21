@@ -35,9 +35,14 @@ import { ReferenceImagePicker, type ReferenceImageFile } from './ReferenceImageP
 
 const ratios = [
   { value: '1:1', label: '1:1' },
+  { value: '4:5', label: '4:5' },
   { value: '3:4', label: '3:4' },
+  { value: '2:3', label: '2:3' },
+  { value: '9:16', label: '9:16' },
   { value: '4:3', label: '4:3' },
+  { value: '3:2', label: '3:2' },
   { value: '16:9', label: '16:9' },
+  { value: 'custom', label: '自定义' },
 ] as const
 
 const resolutions = [
@@ -52,9 +57,19 @@ const PROMPT_ENHANCEMENT_OUTBOX_KEY = 'ecommerce-monitor-prompt-enhancement-outb
 type MessageTone = 'neutral' | 'success' | 'error'
 type LibraryView = 'history' | 'favorites'
 type CreationMode = 'product' | 'free'
+type EditIntent = NonNullable<ImageGenerationRequest['editIntent']>
+type CompositionMode = NonNullable<ImageGenerationRequest['compositionMode']>
 type Draft = Pick<ImageGenerationRequest, 'prompt' | 'negativePrompt' | 'ratio' | 'resolution' | 'quality' | 'format' | 'background' | 'count'> & {
   creationMode: CreationMode
   promptReady: boolean
+  customWidth: number
+  customHeight: number
+  editIntent: EditIntent
+  compositionMode: CompositionMode
+  copyText: string
+  copyPosition: NonNullable<ImageGenerationRequest['copyPosition']>
+  copyStyle: NonNullable<ImageGenerationRequest['copyStyle']>
+  copyScale: NonNullable<ImageGenerationRequest['copyScale']>
 }
 type GenerationFiles = { referenceImages?: File[]; maskImage?: Blob }
 type PhotoshopStatus = {
@@ -87,16 +102,15 @@ const defaultDraft: Draft = {
   count: 1,
   creationMode: 'product',
   promptReady: false,
+  customWidth: 1024,
+  customHeight: 1024,
+  editIntent: 'redraw',
+  compositionMode: 'keep',
+  copyText: '',
+  copyPosition: 'bottom',
+  copyStyle: 'light',
+  copyScale: 'medium',
 }
-
-const promptTemplates = [
-  { label: '清理背景', prompt: '清理背景中的杂物，让画面干净整洁，主体位置与构图保持不变。' },
-  { label: '增强质感', prompt: '优化光线、反射与材质质感，让产品更清晰自然，不改变产品形态和颜色。' },
-  { label: '移动配件', prompt: '优化配件的摆放位置与角度，使画面协调自然，其余内容保持不变。' },
-  { label: '白底主图', prompt: '改为纯净白色背景，保留真实自然的接触阴影，产品主体完整居中。' },
-  { label: '厨房场景', prompt: '将背景改为干净整洁的现代厨房场景，光线自然，产品主体保持不变。' },
-  { label: '优化文案区', prompt: '调整留白，为已确认的文字信息安排清晰的排版区域；文字内容继续逐字保留。' },
-] as const
 
 function loadDraft(): Draft {
   try {
@@ -113,6 +127,14 @@ function loadDraft(): Draft {
       background: ['auto', 'opaque', 'transparent'].includes(saved.background || '') ? saved.background as Draft['background'] : 'auto',
       count: saved.count === 2 || saved.count === 4 ? saved.count : 1,
       creationMode: saved.creationMode === 'free' ? 'free' : 'product',
+      customWidth: Number.isInteger(saved.customWidth) ? Math.min(4096, Math.max(512, saved.customWidth as number)) : 1024,
+      customHeight: Number.isInteger(saved.customHeight) ? Math.min(4096, Math.max(512, saved.customHeight as number)) : 1024,
+      editIntent: ['background', 'outpaint', 'redraw'].includes(saved.editIntent || '') ? saved.editIntent as EditIntent : 'redraw',
+      compositionMode: saved.compositionMode === 'smart' ? 'smart' : 'keep',
+      copyText: typeof saved.copyText === 'string' ? saved.copyText.slice(0, 500) : '',
+      copyPosition: ['top', 'center', 'bottom'].includes(saved.copyPosition || '') ? saved.copyPosition as Draft['copyPosition'] : 'bottom',
+      copyStyle: saved.copyStyle === 'dark' ? 'dark' : 'light',
+      copyScale: ['small', 'medium', 'large'].includes(saved.copyScale || '') ? saved.copyScale as Draft['copyScale'] : 'medium',
       // Reference images are intentionally not persisted, so a ready prompt cannot
       // safely survive a reload without its original product-image provenance.
       promptReady: false,
@@ -202,12 +224,20 @@ export function ImageWorkbench({ config, active = true, onOpenModelSettings, onE
   const [prompt, setPrompt] = useState(initialDraft.prompt)
   const [negativePrompt, setNegativePrompt] = useState(initialDraft.negativePrompt || '')
   const [ratio, setRatio] = useState<Draft['ratio']>(initialDraft.ratio)
+  const [customWidth, setCustomWidth] = useState(initialDraft.customWidth)
+  const [customHeight, setCustomHeight] = useState(initialDraft.customHeight)
   const [resolution, setResolution] = useState<Draft['resolution']>(initialDraft.resolution)
   const [quality, setQuality] = useState<Draft['quality']>(initialDraft.quality)
   const [format, setFormat] = useState<Draft['format']>(initialDraft.format)
   const [background, setBackground] = useState<Draft['background']>(initialDraft.background)
   const [count, setCount] = useState(initialDraft.count)
   const [creationMode, setCreationMode] = useState<CreationMode>(initialDraft.creationMode)
+  const [editIntent, setEditIntent] = useState<EditIntent>(initialDraft.editIntent)
+  const [compositionMode, setCompositionMode] = useState<CompositionMode>(initialDraft.compositionMode)
+  const [copyText, setCopyText] = useState(initialDraft.copyText)
+  const [copyPosition, setCopyPosition] = useState<Draft['copyPosition']>(initialDraft.copyPosition)
+  const [copyStyle, setCopyStyle] = useState<Draft['copyStyle']>(initialDraft.copyStyle)
+  const [copyScale, setCopyScale] = useState<Draft['copyScale']>(initialDraft.copyScale)
   const [promptReady, setPromptReady] = useState(initialDraft.promptReady)
   const [references, setReferences] = useState<ReferenceImageFile[]>([])
   const [sourceImage, setSourceImage] = useState<ImageLibraryItem | null>(null)
@@ -216,6 +246,8 @@ export function ImageWorkbench({ config, active = true, onOpenModelSettings, onE
   const [message, setMessage] = useState('')
   const [messageTone, setMessageTone] = useState<MessageTone>('neutral')
   const [helpingPrompt, setHelpingPrompt] = useState(false)
+  const [helpingCopy, setHelpingCopy] = useState(false)
+  const [copyFeedback, setCopyFeedback] = useState<{ tone: MessageTone; message: string } | null>(null)
   const [promptHelpFeedback, setPromptHelpFeedback] = useState<{ tone: MessageTone; message: string } | null>(null)
   const [enqueuing, setEnqueuing] = useState(false)
   const [jobs, setJobs] = useState<ImageGenerationJob[]>([])
@@ -344,10 +376,18 @@ export function ImageWorkbench({ config, active = true, onOpenModelSettings, onE
       background,
       count,
       creationMode,
+      customWidth,
+      customHeight,
+      editIntent,
+      compositionMode,
+      copyText,
+      copyPosition,
+      copyStyle,
+      copyScale,
       promptReady: false,
     }
     window.localStorage.setItem(DRAFT_KEY, JSON.stringify(draft))
-  }, [background, count, creationMode, format, negativePrompt, prompt, quality, ratio, resolution])
+  }, [background, compositionMode, copyPosition, copyScale, copyStyle, copyText, count, creationMode, customHeight, customWidth, editIntent, format, negativePrompt, prompt, quality, ratio, resolution])
 
   useEffect(() => {
     if (!incomingDraft || incomingDraftIdRef.current === incomingDraft.id) return
@@ -405,6 +445,7 @@ export function ImageWorkbench({ config, active = true, onOpenModelSettings, onE
   }, [hasActiveJobs, loadJobs])
 
   function currentRequest(): ImageGenerationRequest {
+    const hasEditSource = Boolean(sourceImage || references.length)
     return {
       prompt: prompt.trim(),
       negativePrompt: negativePrompt.trim() || undefined,
@@ -415,6 +456,9 @@ export function ImageWorkbench({ config, active = true, onOpenModelSettings, onE
       background,
       count,
       sourceImageId: sourceImage?.id,
+      ...(ratio === 'custom' ? { customWidth, customHeight } : {}),
+      ...(hasEditSource ? { editIntent, compositionMode } : {}),
+      ...(copyText.trim() ? { copyText: copyText.trim(), copyPosition, copyStyle, copyScale } : {}),
     }
   }
 
@@ -437,7 +481,16 @@ export function ImageWorkbench({ config, active = true, onOpenModelSettings, onE
     setPromptHelpFeedback(null)
   }
 
+  function selectEditIntent(nextIntent: EditIntent) {
+    setEditIntent(nextIntent)
+    if (count === 1) setCount(2)
+    if (nextIntent === 'outpaint') setCompositionMode('keep')
+    setPromptReady(false)
+    promptEditRevisionRef.current += 1
+  }
+
   function changeReferences(nextReferences: ReferenceImageFile[]) {
+    if (!references.length && nextReferences.length && count === 1) setCount(2)
     setReferences(nextReferences)
     setPromptReady(false)
     promptEditRevisionRef.current += 1
@@ -521,7 +574,14 @@ export function ImageWorkbench({ config, active = true, onOpenModelSettings, onE
         userRequest: request.prompt,
         creationMode,
         saveHistory: false,
-        parameters: { ratio: request.ratio, resolution: request.resolution, quality: request.quality, background: request.background },
+        parameters: {
+          ratio: request.ratio === 'custom'
+            ? customWidth / customHeight < 0.84 ? '3:4' : customWidth / customHeight > 1.19 ? '4:3' : '1:1'
+            : request.ratio,
+          resolution: request.resolution,
+          quality: request.quality,
+          background: request.background,
+        },
       }
       let promptStorage: Storage | null = null
       try { promptStorage = window.localStorage } catch { /* Continue with in-memory idempotency for this attempt. */ }
@@ -550,6 +610,44 @@ export function ImageWorkbench({ config, active = true, onOpenModelSettings, onE
       setPromptHelpFeedback({ tone: 'error', message: promptHelpErrorMessage(error) })
     } finally {
       setHelpingPrompt(false)
+    }
+  }
+
+  async function helpWriteCopy() {
+    if (!prompt.trim() && !copyText.trim()) {
+      setCopyFeedback({ tone: 'error', message: '先写画面需求或现有文案，再让 AI 提取和润色。' })
+      return
+    }
+    if (!promptConfigured) {
+      setCopyFeedback({ tone: 'error', message: 'AI 文案需要先配置文字模型。' })
+      onOpenModelSettings()
+      return
+    }
+    setHelpingCopy(true)
+    setCopyFeedback({ tone: 'neutral', message: '正在识别参考图文字并整理成品文案…' })
+    try {
+      const productReferenceFiles = await promptFilesForEnhancement([...references], sourceImage)
+      const promptRatio = ratio === 'custom'
+        ? customWidth / customHeight < 0.84 ? '3:4' : customWidth / customHeight > 1.19 ? '4:3' : '1:1'
+        : ratio
+      const result = await api.quickGeneratePrompt({
+        clientRequestId: crypto.randomUUID(),
+        userRequest: copyText.trim()
+          ? `为当前电商图片润色以下成品文案。保留明确的品牌、型号、价格和活动事实，不要补造信息；只返回最适合实际排版的简洁文案方案：\n${copyText.trim()}\n画面需求：${prompt.trim()}`
+          : `根据当前电商图片和参考图，提取可辨认的现有文字，并为画面策划简洁、可直接排版的成品文案。不要补造品牌、型号、价格或活动信息。画面需求：${prompt.trim()}`,
+        parameters: { ratio: promptRatio, resolution, quality, background },
+        creationMode,
+        saveHistory: false,
+      }, { productReferenceFiles, styleReferenceFiles: [] })
+      const copy = result.request.copy
+      const lines = [copy.title, copy.subtitle, ...copy.sellingPoints, copy.price, copy.campaignInfo, ...copy.additionalText].map((value) => value.trim()).filter(Boolean)
+      if (!lines.length) throw new Error('AI 没有返回可排版文案；参考图可能没有清晰文字，请先手动输入一句再润色。')
+      setCopyText([...new Set(lines)].join('\n'))
+      setCopyFeedback({ tone: 'success', message: `文案已由 ${result.model} 提取并填回，可继续修改。` })
+    } catch (error) {
+      setCopyFeedback({ tone: 'error', message: error instanceof Error ? error.message : 'AI 文案处理失败。' })
+    } finally {
+      setHelpingCopy(false)
     }
   }
 
@@ -611,19 +709,6 @@ export function ImageWorkbench({ config, active = true, onOpenModelSettings, onE
     } finally {
       setQueueClearing(false)
     }
-  }
-
-  function applyPromptTemplate(template: string) {
-    const nextPrompt = prompt.trim() ? `${prompt.trim()}\n${template}` : template
-    if (nextPrompt.length > IMAGE_PROMPT_LIMITS.prompt) {
-      showInputError(`添加模板后会超过 ${IMAGE_PROMPT_LIMITS.prompt} 个字符，原提示词未被截断。请先精简内容。`)
-      return
-    }
-    setPrompt(nextPrompt)
-    promptEditRevisionRef.current += 1
-    setPromptReady(false)
-    setPromptHelpFeedback(null)
-    clearInputError()
   }
 
   function replaceLibraryItem(updated: ImageLibraryItem) {
@@ -755,6 +840,10 @@ export function ImageWorkbench({ config, active = true, onOpenModelSettings, onE
     setQuality(item.quality)
     setFormat(item.format)
     setBackground(item.background)
+    setCopyText(item.copy?.text || '')
+    setCopyPosition(item.copy?.position || 'bottom')
+    setCopyStyle(item.copy?.style || 'light')
+    setCopyScale(item.copy?.scale || 'medium')
     setSelectedImage(null)
     setLibraryView('history')
     setMessage('历史参数已填入生成设置，确认后再生成。')
@@ -766,6 +855,9 @@ export function ImageWorkbench({ config, active = true, onOpenModelSettings, onE
     references.forEach((image) => URL.revokeObjectURL(image.previewUrl))
     setReferences([])
     setSourceImage(item)
+    setEditIntent('redraw')
+    setCompositionMode('keep')
+    setCount(2)
     setCreationMode('product')
     setPromptReady(false)
     promptEditRevisionRef.current += 1
@@ -773,13 +865,19 @@ export function ImageWorkbench({ config, active = true, onOpenModelSettings, onE
     setPrompt('')
     setNegativePrompt('')
     setRatio(item.ratio)
+    setCustomWidth(item.customWidth || item.width || 1024)
+    setCustomHeight(item.customHeight || item.height || 1024)
     setResolution(item.resolution)
     setQuality(item.quality)
     setFormat(item.format)
     setBackground(item.background)
+    setCopyText('')
+    setCopyPosition('bottom')
+    setCopyStyle('light')
+    setCopyScale('medium')
     setSelectedImage(null)
     setLibraryView('history')
-    setMessage('已进入严格保留原图模式并同步原图参数。只需填写想修改的内容。')
+    setMessage('已载入原图和原参数。你的修改内容会原样发送给图片模型，不追加隐藏提示词。')
     setMessageTone('success')
     scrollToSettings()
   }
@@ -789,7 +887,7 @@ export function ImageWorkbench({ config, active = true, onOpenModelSettings, onE
     const extension = blob.type === 'image/webp' ? 'webp' : 'png'
     const filename = `${mode === 'mask' ? 'mask' : 'annotation'}-${item.id}.${extension}`
     const file = new File([blob], filename, { type: blob.type || 'image/png' })
-    const request = {
+    const request: ImageGenerationRequest = {
       ...currentRequest(),
       prompt: editPrompt.trim(),
       negativePrompt: undefined,
@@ -798,9 +896,15 @@ export function ImageWorkbench({ config, active = true, onOpenModelSettings, onE
       quality: item.quality,
       format: item.format,
       background: item.background,
-      count: 1,
+      count: 2,
       sourceImageId: item.id,
       editMode: mode,
+      editIntent: 'local',
+      compositionMode: 'keep',
+      copyText: undefined,
+      copyPosition: undefined,
+      copyStyle: undefined,
+      copyScale: undefined,
     }
     const files = mode === 'mask'
       ? { maskImage: file }
@@ -844,7 +948,7 @@ export function ImageWorkbench({ config, active = true, onOpenModelSettings, onE
           <button type="button" onClick={() => setSelectedImage(item)} className="min-w-0 flex-1 px-3 py-2.5 text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-blue-500">
             <div className="line-clamp-1 text-xs font-medium text-slate-700">{visiblePrompt(item.prompt) || '未命名图片'}</div>
             <div className="mt-1 flex items-center justify-between gap-2 text-[11px] text-slate-400"><span>{new Date(item.createdAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</span><span className="truncate uppercase">{item.resolution}{item.upscaled ? ' 增强' : ''} · {item.format}</span></div>
-            {(item.nativeSize || item.outputSize) && <div className="mt-1 truncate text-[10px] text-slate-400">{item.nativeSize && item.outputSize && item.nativeSize !== item.outputSize ? `${item.nativeSize} → ${item.outputSize}` : item.outputSize || item.nativeSize}</div>}
+            {(item.nativeSize || item.outputSize) && <div className="mt-1 flex items-center gap-2 truncate text-[10px] text-slate-400"><span className="truncate">{item.nativeSize && item.outputSize && item.nativeSize !== item.outputSize ? `${item.nativeSize} → ${item.outputSize}` : item.outputSize || item.nativeSize}</span>{item.validation && <span className="shrink-0 font-semibold text-emerald-600">保护 {item.validation.score} 分</span>}</div>}
           </button>
           <div className="flex shrink-0 items-center pr-2">
             <button type="button" onClick={() => void downloadImage(item)} disabled={Boolean(actionBusy)} className="inline-flex h-8 w-8 items-center justify-center rounded-md text-slate-400 transition hover:bg-blue-50 hover:text-blue-600 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 disabled:opacity-50" title="下载图片" aria-label="下载这张图片">{downloadBusy ? <LoaderCircle className="h-4 w-4 animate-spin" /> : <Download className="h-4 w-4" />}</button>
@@ -855,6 +959,7 @@ export function ImageWorkbench({ config, active = true, onOpenModelSettings, onE
   }
 
   const selectedBusy = selectedImage && actionBusy.endsWith(`:${selectedImage.id}`) ? actionBusy.split(':')[0] : ''
+  const hasEditSource = Boolean(sourceImage || references.length)
 
   return (
     <>
@@ -886,6 +991,21 @@ export function ImageWorkbench({ config, active = true, onOpenModelSettings, onE
               onError={(error) => showInputError(error)}
             />
 
+            {hasEditSource && <section aria-labelledby="image-edit-mode-title">
+              <div className="flex items-center justify-between gap-2"><h3 id="image-edit-mode-title" className="text-sm font-medium text-slate-800">编辑方式</h3><span className="text-[11px] text-slate-400">局部修改请在图片详情点“批注编辑”</span></div>
+              <div className="mt-2 grid grid-cols-3 gap-1 rounded-md bg-slate-100 p-1">
+                {([
+                  ['redraw', '自由重绘', '允许整体变化'],
+                  ['background', '换背景', '主体位置优先保留'],
+                  ['outpaint', '智能扩图', '扩画布不裁主体'],
+                ] as const).map(([value, label, note]) => <button key={value} type="button" aria-pressed={editIntent === value} onClick={() => selectEditIntent(value)} className={`min-h-14 rounded px-2 py-1.5 text-left transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 ${editIntent === value ? 'bg-white text-slate-950 shadow-sm' : 'text-slate-500 hover:text-slate-800'}`}><span className="block text-xs font-semibold">{label}</span><span className="mt-0.5 block text-[10px] leading-4">{note}</span></button>)}
+              </div>
+              <div className="mt-2 flex items-center justify-between gap-3 rounded-md bg-blue-50/80 px-3 py-2">
+                <div><div className="text-xs font-medium text-blue-900">主体构图</div><div className="mt-0.5 text-[11px] text-blue-700">{compositionMode === 'keep' ? '尽量保持原位置和比例' : '允许模型重新安排主体位置'}</div></div>
+                <div className="flex shrink-0 gap-1 rounded-md bg-white/80 p-1" role="group" aria-label="主体构图方式">{([['keep', '保持位置'], ['smart', '智能重排']] as const).map(([value, label]) => <button key={value} type="button" aria-pressed={compositionMode === value} onClick={() => setCompositionMode(value)} className={`h-8 rounded px-2 text-[11px] font-semibold ${compositionMode === value ? 'bg-blue-600 text-white' : 'text-slate-500 hover:bg-white'}`}>{label}</button>)}</div>
+              </div>
+            </section>}
+
             <div>
               <div className="flex flex-wrap items-center justify-between gap-2">
                 <label className="text-sm font-medium text-slate-800" htmlFor="image-generation-prompt">{sourceImage ? '想修改什么？' : '你想生成什么？'}</label>
@@ -897,14 +1017,20 @@ export function ImageWorkbench({ config, active = true, onOpenModelSettings, onE
                   </Button>
                 </div>
               </div>
-              {sourceImage && <p className="mt-1.5 text-xs leading-5 text-slate-500">只写想修改的部分。未指定的产品结构、颜色、文字和视角会尽量保持。</p>}
+              {sourceImage && <p className="mt-1.5 text-xs leading-5 text-slate-500">只写你真正想要的修改；系统会原样发送，不追加隐藏规则或审美模板。</p>}
               <textarea id="image-generation-prompt" value={prompt} maxLength={IMAGE_PROMPT_LIMITS.prompt} rows={5} required onChange={(event) => { setPrompt(event.target.value); promptEditRevisionRef.current += 1; clearInputError() }} placeholder={sourceImage ? '例如：把背景改成明亮的现代厨房，产品和文字保持原样' : creationMode === 'product' ? '例如：把产品放进明亮的现代厨房，画面干净，产品保持原样' : '例如：雨后的未来城市街道，电影感夜景，蓝绿色灯光'} className="mt-2 w-full resize-y rounded-md border border-slate-200 bg-white px-3 py-2.5 text-sm leading-6 text-slate-900 outline-none transition placeholder:text-slate-400 focus:border-blue-500 focus:ring-2 focus:ring-blue-100" />
               {promptHelpFeedback && <p className={`mt-2 flex items-start gap-1.5 text-xs leading-5 ${promptHelpFeedback.tone === 'error' ? 'text-red-600' : promptHelpFeedback.tone === 'success' ? 'text-emerald-700' : 'text-slate-600'}`} role={promptHelpFeedback.tone === 'error' ? 'alert' : 'status'} aria-live="polite">{helpingPrompt ? <LoaderCircle className="mt-0.5 h-3.5 w-3.5 shrink-0 animate-spin" /> : promptHelpFeedback.tone === 'error' ? <CircleAlert className="mt-0.5 h-3.5 w-3.5 shrink-0" /> : promptHelpFeedback.tone === 'success' ? <Check className="mt-0.5 h-3.5 w-3.5 shrink-0" /> : null}<span>{promptHelpFeedback.message}</span></p>}
-              <div className="mt-2 flex flex-wrap gap-1.5" aria-label="常用需求">{promptTemplates.map((template) => <button key={template.label} type="button" onClick={() => applyPromptTemplate(template.prompt)} className="rounded-md border border-slate-200 bg-white px-2 py-1 text-[11px] font-medium text-slate-600 transition hover:border-blue-200 hover:bg-blue-50 hover:text-blue-700">{template.label}</button>)}</div>
               <span className="mt-1 block text-right text-xs text-slate-400">{prompt.length}/{IMAGE_PROMPT_LIMITS.prompt}</span>
             </div>
 
-            <fieldset><legend className="text-sm font-medium text-slate-800">画面比例</legend><div className="mt-2 grid grid-cols-4 gap-1 rounded-md bg-slate-100 p-1">{ratios.map((item) => <button key={item.value} type="button" aria-pressed={ratio === item.value} onClick={() => setRatio(item.value)} className={`h-9 rounded text-xs font-semibold transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 ${ratio === item.value ? 'bg-white text-slate-950 shadow-sm' : 'text-slate-500 hover:text-slate-800'}`}>{item.label}</button>)}</div>{sourceRatioChanged && <p className="mt-1.5 text-xs leading-5 text-amber-700">比例与原图不同，只会为适配新画布进行必要的扩图或裁切。</p>}</fieldset>
+            <fieldset><legend className="text-sm font-medium text-slate-800">画面比例</legend><div className="mt-2 grid grid-cols-3 gap-1 rounded-md bg-slate-100 p-1">{ratios.map((item) => <button key={item.value} type="button" aria-pressed={ratio === item.value} onClick={() => setRatio(item.value)} className={`h-9 rounded text-xs font-semibold transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 ${ratio === item.value ? 'bg-white text-slate-950 shadow-sm' : 'text-slate-500 hover:text-slate-800'}`}>{item.label}</button>)}</div>{ratio === 'custom' && <div className="mt-2 grid grid-cols-[1fr_auto_1fr] items-end gap-2"><label className="text-xs text-slate-600">宽度<input type="number" min={512} max={4096} step={1} value={customWidth} onChange={(event) => setCustomWidth(Math.min(4096, Math.max(512, Number(event.target.value) || 512)))} className="mt-1 h-9 w-full rounded-md border border-slate-200 bg-white px-2 text-sm text-slate-900 outline-none focus:border-blue-500" /></label><span className="pb-2 text-slate-400">×</span><label className="text-xs text-slate-600">高度<input type="number" min={512} max={4096} step={1} value={customHeight} onChange={(event) => setCustomHeight(Math.min(4096, Math.max(512, Number(event.target.value) || 512)))} className="mt-1 h-9 w-full rounded-md border border-slate-200 bg-white px-2 text-sm text-slate-900 outline-none focus:border-blue-500" /></label></div>}{sourceRatioChanged && <p className="mt-1.5 text-xs leading-5 text-amber-700">{editIntent === 'outpaint' ? '将用扩图画布补足新比例，原主体不做中心裁切。' : `最终图片会输出为 ${ratio === 'custom' ? `${customWidth}×${customHeight}` : ratio}；需要保住完整主体时请选择“智能扩图”。`}</p>}</fieldset>
+
+            <section className="rounded-md bg-slate-50/90 p-3" aria-labelledby="image-copy-title">
+              <div className="flex items-center justify-between gap-2"><div><h3 id="image-copy-title" className="text-sm font-medium text-slate-800">成品文案 <span className="font-normal text-slate-400">可选</span></h3><p className="mt-0.5 text-[11px] leading-4 text-slate-500">模型做无字底图，应用再用真实中文字体排版，避免乱码。</p></div><div className="flex shrink-0 items-center gap-1"><Button type="button" variant="secondary" size="sm" onClick={() => void helpWriteCopy()} disabled={helpingCopy || (!prompt.trim() && !copyText.trim())}>{helpingCopy ? <LoaderCircle className="h-3.5 w-3.5 animate-spin" /> : <WandSparkles className="h-3.5 w-3.5" />}{copyText ? 'AI 润色' : 'AI 提取'}</Button>{copyText && <button type="button" onClick={() => { setCopyText(''); setCopyFeedback(null) }} className="px-1.5 text-xs font-medium text-slate-400 hover:text-red-600">清空</button>}</div></div>
+              <textarea value={copyText} maxLength={500} rows={3} onChange={(event) => setCopyText(event.target.value)} placeholder={'例如：\n新春焕新季\n新年好物，美好启程'} className="mt-2 w-full resize-y rounded-md border border-slate-200 bg-white px-3 py-2 text-sm leading-6 text-slate-900 outline-none placeholder:text-slate-400 focus:border-blue-500 focus:ring-2 focus:ring-blue-100" />
+              {copyText && <div className="mt-2 grid grid-cols-3 gap-2"><label className="text-[11px] font-medium text-slate-600">位置<select value={copyPosition} onChange={(event) => setCopyPosition(event.target.value as Draft['copyPosition'])} className="mt-1 h-9 w-full rounded-md border border-slate-200 bg-white px-2 text-xs text-slate-800"><option value="top">顶部</option><option value="center">居中</option><option value="bottom">底部</option></select></label><label className="text-[11px] font-medium text-slate-600">颜色<select value={copyStyle} onChange={(event) => setCopyStyle(event.target.value as Draft['copyStyle'])} className="mt-1 h-9 w-full rounded-md border border-slate-200 bg-white px-2 text-xs text-slate-800"><option value="light">白字</option><option value="dark">深色字</option></select></label><label className="text-[11px] font-medium text-slate-600">字号<select value={copyScale} onChange={(event) => setCopyScale(event.target.value as Draft['copyScale'])} className="mt-1 h-9 w-full rounded-md border border-slate-200 bg-white px-2 text-xs text-slate-800"><option value="small">小</option><option value="medium">标准</option><option value="large">大</option></select></label></div>}
+              {copyFeedback && <p className={`mt-2 text-xs leading-5 ${copyFeedback.tone === 'error' ? 'text-red-600' : copyFeedback.tone === 'success' ? 'text-emerald-700' : 'text-slate-500'}`} role={copyFeedback.tone === 'error' ? 'alert' : 'status'} aria-live="polite">{copyFeedback.message}</p>}
+            </section>
 
             <div className="grid grid-cols-2 gap-3">
               <fieldset><legend className="text-sm font-medium text-slate-800">清晰度</legend><div className="mt-2 grid grid-cols-3 gap-1 rounded-md bg-slate-100 p-1">{resolutions.map((item) => <button key={item.value} type="button" aria-pressed={resolution === item.value} onClick={() => setResolution(item.value)} className={`flex h-10 items-center justify-center gap-1 rounded text-xs font-semibold transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 ${resolution === item.value ? 'bg-white text-slate-950 shadow-sm' : 'text-slate-500 hover:text-slate-800'}`}><span>{item.label}</span></button>)}</div></fieldset>

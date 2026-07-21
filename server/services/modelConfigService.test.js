@@ -281,6 +281,27 @@ test("prompt model test calls the compatible Chat Completions endpoint and accep
   assert.equal(JSON.stringify(result).includes("sk-prompt-model-secret"), false);
 });
 
+test("prompt model test retries temporary 503 responses before reporting failure", async () => {
+  const config = updateModelConfig({ baseUrl: "https://models.example.com/v1" }, {
+    model: "vendor/prompt-model",
+    apiKey: "sk-prompt-retry-secret",
+  }, { env });
+  let calls = 0;
+  const delays = [];
+  const result = await testPromptModel(config, {
+    env,
+    sleep: async (milliseconds) => { delays.push(milliseconds); },
+    fetchImpl: async () => {
+      calls += 1;
+      if (calls < 3) return new Response("Service temporarily unavailable", { status: 503 });
+      return new Response(JSON.stringify({ choices: [{ message: { content: "OK" } }] }), { status: 200 });
+    },
+  });
+  assert.equal(result.ok, true);
+  assert.equal(calls, 3);
+  assert.deepEqual(delays, [400, 1_200]);
+});
+
 test("prompt model test rejects responses without text", async () => {
   const config = updateModelConfig({ baseUrl: "https://models.example.com/v1" }, {
     model: "prompt-model",

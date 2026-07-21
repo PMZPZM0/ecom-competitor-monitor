@@ -18,7 +18,18 @@ test("image routes accept multipart references and persist a manageable local li
   const baseUrl = `http://127.0.0.1:${address.port}`;
   const nativeFetch = globalThis.fetch.bind(globalThis);
   const png = await sharp({ create: { width: 20, height: 20, channels: 4, background: "#336699" } }).png().toBuffer();
-  const annotationResult = await sharp({ create: { width: 20, height: 20, channels: 4, background: "#f4f0e8" } }).png().toBuffer();
+  const annotationPixels = Buffer.alloc(20 * 20 * 4);
+  for (let row = 0; row < 20; row += 1) {
+    for (let column = 0; column < 20; column += 1) {
+      const offset = (row * 20 + column) * 4;
+      const color = column < 10 ? [244, 240, 232] : [51, 102, 153];
+      annotationPixels[offset] = color[0];
+      annotationPixels[offset + 1] = color[1];
+      annotationPixels[offset + 2] = color[2];
+      annotationPixels[offset + 3] = 255;
+    }
+  }
+  const annotationResult = await sharp(annotationPixels, { raw: { width: 20, height: 20, channels: 4 } }).png().toBuffer();
   const maskPixels = Buffer.alloc(1024 * 1024 * 4, 255);
   for (let row = 0; row < 1024; row += 1) {
     for (let column = 0; column < 512; column += 1) maskPixels[(row * 1024 + column) * 4 + 3] = 0;
@@ -29,7 +40,7 @@ test("image routes accept multipart references and persist a manageable local li
   try {
     globalThis.fetch = async (url, init) => {
       upstreamRequest = { url: String(url), init };
-      return new Response(JSON.stringify({ data: [{ b64_json: png.toString("base64") }] }), {
+      return new Response(JSON.stringify({ data: [{ b64_json: annotationResult.toString("base64") }] }), {
         status: 200,
         headers: { "content-type": "application/json" },
       });
@@ -114,8 +125,7 @@ test("image routes accept multipart references and persist a manageable local li
     assert.doesNotMatch(annotation.images[0].prompt, /局部批注编辑任务/);
     assert.equal(annotation.appliedOptions.maskApplied, true);
     assert.ok(upstreamRequest.init.body.get("mask") instanceof Blob);
-    assert.match(String(upstreamRequest.init.body.get("prompt")), /局部批注编辑任务/);
-    assert.match(String(upstreamRequest.init.body.get("prompt")), /修改内容：改成白色陶瓷材质/);
+    assert.equal(String(upstreamRequest.init.body.get("prompt")), `${editInstruction}\n\n负面要求：watermark`);
     await nativeFetch(`${baseUrl}/api/images/${annotation.images[0].id}`, { method: "DELETE" });
     globalThis.fetch = nativeFetch;
     await nativeFetch(`${baseUrl}/api/images/${textOnly.images[0].id}`, { method: "DELETE" });

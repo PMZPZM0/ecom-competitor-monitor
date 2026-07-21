@@ -1,5 +1,5 @@
 import { Archive, BellRing, CircleAlert, CircleCheck, Crown, Download, ExternalLink, FileJson, Gift, Images, LoaderCircle, PauseCircle, PlayCircle, ReceiptText, RotateCw, Save, ShieldCheck, Trash2, UserRound } from 'lucide-react'
-import { lazy, Suspense, useEffect, useRef, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { Badge } from '../../components/ui/badge'
 import { Button } from '../../components/ui/button'
 import { api } from '../../lib/api'
@@ -10,6 +10,7 @@ import type { MonitorChannel, Overview, Product, ProductCaptureOptions, Snapshot
 import { BuyerShowDialog, ImageThumb, VideoLink, type Preview } from './productDisplay'
 import { DiscountDetailDialog } from './DiscountDetailDialog'
 import { PriceVerificationDialog } from './PriceVerificationDialog'
+import { SkuPriceTrend } from './SkuPriceTrend'
 import { scheduleInputParts } from './productSchedule'
 import {
   accountBenefitForSku,
@@ -37,7 +38,6 @@ import {
   type SkuPrice,
 } from './productDisplayUtils'
 
-const SkuPriceTrend = lazy(() => import('./SkuPriceTrend').then((module) => ({ default: module.SkuPriceTrend })))
 const EMPTY_ACCOUNT_CAPTURES: NonNullable<Snapshot['accountCaptures']> = []
 const monitorChannelOptions: Array<{ value: MonitorChannel; label: string }> = [
   { value: 'lowest', label: '最低已验证价' },
@@ -60,6 +60,8 @@ type Props = {
   onSaveSkuMonitorPrice: (product: Product, skuId: string, value: number | null, channel?: MonitorChannel) => Promise<void>
   onCapture: (product: Product, options?: ProductCaptureOptions) => Promise<Product | void>
   onRetryBuyerShows: (product: Product) => Promise<Product>
+  onCaptureSearchMainImage: (product: Product) => Promise<{ ok: boolean; status: NonNullable<Product['searchMainImageStatus']>; product: Product; message: string }>
+  onReparseLocalEvidence: (product: Product, kind: 'materials' | 'buyer-show' | 'search-main-image') => Promise<{ ok: boolean; product: Product; message: string }>
   onLocalImport: (product?: Product) => void
   onDelete: (product: Product) => Promise<void>
   busy?: boolean
@@ -200,9 +202,7 @@ function SkuPricePanel({ product, snapshots, showTrend, accountSessionId, accoun
   return (
     <div className="min-w-0 self-start">
       {showTrend && (
-        <Suspense fallback={<div className="mb-3 h-80 animate-pulse rounded-md bg-slate-100" />}>
-          <SkuPriceTrend snapshots={snapshots} product={product} accountSessionId={accountSessionId} accountType={accountType} accountName={accountName} showMonitorThresholds={isPrimaryAccountView} />
-        </Suspense>
+        <SkuPriceTrend snapshots={snapshots} product={product} accountSessionId={accountSessionId} accountType={accountType} accountName={accountName} showMonitorThresholds={isPrimaryAccountView} />
       )}
       {!isPrimaryAccountView && <div className="mb-3 rounded-lg border border-sky-100 bg-sky-50 px-3 py-2 text-xs leading-5 text-sky-800">当前为 {accountName} 的历史查看视角，不修改监控规则。切回带“监控”标记的账号视角后可设置监控价。</div>}
       <div className="grid gap-3" style={{ gridTemplateColumns: 'repeat(auto-fit, minmax(min(100%, 440px), 1fr))' }}>
@@ -353,7 +353,7 @@ function CaptureButton({ busy, onCapture }: { busy?: boolean; onCapture: () => v
   )
 }
 
-export function ProductMonitorCard({ product, monitor, onToggle, onSchedule, onMediaPreference, onSaveSkuMonitorPrice: persistSkuMonitorPrice, onCapture, onRetryBuyerShows, onLocalImport, onDelete, busy, onPreview, compactContext = false }: Props) {
+export function ProductMonitorCard({ product, monitor, onToggle, onSchedule, onMediaPreference, onSaveSkuMonitorPrice: persistSkuMonitorPrice, onCapture, onRetryBuyerShows, onCaptureSearchMainImage, onReparseLocalEvidence, onLocalImport, onDelete, busy, onPreview, compactContext = false }: Props) {
   const cardRef = useRef<HTMLElement | null>(null)
   const [trendVisible, setTrendVisible] = useState(false)
   const [copiedItemId, setCopiedItemId] = useState(false)
@@ -367,6 +367,7 @@ export function ProductMonitorCard({ product, monitor, onToggle, onSchedule, onM
   const [priceVerificationOpen, setPriceVerificationOpen] = useState(false)
   const [selectedAccountSessionId, setSelectedAccountSessionId] = useState(() => product.lastSnapshot?.primaryAccountSessionId || product.primaryAccountSessionId || '')
   const [retryingBuyerShows, setRetryingBuyerShows] = useState(false)
+  const [refreshingSearchMainImage, setRefreshingSearchMainImage] = useState(false)
   const [operation, setOperation] = useState<OperationStatus | null>(null)
   const operationTimerRef = useRef<number | null>(null)
   const [scheduleModeDraft, setScheduleModeDraft] = useState<NonNullable<Product['monitorScheduleMode']>>(product.monitorScheduleMode === 'once' ? 'once' : 'interval')
@@ -547,6 +548,34 @@ export function ProductMonitorCard({ product, monitor, onToggle, onSchedule, onM
     }
   }
 
+  async function refreshSearchMainImage() {
+    setRefreshingSearchMainImage(true)
+    showOperation({ key: 'search-main-image', tone: 'progress', message: '正在淘宝搜索页按商品 ID 精确匹配搜索主图；价格和其他素材不会重新抓取...' })
+    try {
+      const result = await onCaptureSearchMainImage(product)
+      showOperation({
+        key: 'search-main-image',
+        tone: result.ok ? 'success' : 'error',
+        message: result.message,
+      }, result.ok ? 5000 : 9000)
+    } catch (error) {
+      showOperation({ key: 'search-main-image', tone: 'error', message: error instanceof Error ? error.message : '搜索主图抓取失败。' }, 9000)
+    } finally {
+      setRefreshingSearchMainImage(false)
+    }
+  }
+
+  async function reparseLocalEvidence(kind: 'materials' | 'buyer-show' | 'search-main-image', label: string) {
+    const key = `local-reparse:${kind}`
+    showOperation({ key, tone: 'progress', message: `正在仅从本地${label}证据重新解析；不会打开淘宝，也不会改动价格、监控价或飞书提醒...` })
+    try {
+      const result = await onReparseLocalEvidence(product, kind)
+      showOperation({ key, tone: result.ok ? 'success' : 'error', message: result.message }, result.ok ? 6000 : 9000)
+    } catch (error) {
+      showOperation({ key, tone: 'error', message: error instanceof Error ? error.message : `${label}本地证据重新解析失败。` }, 9000)
+    }
+  }
+
   async function changeMediaPreference(enabled: boolean) {
     setSavingMediaPreference(true)
     showOperation({ key: 'media-preference', tone: 'progress', message: enabled ? '正在开启完整素材抓取...' : '正在关闭完整素材抓取和下载...' })
@@ -704,12 +733,14 @@ export function ProductMonitorCard({ product, monitor, onToggle, onSchedule, onM
               <span className="h-3.5 w-px bg-slate-200" aria-hidden="true" />
               <Button type="button" variant="secondary" size="sm" className="rounded-lg" onClick={() => setBuyerShowOpen(true)} disabled={!buyerShows.length} title={buyerShows.length ? `预览 ${buyerShows.length} 条有效买家秀` : '当前快照暂无有效买家秀，请重新抓取商品'}><Images className="h-4 w-4" />买家秀{buyerShows.length ? ` ${buyerShows.length}` : ''}</Button>
               {!localOnly && <Button type="button" variant="secondary" size="sm" className="w-8 rounded-lg px-0" onClick={retryBuyerShows} disabled={retryingBuyerShows || operation?.tone === 'progress'} title={buyerShowCapture?.status === 'failed' ? '仅重试买家秀' : '单独抓取买家秀'} aria-label={buyerShowCapture?.status === 'failed' ? '仅重试买家秀' : '单独抓取买家秀'}><RotateCw className={`h-4 w-4 ${retryingBuyerShows ? 'animate-spin' : ''}`} /></Button>}
+              {product.lastSnapshot?.buyerShowEvidenceId && <Button type="button" variant="secondary" size="sm" className="rounded-lg px-2" onClick={() => reparseLocalEvidence('buyer-show', '买家秀')} disabled={operation?.tone === 'progress'} title="只读取已保存的买家秀本地证据重新解析，不打开淘宝"><FileJson className="h-4 w-4" />本地解析</Button>}
               {buyerShows.length > 0 && <Button type="button" variant="secondary" size="sm" className="w-8 rounded-lg px-0" onClick={() => runDownload('buyer-shows', '正在整理买家秀图片、视频和文案并生成 ZIP...', downloadBuyerShowsHref(product.id), `${title}_买家秀.zip`)} disabled={operation?.tone === 'progress'} title="下载买家秀 ZIP" aria-label="下载买家秀 ZIP">{operation?.key === 'buyer-shows' && operation.tone === 'progress' ? <LoaderCircle className="h-4 w-4 animate-spin" /> : <Download className="h-4 w-4" />}</Button>}
               {!localOnly && <label className={`inline-flex h-8 cursor-pointer items-center gap-1.5 rounded-lg border px-2.5 text-xs font-medium transition ${captureMediaAssets ? 'border-blue-200 bg-blue-50 text-blue-700' : 'border-slate-200 bg-white text-slate-600 hover:bg-slate-50'}`} title="关闭时只抓价格、800 主图和 SKU 图，且不提供商品素材下载">
                 <input type="checkbox" checked={captureMediaAssets} onChange={(event) => changeMediaPreference(event.target.checked)} disabled={savingMediaPreference || operation?.tone === 'progress'} className="h-3.5 w-3.5 accent-blue-600" />
                 <Archive className="h-3.5 w-3.5" />完整素材
               </label>}
               {captureMediaAssets && <Button type="button" variant="secondary" size="sm" className="w-8 rounded-lg px-0" onClick={captureMaterials} disabled={busy || operation?.tone === 'progress'} title="单独抓取完整素材" aria-label="单独抓取完整素材">{operation?.key === 'materials-capture' && operation.tone === 'progress' ? <LoaderCircle className="h-4 w-4 animate-spin" /> : <RotateCw className="h-4 w-4" />}</Button>}
+              {captureMediaAssets && product.lastSnapshot?.materialEvidenceId && <Button type="button" variant="secondary" size="sm" className="rounded-lg px-2" onClick={() => reparseLocalEvidence('materials', '完整素材')} disabled={operation?.tone === 'progress'} title="只读取已保存的素材本地证据重新解析，不打开淘宝"><FileJson className="h-4 w-4" />本地解析</Button>}
               {captureMediaAssets && <Button type="button" variant="secondary" size="sm" className="w-8 rounded-lg px-0" onClick={() => runDownload('media', '正在整理主图、SKU 图、详情图和视频并生成素材包...', downloadMediaBundleHref(product.id), `${title}_素材包.zip`)} disabled={operation?.tone === 'progress'} title="下载完整素材包" aria-label="下载完整素材包">{operation?.key === 'media' && operation.tone === 'progress' ? <LoaderCircle className="h-4 w-4 animate-spin" /> : <Download className="h-4 w-4" />}</Button>}
             </div>
           </div>
@@ -747,7 +778,17 @@ export function ProductMonitorCard({ product, monitor, onToggle, onSchedule, onM
 
       <div className="product-monitor-content gap-5 border-t border-slate-100 bg-slate-50/70 px-5 py-5">
         <section className="min-w-0" aria-label="商品素材与抓取状态">
-          <ImageThumb src={primary} title={`${title}-800主图第一张`} label="800 主图" className="h-[210px] bg-white" imageClassName="!aspect-auto h-full" onPreview={onPreview} allowDownload={captureMediaAssets} />
+          <div className="grid grid-cols-2 gap-2">
+            <div className="relative min-w-0">
+              <ImageThumb src={product.searchMainImage} title={`${title}-搜索主图`} label="搜索主图" className="h-[132px] bg-white" imageClassName="!aspect-auto h-full" onPreview={onPreview} />
+              {product.searchMainImageEvidenceId && <button type="button" onClick={() => reparseLocalEvidence('search-main-image', '搜索主图')} disabled={busy || operation?.tone === 'progress'} className="absolute right-10 top-1.5 inline-flex h-7 items-center gap-1 rounded-md border border-white/80 bg-white/95 px-2 text-[11px] font-medium text-sky-700 shadow-sm transition hover:text-sky-900 disabled:opacity-50" title="只读取已保存的搜索主图本地证据重新解析，不打开淘宝"><FileJson className="h-3.5 w-3.5" />本地</button>}
+              {!localOnly && <button type="button" onClick={refreshSearchMainImage} disabled={refreshingSearchMainImage || busy || operation?.tone === 'progress'} className="absolute right-1.5 top-1.5 inline-flex h-7 w-7 items-center justify-center rounded-md border border-white/80 bg-white/95 text-slate-600 shadow-sm transition hover:text-sky-700 disabled:opacity-50" title="重新获取搜索主图（只访问一次搜索页，不抓价格）" aria-label="重新获取搜索主图"><RotateCw className={`h-3.5 w-3.5 ${refreshingSearchMainImage ? 'animate-spin' : ''}`} /></button>}
+            </div>
+            <ImageThumb src={primary} title={`${title}-800主图第一张`} label="800 主图" className="h-[132px] bg-white" imageClassName="!aspect-auto h-full" onPreview={onPreview} allowDownload={captureMediaAssets} />
+          </div>
+          <div className={`mt-1.5 truncate text-[11px] ${product.searchMainImageStatus === 'verified' ? 'text-emerald-700' : product.searchMainImageStatus === 'failed' ? 'text-red-600' : 'text-slate-500'}`} title={product.searchMainImageError || ''}>
+            {product.searchMainImageStatus === 'verified' ? '搜索主图 · 精确商品 ID 匹配' : product.searchMainImageStatus === 'failed' ? `搜索主图抓取失败${product.searchMainImageError ? ` · ${product.searchMainImageError}` : ''}` : '搜索主图未获取'}
+          </div>
           {captureMediaAssets && gallery.length > 0 && <div className="mt-2 grid grid-cols-5 gap-1.5">
             {gallery.map((image, index) => (
               <ImageThumb

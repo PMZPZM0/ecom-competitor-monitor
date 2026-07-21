@@ -189,7 +189,7 @@ export function ProductMonitoringWorkspace({
       {attentionCount > 0 && (
         <div className="flex items-start gap-2 rounded-md bg-amber-50 px-3 py-2 text-sm text-amber-900">
           <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" />
-          <span>有 {attentionCount} 项需要处理。打开任务中心查看失败原因；账号失效时可直接前往设置中心重新授权。</span>
+          <span>有 {attentionCount} 项需要处理。打开任务中心查看失败原因；价格同步异常会静默修复，只有账号明确失效时才需要重新扫码。</span>
           <button type="button" onClick={onOpenSettings} className="ml-auto shrink-0 font-medium text-amber-950 hover:underline"><Settings className="mr-1 inline h-3.5 w-3.5" />设置</button>
         </div>
       )}

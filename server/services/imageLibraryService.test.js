@@ -135,6 +135,13 @@ test("a saved source image becomes the first edit image and records transparent 
   const pixels = Buffer.alloc(12 * 12 * 4, 255);
   for (let index = 0; index < 6 * 12; index += 1) pixels[index * 4 + 3] = 0;
   const mask = await sharp(pixels, { raw: { width: 12, height: 12, channels: 4 } }).png().toBuffer();
+  const changedPixels = Buffer.alloc(12 * 12 * 4, 255);
+  for (let index = 0; index < 6 * 12; index += 1) {
+    changedPixels[index * 4] = 17;
+    changedPixels[index * 4 + 1] = 17;
+    changedPixels[index * 4 + 2] = 17;
+  }
+  const changed = await sharp(changedPixels, { raw: { width: 12, height: 12, channels: 4 } }).png().toBuffer();
   let submitted;
   const generated = await generateImages({
     baseUrl: "https://models.example.com/v1",
@@ -153,20 +160,18 @@ test("a saved source image becomes the first edit image and records transparent 
     maskImage: { buffer: mask, mimetype: "image/png", originalname: "mask.png" },
     fetchImpl: async (_url, init) => {
       submitted = init.body;
-      return new Response(JSON.stringify({ data: [{ b64_json: source.toString("base64") }] }), { status: 200 });
+      return new Response(JSON.stringify({ data: [{ b64_json: changed.toString("base64") }] }), { status: 200 });
     },
   });
 
   assert.ok(submitted instanceof FormData);
   assert.ok(submitted.get("image") instanceof Blob);
   assert.ok(submitted.get("mask") instanceof Blob);
-  assert.match(String(submitted.get("prompt")), /透明蒙版区域是唯一允许修改的范围/);
-  assert.match(String(submitted.get("prompt")), /修改内容：replace the transparent area/);
+  assert.equal(String(submitted.get("prompt")), "replace the transparent area");
   assert.equal(generated.appliedOptions.referenceImageCount, 1);
   assert.equal(generated.appliedOptions.maskApplied, true);
 
   let annotationSubmitted;
-  const changed = await sharp({ create: { width: 12, height: 12, channels: 4, background: "#111111" } }).png().toBuffer();
   await generateImages({
     baseUrl: "https://models.example.com/v1",
     imageModel: "gpt-image-2",
@@ -191,9 +196,7 @@ test("a saved source image becomes the first edit image and records transparent 
   });
   assert.equal(annotationSubmitted.getAll("image[]").length, 2);
   assert.ok(annotationSubmitted.get("mask") instanceof Blob);
-  assert.match(String(annotationSubmitted.get("prompt")), /第一张图片是待编辑原图/);
-  assert.match(String(annotationSubmitted.get("prompt")), /最后一张带编号框选或备注点的图片/);
-  assert.match(String(annotationSubmitted.get("prompt")), /修改内容：remove the marked copy/);
+  assert.equal(String(annotationSubmitted.get("prompt")), "remove the marked copy");
   await assert.rejects(generateImages({
     baseUrl: "https://models.example.com/v1",
     imageModel: "gpt-image-2",

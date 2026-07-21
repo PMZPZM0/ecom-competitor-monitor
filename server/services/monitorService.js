@@ -1,9 +1,9 @@
 import { newId, readDb, updateDb } from "../storage/db.js";
 import { itemIdFromProductUrl } from "../utils/productUrl.js";
-import { scrapeTmallBuyerShows, scrapeTmallProduct } from "./tmallScraper.js";
+import { parseSearchMainImageEvidence, parseTmallBuyerShowEvidence, parseTmallMaterialsEvidence, scrapeTaobaoSearchMainImage, scrapeTmallBuyerShows, scrapeTmallMaterials, scrapeTmallProduct } from "./tmallScraper.js";
 import { checkTaobaoSession } from "./browserService.js";
 import { createNotificationLog, sendFeishuNotification } from "./feishuService.js";
-import { saveCapturedSnapshotLocalEvidence } from "./localImportService.js";
+import { readBrowserCaptureSource, reparseBrowserCaptureSource, saveCapturedSnapshotLocalEvidence } from "./localImportService.js";
 import {
   CAPTURE_JOB_RETENTION_MS,
   clearFinishedCaptureJobs as clearPersistedCaptureJobs,
@@ -20,6 +20,7 @@ import { evaluateSkuMonitorRules } from "./monitorRuleService.js";
 import { recordPriceEngineShadowRound } from "./priceEngineShadowService.js";
 import { drainNotificationOutbox, enqueuePostCommitNotifications } from "./notificationOutboxService.js";
 import { applySkuVerificationHistory, updateSkuLifecycle } from "./skuStateService.js";
+import { syncPriceWorkbook } from "./excelSyncService.js";
 import {
   isTmallPriceCooldownError,
   isTmallPriceGateError,
@@ -41,6 +42,75 @@ const CAPTURE_RETRY_DELAYS_MS = [60_000, 5 * 60_000, 15 * 60_000];
 const MIN_PRODUCT_INTERVAL_MINUTES = 30;
 const MAX_PRODUCT_INTERVAL_MINUTES = 1440;
 const PRICE_EVIDENCE_UNAVAILABLE_MESSAGE = "商品页本次只返回公开标价或未返回当前 SKU 的可验证普通价；账号登录态未清除，本次未保存价格，请稍后重试或到账号授权检测。";
+
+export function explainPriceCaptureFailure(error = {}) {
+  const message = String(error?.message || "价格抓取失败。");
+  if (isExplicitLoginExpiryError(message)) {
+    return {
+      code: "CAPTURE_PRODUCT_LOGIN_PAGE",
+      stage: "capture",
+      message: "淘宝商品页跳转到了登录/验证页，本次没有复制到商品 SKU 和价格数据；本地没有可解析的价格。请重新扫码授权后再抓取。",
+    };
+  }
+  if (String(error?.code || "") === "TAOBAO_ACCESS_RESTRICTED") {
+    return {
+      code: "CAPTURE_ACCESS_RESTRICTED",
+      stage: "capture",
+      message: "淘宝限制了当前商品页访问，本次没有复制到完整价格数据；已停止抓取并保留原登录和上次已验证价格。",
+    };
+  }
+  if (error?.localReparseAttempted && error?.localReparseErrorCode === "INCOMPLETE_CAPTURE_REPARSE") {
+    return {
+      code: "CAPTURE_PRICE_EVIDENCE_INCOMPLETE",
+      stage: "capture",
+      message: "商品页数据已脱敏保存到本地，但文件缺少一个或多个当前 SKU 的完整价格响应；已自动执行本地二次解析，因源数据不完整而未生成新价格。",
+    };
+  }
+  if (error?.localReparseAttempted) {
+    return {
+      code: "LOCAL_PRICE_REPARSE_FAILED",
+      stage: "local-parse",
+      message: `商品数据已保存到本地，但首次解析和自动二次解析均失败；未覆盖旧价格。二次解析原因：${error.localReparseErrorMessage || message}`,
+    };
+  }
+  if (message.includes("公开标价") || message.includes("可验证普通价")) {
+    return {
+      code: "CAPTURE_PRICE_RESPONSE_MISSING",
+      stage: "capture",
+      message: "商品页面已打开，但没有复制到当前 SKU 的完整价格响应；这不是本地公式计算失败，本次未生成新价格。",
+    };
+  }
+  return { code: String(error?.code || "PRICE_CAPTURE_FAILED"), stage: String(error?.failureStage || "capture"), message };
+}
+
+async function recoverSnapshotFromLocalEvidence(error, product, accountType, reparse) {
+  if (!error?.browserEvidenceId) return null;
+  error.localReparseAttempted = true;
+  try {
+    const result = await reparse(error.browserEvidenceId, {
+      accountType,
+      itemIdHint: String(product.itemId || itemIdFromProductUrl(product.url) || ""),
+    });
+    if (!snapshotHasVerifiedNormalPrice(result.snapshot)) {
+      const incomplete = new Error("本地证据未覆盖全部 SKU 的可验证普通价。");
+      incomplete.code = "INCOMPLETE_CAPTURE_REPARSE";
+      throw incomplete;
+    }
+    return {
+      ...result.snapshot,
+      rawSignals: {
+        ...(result.snapshot.rawSignals || {}),
+        localPriceReparseFallback: true,
+        localPriceReparseAttempts: 2,
+        networkAccessedAfterLocalSave: false,
+      },
+    };
+  } catch (reparseError) {
+    error.localReparseErrorCode = String(reparseError?.code || "LOCAL_PRICE_REPARSE_FAILED");
+    error.localReparseErrorMessage = String(reparseError?.message || "本地二次解析失败。");
+    return null;
+  }
+}
 
 export function nextCaptureRetry(retryIndex, now = Date.now()) {
   const waitMs = CAPTURE_RETRY_DELAYS_MS[Number(retryIndex)];
@@ -89,6 +159,18 @@ export function captureAttemptProductIds(job, fallbackProductIds = null) {
 
 export function shouldRunCaptureRetry(job, monitor) {
   return job?.source !== "scheduled" || monitor?.running === true;
+}
+
+export function captureJobAllowsAutomaticRetry(job) {
+  return (job?.captureKind || "price") === "price";
+}
+
+export function captureJobCanRequireAuthorization(job) {
+  return (job?.captureKind || "price") === "price";
+}
+
+export function captureFailureRequiresManualRetry(message = "") {
+  return /商品页临时跳转登录\/验证|账号页面需要安全验证|请完成验证|安全验证/.test(String(message));
 }
 
 export function captureCommitConflict(currentProduct, result) {
@@ -158,6 +240,30 @@ async function confirmSessionExpiry(session, message) {
     // A failed probe is a degraded check, not proof that the account expired.
     return false;
   }
+}
+
+export async function captureWithTransientLoginRetry(session, capture, {
+  confirmExpiry = confirmSessionExpiry,
+  wait = (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds)),
+} = {}) {
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    try {
+      return await capture(attempt);
+    } catch (error) {
+      if (!isExplicitLoginExpiryError(error?.message)) throw error;
+      const sessionExpired = await confirmExpiry(session, error.message);
+      error.captureSessionExpiryChecked = true;
+      error.captureSessionExpired = sessionExpired;
+      if (sessionExpired || attempt > 0) throw error;
+      // Preserve the browser profile and cookies; only rebuild Tmall's
+      // same-browser price bridge on the single retry.
+      session.tmallPriceStatus = "degraded";
+      session.tmallPriceLastFailureAt = new Date().toISOString();
+      session.tmallPriceFailureReason = "PRODUCT_LOGIN_REDIRECT";
+      await wait(600);
+    }
+  }
+  throw new Error("商品页临时登录恢复失败。");
 }
 
 function shouldDegradeSessionForCaptureError(message = "") {
@@ -381,6 +487,7 @@ function publicCaptureJob(job) {
   return {
     id: job.id,
     operationType: job.operationType,
+    captureKind: job.captureKind,
     source: job.source,
     scope: job.scope,
     status: job.status,
@@ -579,7 +686,7 @@ function queueCaptureAttempt(job, operation) {
       }
 
       const failureMessage = failures.map((item) => item.message).filter(Boolean).join("；");
-      if (failures.some((item) => captureFailureNeedsAuthorization(item.message))) {
+      if (captureJobCanRequireAuthorization(job) && failures.some((item) => captureFailureNeedsAuthorization(item.message))) {
         await persistQueueJobPatch(job, {
           stage: "auth-required",
           outcome,
@@ -593,7 +700,8 @@ function queueCaptureAttempt(job, operation) {
       }
 
       const retryIndex = Number(job.retryIndex || 0);
-      const retry = nextCaptureRetry(retryIndex);
+      const manualRetryRequired = captureFailureRequiresManualRetry(failureMessage);
+      const retry = captureJobAllowsAutomaticRetry(job) && !manualRetryRequired ? nextCaptureRetry(retryIndex) : null;
       if (retry) {
         const { waitMs: wait, nextAttemptAt } = retry;
         retryPlan = await persistQueueJobPatch(job, {
@@ -611,19 +719,24 @@ function queueCaptureAttempt(job, operation) {
       }
 
       const hasSuccess = results.some((item) => item.status !== "failed");
+      const optionalCapture = !captureJobAllowsAutomaticRetry(job);
       await persistQueueJobPatch(job, {
         stage: hasSuccess ? "completed" : "failed",
         outcome: hasSuccess ? "partial" : "failed",
         activeProductIds: [],
         results,
         error: failureMessage,
-        message: hasSuccess ? "部分商品完成；失败商品已执行 1/5/15 分钟重试。" : "抓取失败；已执行 1/5/15 分钟重试。",
+        message: manualRetryRequired
+          ? "本次遇到临时登录或验证页面；为避免连续访问挤号，未自动重试，原价格和监控记录均已保留。"
+          : optionalCapture
+          ? (hasSuccess ? "部分素材任务完成；失败项未自动重试，价格和账号状态不受影响。" : "素材任务未完成；为避免连续访问挤号，未自动重试，价格和账号状态不受影响。")
+          : (hasSuccess ? "部分商品完成；失败商品已执行 1/5/15 分钟重试。" : "抓取失败；已执行 1/5/15 分钟重试。"),
       });
       return result;
     } catch (error) {
       const message = error?.message || String(error);
       await persistQueueJobPatch(job, {
-        stage: captureFailureNeedsAuthorization(message) ? "auth-required" : "failed",
+        stage: captureJobCanRequireAuthorization(job) && captureFailureNeedsAuthorization(message) ? "auth-required" : "failed",
         outcome: "failed",
         activeProductIds: [],
         error: message,
@@ -1025,12 +1138,12 @@ export function snapshotHasVerifiedNormalPrice(snapshot) {
   const outputSkuCount = Number(snapshot?.rawSignals?.outputSkuCount);
   const verifiedSkuCount = skus.filter((sku) => verifiedChannel(sku, "normal")).length;
   return snapshot?.accessMode === "authenticated"
-    && snapshot?.resolutionStatus === "verified"
+    && ["verified", "partial"].includes(snapshot?.resolutionStatus)
     && Number.isSafeInteger(observedSkuCount)
     && observedSkuCount > 0
     && observedSkuCount === outputSkuCount
     && outputSkuCount === skus.length
-    && verifiedSkuCount === observedSkuCount;
+    && verifiedSkuCount > 0;
 }
 
 export function hasTrustedAccountBaseline(snapshots, accountType = "normal") {
@@ -1244,7 +1357,7 @@ export async function notifyBelowThreshold(current, product, snapshot, source) {
   return delivered.alerts;
 }
 
-export async function captureProduct(product, authSessions = [], { scraper = scrapeTmallProduct, allowLocalOnly = false, accountMode = "primary" } = {}) {
+export async function captureProduct(product, authSessions = [], { scraper = scrapeTmallProduct, reparse = reparseBrowserCaptureSource, allowLocalOnly = false, accountMode = "primary" } = {}) {
   const { knownPrimaryImages: _knownPrimaryImages, knownGalleryImages: _knownGalleryImages, knownVideoUrls: _knownVideoUrls, knownPriceSnapshot: _knownPriceSnapshot, ...persistedProduct } = product;
   try {
     if (product.captureMode === "local-only" && !allowLocalOnly) {
@@ -1271,7 +1384,16 @@ export async function captureProduct(product, authSessions = [], { scraper = scr
       for (let attempt = 0; attempt < attempts.length; attempt += 1) {
         const session = attempts[attempt];
         try {
-          const capturedSnapshot = await withProtectedBrowserCapture(session, () => scraper(captureCandidate, session));
+          let capturedSnapshot;
+          try {
+            capturedSnapshot = await captureWithTransientLoginRetry(
+              session,
+              () => withProtectedBrowserCapture(session, () => scraper(captureCandidate, session)),
+            );
+          } catch (captureError) {
+            capturedSnapshot = await recoverSnapshotFromLocalEvidence(captureError, captureCandidate, session.accountType || targetAccountType, reparse);
+            if (!capturedSnapshot) throw captureError;
+          }
           if (!snapshotHasVerifiedNormalPrice(capturedSnapshot)) {
             throw new Error(PRICE_EVIDENCE_UNAVAILABLE_MESSAGE);
           }
@@ -1300,21 +1422,29 @@ export async function captureProduct(product, authSessions = [], { scraper = scr
             if (tmallGate) {
               session.healthStatus = "degraded";
             } else if (!tmallCooldown) {
-              sessionExpired = await confirmSessionExpiry(session, error.message);
+              sessionExpired = error.captureSessionExpiryChecked === true
+                ? error.captureSessionExpired === true
+                : await confirmSessionExpiry(session, error.message);
               if (sessionExpired) session.loginStatus = "expired";
+              else if (isExplicitLoginExpiryError(error.message)) {
+                session.tmallPriceStatus = "degraded";
+                session.tmallPriceLastFailureAt = new Date().toISOString();
+                session.tmallPriceFailureReason = "PRODUCT_LOGIN_REDIRECT";
+              }
             }
           }
-          const message = isExplicitLoginExpiryError(error.message) && !sessionExpired
-            ? "商品页临时跳转登录/验证，但账号检测仍有效，本次未保存价格。"
-            : tmallGate
-              ? `${error.message} 本次抓取已停止，可立即重新授权或再次抓取。`
-              : error.message;
-          accountErrors.push({ sessionId: session.id, accountName: session.name || "已授权账号", attempt: attempt + 1, message });
+          const explained = explainPriceCaptureFailure(error);
+          accountErrors.push({ sessionId: session.id, accountName: session.name || "已授权账号", attempt: attempt + 1, ...explained });
         }
       }
       if (!snapshots.length) break;
     }
-    if (!snapshots.length) throw new Error(accountErrors.map((error) => `${error.accountName}：${error.message}`).join("；"));
+    if (!snapshots.length) {
+      const failure = new Error(accountErrors.map((error) => `${error.accountName}：${error.message}`).join("；"));
+      failure.code = accountErrors[0]?.code || "PRICE_CAPTURE_FAILED";
+      failure.failureStage = accountErrors[0]?.stage || "capture";
+      throw failure;
+    }
     const primaryEntry = snapshots[0];
     const primaryAccountType = targetAccountType;
     if (!hasTrustedAccountBaseline(snapshots, primaryAccountType)) throw new Error(PRICE_EVIDENCE_UNAVAILABLE_MESSAGE);
@@ -1358,6 +1488,8 @@ export async function captureProduct(product, authSessions = [], { scraper = scr
         ...persistedProduct,
         lastStatus: "error",
         lastError: error.message,
+        lastErrorCode: String(error?.code || "PRICE_CAPTURE_FAILED"),
+        lastFailureStage: String(error?.failureStage || "capture"),
         updatedAt: new Date().toISOString(),
       },
       snapshot: null,
@@ -1368,7 +1500,13 @@ export async function captureProduct(product, authSessions = [], { scraper = scr
 async function runMonitorUnlocked({ source = "manual", productIds = null, includeDisabled = false, accountMode = "primary", scraper = scrapeTmallProduct } = {}, queueJob = null) {
   const startedAt = new Date().toISOString();
   const data = await readDb();
-  const activeSessions = data.authSessions.filter((session) => session.source === "taobao-browser" && (session.enabled ?? session.active ?? true) && session.loginStatus !== "expired");
+  const requireVerifiedAccount = source === "scheduled";
+  const activeSessions = data.authSessions.filter((session) => (
+    session.source === "taobao-browser"
+    && (session.enabled ?? session.active ?? true)
+    && session.loginStatus !== "expired"
+    && (!requireVerifiedAccount || (session.loginStatus === "valid" && session.tmallPriceStatus === "valid"))
+  ));
   const candidates = orderedCaptureCandidates(data.products, productIds, includeDisabled);
   const activeProductIds = new Set();
   const previouslyCompletedIds = new Set((queueJob?.results || [])
@@ -1473,6 +1611,9 @@ async function runMonitorUnlocked({ source = "manual", productIds = null, includ
     current.runs = current.runs.slice(-200);
     return current;
   });
+  if (results.some((result) => result.snapshot)) {
+    await syncPriceWorkbook().catch((error) => console.error("[excel-sync]", error.message));
+  }
   void drainNotificationOutbox().catch((error) => console.error("[notification-outbox]", error));
 
   return { run: runRecord, results };
@@ -1599,7 +1740,7 @@ export async function runCaptureBatchOnce(options = {}) {
   }, job));
 }
 
-async function runMaterialUnlocked(productId, { source = "manual-materials", scraper = scrapeTmallProduct, authSessions: providedAuthSessions = null, persistRun = true } = {}, queueJob = null) {
+async function runMaterialUnlocked(productId, { source = "manual-materials", scraper = scrapeTmallMaterials, authSessions: providedAuthSessions = null, persistRun = true } = {}, queueJob = null) {
   const startedAt = new Date().toISOString();
   const data = await readDb();
   const product = data.products.find((item) => item.id === productId);
@@ -1772,6 +1913,9 @@ async function runProductUnlocked(productId, { source = "single-product", scrape
     current.runs = current.runs.slice(-200);
     return current;
   });
+  if (result.snapshot) {
+    await syncPriceWorkbook().catch((error) => console.error("[excel-sync]", error.message));
+  }
   void drainNotificationOutbox().catch((error) => console.error("[notification-outbox]", error));
 
   return { run: runRecord, ...result };
@@ -1790,6 +1934,155 @@ export async function runProductOnce(productId, options = {}) {
     captureKind,
     recoverable: !options.scraper && !options.authSessions,
   }, (job) => captureKind === "materials" ? runMaterialUnlocked(productId, options, job) : runProductUnlocked(productId, options, job));
+}
+
+export async function runSearchMainImageOnce(productId, { scraper = scrapeTaobaoSearchMainImage, authSessions: providedAuthSessions = null, force = false } = {}) {
+  const data = await readDb();
+  const product = data.products.find((item) => item.id === productId);
+  if (!product) throw Object.assign(new Error("商品不存在。"), { status: 404 });
+  if (product.captureMode === "local-only") throw Object.assign(new Error("本地数据商品不访问淘宝搜索页。"), { status: 409 });
+  if (!force
+    && product.searchMainImageStatus === "verified"
+    && product.searchMainImage
+    && product.searchMainImageLocalFirst?.parsedFromDisk === true) {
+    return {
+      ok: true,
+      status: "verified",
+      product,
+      cached: true,
+      message: "已复用本地保存并重新读盘验证的搜索主图证据，未再次打开淘宝搜索页。",
+    };
+  }
+  const activeSessions = Array.isArray(providedAuthSessions)
+    ? providedAuthSessions
+    : data.authSessions.filter((session) => session.source === "taobao-browser" && (session.enabled ?? session.active ?? true) && session.loginStatus !== "expired");
+  const accountType = product.accountType || "normal";
+  const authSession = sessionsForProduct(activeSessions, accountType, 0, "all", product.primaryAccountSessionId)[0];
+  if (!authSession) throw Object.assign(new Error("没有可用的扫码账号，无法获取搜索主图。"), { status: 409 });
+
+  let capture;
+  try {
+    capture = await withProtectedBrowserCapture(authSession, () => scraper(product, authSession));
+  } catch (error) {
+    capture = {
+      searchMainImageStatus: "failed",
+      searchMainImageCapturedAt: new Date().toISOString(),
+      searchMainImageError: String(error?.message || "搜索主图抓取失败。"),
+    };
+  }
+  let updatedProduct = null;
+  await updateDb((current) => {
+    current.products = current.products.map((item) => {
+      if (item.id !== productId) return item;
+      const next = {
+        ...item,
+        ...capture,
+        updatedAt: new Date().toISOString(),
+      };
+      if (capture.searchMainImageStatus !== "failed") {
+        next.searchMainImage = capture.searchMainImage || "";
+        next.searchMainImageSource = capture.searchMainImageSource || "";
+      }
+      updatedProduct = next;
+      return next;
+    });
+    return current;
+  });
+  return {
+    ok: capture.searchMainImageStatus === "verified",
+    status: capture.searchMainImageStatus,
+    product: updatedProduct,
+    message: capture.searchMainImageStatus === "verified"
+      ? "搜索主图已按商品 ID 精确匹配并从本地证据解析。"
+      : capture.searchMainImageError || "搜索主图未获取。",
+  };
+}
+
+export async function reparseProductLocalEvidence(productId, kind) {
+  if (!["materials", "buyer-show", "search-main-image"].includes(kind)) {
+    throw Object.assign(new Error(`不支持的本地证据类型：${kind}`), { status: 400 });
+  }
+  const data = await readDb();
+  const product = data.products.find((item) => item.id === productId);
+  if (!product) throw Object.assign(new Error("商品不存在。"), { status: 404 });
+  const evidenceId = kind === "materials"
+    ? product.lastSnapshot?.materialEvidenceId
+    : kind === "buyer-show"
+      ? product.lastSnapshot?.buyerShowEvidenceId
+      : product.searchMainImageEvidenceId;
+  if (!evidenceId) {
+    const label = kind === "materials" ? "完整素材" : kind === "buyer-show" ? "买家秀" : "搜索主图";
+    throw Object.assign(new Error(`当前商品没有可复用的${label}本地证据，请先执行一次单独抓取。`), { status: 409 });
+  }
+
+  const record = await readBrowserCaptureSource(evidenceId);
+  if (kind === "search-main-image") {
+    const parsed = parseSearchMainImageEvidence(record, product.itemId || safeItemIdFromUrl(product.url));
+    let updatedProduct = null;
+    await updateDb((current) => {
+      current.products = current.products.map((item) => {
+        if (item.id !== productId) return item;
+        updatedProduct = { ...item, ...parsed, updatedAt: new Date().toISOString() };
+        return updatedProduct;
+      });
+      return current;
+    });
+    return {
+      ok: parsed.searchMainImageStatus === "verified",
+      kind,
+      product: updatedProduct,
+      message: parsed.searchMainImageStatus === "verified"
+        ? "搜索主图已仅从本地证据重新解析，未访问淘宝。"
+        : parsed.searchMainImageError || "本地搜索证据中没有可验证主图。",
+    };
+  }
+
+  if (!product.lastSnapshot) throw Object.assign(new Error("商品还没有可更新的价格快照。"), { status: 409 });
+  let nextSnapshot;
+  let ok = true;
+  let message;
+  if (kind === "materials") {
+    const captured = parseTmallMaterialsEvidence(product, record);
+    nextSnapshot = mergeCapturedMaterials(product.lastSnapshot, captured);
+    message = `完整素材已仅从本地证据重新解析：${capturedMaterialCount(nextSnapshot)} 项图片或视频；未访问淘宝，价格和提醒未改动。`;
+  } else {
+    const result = parseTmallBuyerShowEvidence(product, record);
+    const captured = preserveBuyerShowHistory({
+      ...structuredClone(product.lastSnapshot),
+      buyerShowCapture: result.capture,
+      buyerShows: result.items,
+      buyerShowEvidenceId: result.browserEvidenceId,
+      buyerShowEvidenceFile: result.browserEvidenceFile,
+      buyerShowLocalFirst: result.localFirst,
+      rawSignals: {
+        ...(product.lastSnapshot.rawSignals || {}),
+        buyerShowCount: result.items.length,
+        buyerShowInteractions: result.interactions,
+        buyerShowEvidenceSourceSaved: result.localFirst?.sourceSaved === true,
+        buyerShowEvidenceParsedFromDisk: result.localFirst?.parsedFromDisk === true,
+      },
+    }, product.lastSnapshot);
+    nextSnapshot = mergeCapturedBuyerShows(product.lastSnapshot, captured);
+    ok = result.capture.status !== "failed";
+    message = ok
+      ? `买家秀已仅从本地证据重新解析，共 ${nextSnapshot.buyerShows?.length || 0} 条；未访问淘宝，价格和提醒未改动。`
+      : `本地证据重新解析完成，但没有识别到有效买家秀（${result.capture.failureCode || "REVIEW_UI_NOT_FOUND"}）；未访问淘宝。`;
+  }
+
+  let updatedProduct = null;
+  await updateDb((current) => {
+    const index = current.products.findIndex((item) => item.id === productId);
+    if (index < 0) return current;
+    updatedProduct = { ...current.products[index], lastSnapshot: nextSnapshot, updatedAt: new Date().toISOString() };
+    current.products[index] = updatedProduct;
+    for (let snapshotIndex = current.snapshots.length - 1; snapshotIndex >= 0; snapshotIndex -= 1) {
+      if (current.snapshots[snapshotIndex].productId !== productId) continue;
+      current.snapshots[snapshotIndex] = { ...current.snapshots[snapshotIndex], ...nextSnapshot };
+      break;
+    }
+    return current;
+  });
+  return { ok, kind, product: updatedProduct, message };
 }
 
 async function runBuyerShowUnlocked(productId, { source = "manual-buyer-show", scraper = scrapeTmallBuyerShows, authSessions: providedAuthSessions = null, persistRun = true } = {}, queueJob = null) {

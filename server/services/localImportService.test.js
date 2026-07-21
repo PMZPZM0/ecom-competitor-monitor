@@ -303,6 +303,9 @@ test("browser capture is sanitized, saved first, and re-read without a network r
       visibleText: "nickname=visible-private-nickname userName=visible-private-user tel=visible-private-tel 本地页面",
       finalUrl: "https://detail.tmall.com/item.htm?id=843315272599&data=encoded-page-secret",
       safeParams: { mi_id: "private-mi-id" },
+      mediaObservations: {
+        videoUrls: ["https://tbm-auth.alicdn.com/product.mp4?auth_key=private-video-key"],
+      },
       networkPayloads: [{
         url: `https://h5api.m.tmall.com/h5/mtop.taobao.pcdetail.data.adjust/1.0/?data=${encodeURIComponent(JSON.stringify({ itemId: "843315272599", skuId: "6274971435999", token: encodedCredential }))}&sign=url-secret`,
         skuId: "6274971435999",
@@ -334,6 +337,7 @@ test("browser capture is sanitized, saved first, and re-read without a network r
   assert.equal(stored.finalUrl, "https://detail.tmall.com/item.htm?id=843315272599");
   assert.equal(stored.page.finalUrl, "https://detail.tmall.com/item.htm?id=843315272599");
   assert.equal(stored.page.safeParams.mi_id, "[REDACTED]");
+  assert.doesNotMatch(stored.page.mediaObservations.videoUrls[0], /private-video-key/);
   assert.doesNotMatch(stored.page.html, /private-html-mi-id/);
   assert.equal(stored.page.networkPayloads[0].url, "https://h5api.m.tmall.com/h5/mtop.taobao.pcdetail.data.adjust/1.0/?itemId=843315272599&skuId=6274971435999");
   assert.equal(stored.page.networkPayloads[0].captureRunId, "selection-run-sanitized");
@@ -461,6 +465,79 @@ test("reloaded browser SSR evidence applies an item-scoped new-user gift to ever
   } finally {
     globalThis.fetch = originalFetch;
   }
+});
+
+test("browser reparse shares the production SKU index after request queries are sanitized", async () => {
+  const itemId = "966531387808";
+  const skuCases = [
+    { skuId: "6141962935211", list: "239", current: "179" },
+    { skuId: "6144295902471", list: "229", current: "169" },
+  ];
+  const captureRunId = "local-reparse-shared-index";
+  const html = `<script>window.__DATA__=${JSON.stringify({
+    itemId,
+    skuBase: { props: [], skus: skuCases.map(({ skuId }) => ({ skuId, propPath: "" })) },
+    skuCore: { sku2info: Object.fromEntries(skuCases.map(({ skuId, list, current }) => [skuId, {
+      price: { priceText: list, priceTitle: "优惠前" },
+      subPrice: { priceText: current, priceTitle: "平台加补后" },
+    }])) },
+  })}</script>`;
+  const networkPayloads = skuCases.map(({ skuId, list, current }, index) => ({
+    url: "https://h5api.m.tmall.com/h5/mtop.taobao.pcdetail.data.adjust/1.0/",
+    body: JSON.stringify({ data: { componentsVO: { xsRedPacketParamVO: {
+      trackParams: { itemId, skuId, price1: list, price2: current },
+      xsRedPocketParams: {
+        tbShopRedPocket: JSON.stringify({ umpInfo: { umpPromotionList: [{ promotionName: "spsd4plan", amount: 6000 }] } }),
+      },
+    } } } }),
+    responseKind: "price",
+    captureRunId,
+    responseSequence: index + 1,
+  }));
+  networkPayloads.push({
+    url: "https://h5api.m.tmall.com/h5/mtop.taobao.pcdetail.data.adjust/1.0/",
+    body: JSON.stringify({ data: { priceActionText: "登录查看更多优惠" } }),
+    responseKind: "price",
+    captureRunId,
+    responseSequence: skuCases.length + 1,
+  });
+  const saved = await saveBrowserCaptureSource({
+    captureType: "account-browser-local-source",
+    itemId,
+    accountType: "normal",
+    requestedUrl: `https://detail.tmall.com/item.htm?id=${itemId}`,
+    finalUrl: `https://detail.tmall.com/item.htm?id=${itemId}`,
+    page: {
+      html,
+      visibleText: "正常商品页",
+      finalUrl: `https://detail.tmall.com/item.htm?id=${itemId}`,
+      statusCode: 200,
+      source: "browser",
+      accessVerified: true,
+      networkPayloads,
+      selectionResults: skuCases.map(({ skuId }, index) => ({
+        skuId,
+        selected: true,
+        responseReceivedAfterSelection: true,
+        captureRunId,
+        responseSequenceStartExclusive: index,
+        responseSequenceEndInclusive: index + 1,
+      })),
+    },
+  });
+
+  const stored = await readBrowserCaptureSource(saved.captureId);
+  assert.ok(stored.page.networkPayloads.every((payload) => !new URL(payload.url).search));
+
+  const reparsed = await reparseBrowserCaptureSource(saved.captureId, { accountType: "normal", itemIdHint: itemId });
+  assert.equal(reparsed.snapshot.resolutionStatus, "verified");
+  assert.deepEqual(reparsed.snapshot.skuPrices.map((sku) => [sku.skuId, sku.normalPrice]), [
+    [skuCases[0].skuId, 179],
+    [skuCases[1].skuId, 169],
+  ]);
+  assert.equal(reparsed.snapshot.rawSignals.observedSkuCount, 2);
+  assert.equal(reparsed.snapshot.rawSignals.outputSkuCount, 2);
+  assert.equal(reparsed.snapshot.rawSignals.verifiedPriceSkuCount, 2);
 });
 
 test("ignores nested price responses that have no verifiable product identity", async () => {

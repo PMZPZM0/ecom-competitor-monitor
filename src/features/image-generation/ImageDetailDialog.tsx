@@ -1,7 +1,8 @@
-import { Download, ExternalLink, Heart, Images, LoaderCircle, Pencil, RefreshCw, RotateCw, Trash2, X } from 'lucide-react'
-import { useEffect, useRef } from 'react'
+import { Columns2, Download, ExternalLink, Heart, Images, LoaderCircle, Pencil, RefreshCw, RotateCw, Trash2, X } from 'lucide-react'
+import { useEffect, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import { Button } from '../../components/ui/button'
+import { api } from '../../lib/api'
 import type { ImageLibraryItem } from '../../types/domain'
 import { visibleNegativePrompt, visiblePrompt } from '../prompt-studio/promptLayers'
 
@@ -31,6 +32,7 @@ const qualityLabel = { low: '快速', medium: '标准', high: '高清' }
 
 export function ImageDetailDialog({ item, src, busy, onClose, onDownload, onDelete, onToggleFavorite, onEdit, photoshopStatus, onPhotoshopOpen, onPhotoshopSync, onViewPhotoshopVersion, onReuse, onCreateFrom }: Props) {
   const dialogRef = useRef<HTMLDivElement>(null)
+  const [compare, setCompare] = useState(false)
   const displayPrompt = visiblePrompt(item.prompt)
   const displayNegativePrompt = visibleNegativePrompt(item.negativePrompt)
 
@@ -66,12 +68,13 @@ export function ImageDetailDialog({ item, src, busy, onClose, onDownload, onDele
         </header>
 
         <div className="flex min-h-0 flex-1 flex-col lg:grid lg:grid-cols-[minmax(0,1fr)_320px]">
-          <div className="flex min-h-[320px] items-center justify-center overflow-hidden bg-slate-100 p-3 sm:p-6">
-            <img src={src} alt="AI 生成图片详情" className="max-h-full max-w-full object-contain shadow-lg" />
+          <div className={`min-h-[320px] overflow-hidden bg-slate-100 p-3 sm:p-6 ${compare && item.parentImageId ? 'grid grid-cols-1 gap-3 sm:grid-cols-2' : 'flex items-center justify-center'}`}>
+            {compare && item.parentImageId ? <><figure className="flex min-h-0 flex-col"><figcaption className="mb-2 text-center text-xs font-medium text-slate-500">原图</figcaption><img src={api.imageFileUrl(item.parentImageId)} alt="编辑前原图" className="min-h-0 flex-1 object-contain shadow-lg" /></figure><figure className="flex min-h-0 flex-col"><figcaption className="mb-2 text-center text-xs font-medium text-blue-700">编辑结果</figcaption><img src={src} alt="编辑后结果" className="min-h-0 flex-1 object-contain shadow-lg" /></figure></> : <img src={src} alt="AI 生成图片详情" className="max-h-full max-w-full object-contain shadow-lg" />}
           </div>
           <aside className="scrollbar-thin overflow-y-auto border-t border-slate-200 p-4 lg:border-l lg:border-t-0">
             <div className="flex flex-wrap gap-2">
               <Button type="button" onClick={onEdit} disabled={Boolean(busy)}><Pencil className="h-4 w-4" />批注编辑</Button>
+              {item.parentImageId && <Button type="button" variant="secondary" onClick={() => setCompare((value) => !value)} disabled={Boolean(busy)} className={compare ? 'border-blue-200 bg-blue-50 text-blue-700' : ''}><Columns2 className="h-4 w-4" />{compare ? '查看结果' : '前后对比'}</Button>}
               <Button type="button" variant="secondary" onClick={onPhotoshopOpen} disabled={Boolean(busy)}>{busy === 'photoshop-open' ? <LoaderCircle className="h-4 w-4 animate-spin" /> : <ExternalLink className="h-4 w-4" />}{photoshopStatus?.ready ? '重新打开 PS' : 'Photoshop 编辑'}</Button>
               {photoshopStatus?.ready && <Button type="button" variant="secondary" onClick={onPhotoshopSync} disabled={Boolean(busy)}>{busy === 'photoshop-sync' ? <LoaderCircle className="h-4 w-4 animate-spin" /> : <RefreshCw className="h-4 w-4" />}同步 PS 修改</Button>}
               <Button type="button" variant="secondary" onClick={onCreateFrom} disabled={Boolean(busy)}><Images className="h-4 w-4" />基于此图创作</Button>
@@ -90,10 +93,13 @@ export function ImageDetailDialog({ item, src, busy, onClose, onDownload, onDele
               <div><dt className="text-xs text-slate-400">格式</dt><dd className="mt-1 font-medium uppercase text-slate-800">{item.format}</dd></div>
               <div className="col-span-2"><dt className="text-xs text-slate-400">输出尺寸</dt><dd className="mt-1 font-medium text-slate-800">{item.nativeSize && item.outputSize && item.nativeSize !== item.outputSize ? `${item.nativeSize} → ${item.outputSize}` : item.outputSize || item.nativeSize || (item.width && item.height ? `${item.width} × ${item.height}` : '--')}</dd></div>
               {item.parentImageId && <div className="col-span-2"><dt className="text-xs text-slate-400">版本来源</dt><dd className="mt-1 truncate font-medium text-slate-800">基于 {item.parentImageId} 创作{item.maskApplied ? ' · 蒙版编辑' : ''}</dd></div>}
+              {item.validation && <div className="col-span-2"><dt className="text-xs text-slate-400">保护校验</dt><dd className="mt-1 font-medium text-emerald-700">已通过 · {item.validation.score} 分</dd></div>}
+              {typeof item.productMaskConfidence === 'number' && <div className="col-span-2"><dt className="text-xs text-slate-400">自动主体蒙版</dt><dd className="mt-1 font-medium text-slate-800">置信度 {Math.round(item.productMaskConfidence * 100)}%</dd></div>}
             </dl>
 
             <section className="mt-4"><h3 className="text-sm font-medium text-slate-800">创意方案</h3><p className="mt-2 whitespace-pre-wrap break-words text-sm leading-6 text-slate-600">{displayPrompt || '--'}</p></section>
             {displayNegativePrompt && <section className="mt-4"><h3 className="text-sm font-medium text-slate-800">排除要求</h3><p className="mt-2 whitespace-pre-wrap break-words text-sm leading-6 text-slate-600">{displayNegativePrompt}</p></section>}
+            {item.copy?.text && <section className="mt-4"><h3 className="text-sm font-medium text-slate-800">应用排版文案</h3><p className="mt-2 whitespace-pre-wrap break-words text-sm leading-6 text-slate-600">{item.copy.text}</p></section>}
           </aside>
         </div>
       </div>
