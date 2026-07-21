@@ -37,6 +37,7 @@ checksums="$(mktemp)"
 jq -r --arg pattern "$asset_pattern" '.assets[] | select(.name | test($pattern)) | ((.digest | sub("^sha256:"; "")) + "  " + .name)' "$release_json" | sort > "$checksums"
 if [[ ! -d "$target" ]]; then
   staging="$(mktemp -d "$RELEASE_ROOT/releases/.${tag}.XXXXXX")"
+  chmod 0755 "$staging"
   while IFS=$'\t' read -r name url size digest; do
     [[ "$url" == "https://github.com/${REPOSITORY}/releases/download/${tag}/"* ]] || { echo "Untrusted asset URL: $url" >&2; exit 1; }
     [[ "$digest" =~ ^sha256:[a-f0-9]{64}$ ]] || { echo "Missing SHA-256 for $name" >&2; exit 1; }
