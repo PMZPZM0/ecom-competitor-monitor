@@ -11,7 +11,9 @@ test("version comparison handles tags and different segment lengths", () => {
 
 test("accelerated downloads only wrap trusted GitHub release assets", () => {
   const original = "https://github.com/PMZPZM0/ecom-competitor-monitor/releases/download/v1.0.8/EcomMonitor.exe";
-  assert.equal(acceleratedDownloadUrl(original), `https://ghproxy.net/${original}`);
+  assert.equal(acceleratedDownloadUrl(original), "https://jvsppl.vip/ecom-monitor/releases/v1.0.8/EcomMonitor.exe");
+  assert.equal(acceleratedDownloadUrl("https://github.com/another/repo/releases/download/v1.0.8/EcomMonitor.exe"), "");
+  assert.equal(acceleratedDownloadUrl("https://github.com/PMZPZM0/ecom-competitor-monitor/releases/download/not-a-version/EcomMonitor.exe"), "");
   assert.equal(acceleratedDownloadUrl("https://example.com/EcomMonitor.exe"), "");
   assert.equal(acceleratedDownloadUrl("not-a-url"), "");
 });

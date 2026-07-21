@@ -33,7 +33,7 @@ export function UpdateDialog({ currentVersion, info, checking, error, onCheck, o
     <div className="fixed inset-0 z-[110] flex items-center justify-center bg-slate-950/50 p-3 backdrop-blur-[1px] sm:p-6" onMouseDown={onClose}>
       <div role="dialog" aria-modal="true" aria-labelledby="update-dialog-title" className="flex max-h-[calc(100dvh-1.5rem)] w-full max-w-2xl flex-col overflow-hidden rounded-md bg-white shadow-2xl sm:max-h-[calc(100dvh-3rem)]" onMouseDown={(event) => event.stopPropagation()}>
         <header className="flex items-start justify-between gap-4 border-b border-slate-200 px-5 py-4">
-          <div><h2 id="update-dialog-title" className="flex items-center gap-2 text-base font-semibold text-slate-950"><CloudDownload className="h-5 w-5 text-blue-600" />版本更新</h2><p className="mt-1 text-sm text-slate-500">从项目 GitHub Releases 检查版本，支持国内镜像加速下载。</p></div>
+          <div><h2 id="update-dialog-title" className="flex items-center gap-2 text-base font-semibold text-slate-950"><CloudDownload className="h-5 w-5 text-blue-600" />版本更新</h2><p className="mt-1 text-sm text-slate-500">从项目 GitHub Releases 检查版本，安装包通过新加坡 CDN 加速下载。</p></div>
           <button type="button" className="inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-md text-slate-400 hover:bg-slate-100 hover:text-slate-700" onClick={onClose} title="关闭版本更新" aria-label="关闭版本更新"><X className="h-4 w-4" /></button>
         </header>
 
@@ -48,7 +48,7 @@ export function UpdateDialog({ currentVersion, info, checking, error, onCheck, o
           {info && !checking && !error && <>
             <div className={`mt-4 flex items-start gap-2 px-4 py-3 text-sm ${info.updateAvailable ? 'bg-emerald-50 text-emerald-800' : 'bg-blue-50 text-blue-800'}`}>{info.updateAvailable ? <CloudDownload className="mt-0.5 h-4 w-4 shrink-0" /> : <CheckCircle2 className="mt-0.5 h-4 w-4 shrink-0" />}<div><div className="font-medium">{info.updateAvailable ? `发现新版本 v${info.latestVersion}` : '当前已经是最新版本'}</div><div className="mt-1 text-xs">{platformLabel}{info.assetName ? ` · ${info.assetName}` : ' · 请在 Releases 页面选择安装包'}{assetSize ? ` · ${assetSize}` : ''}{info.publishedAt ? ` · 发布于 ${new Date(info.publishedAt).toLocaleString('zh-CN', { hour12: false })}` : ''}</div></div></div>
             <section className="mt-4"><h3 className="text-sm font-semibold text-slate-900">更新说明</h3><div className="mt-2 max-h-64 overflow-y-auto whitespace-pre-wrap border-y border-slate-200 bg-slate-50 px-3 py-3 text-sm leading-6 text-slate-600">{info.notes}</div></section>
-            {info.updateAvailable && <div className="mt-4 space-y-1 text-xs leading-5 text-slate-500"><div>加速下载由第三方镜像转发；若镜像不可用，可切换 GitHub 原地址。</div>{info.assetDigest && <div className="break-all font-mono text-[11px] text-slate-400">{info.assetDigest}</div>}<div>下载安装包后先退出软件，再覆盖安装。商品、历史价格、账号浏览器目录和飞书配置不会删除。</div></div>}
+            {info.updateAvailable && <div className="mt-4 space-y-1 text-xs leading-5 text-slate-500"><div>加速线路由项目专用 CDN 提供；若暂时不可用，可切换 GitHub 原地址。</div>{info.assetDigest && <div className="break-all font-mono text-[11px] text-slate-400">{info.assetDigest}</div>}<div>下载安装包后先退出软件，再覆盖安装。商品、历史价格、账号浏览器目录和飞书配置不会删除。</div></div>}
           </>}
         </div>
 

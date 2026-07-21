@@ -1,5 +1,5 @@
 const RELEASES_API = "https://api.github.com/repos/PMZPZM0/ecom-competitor-monitor/releases/latest";
-const DOWNLOAD_MIRROR = "https://ghproxy.net/";
+const DOWNLOAD_MIRROR = "https://jvsppl.vip/ecom-monitor/releases";
 const CACHE_MS = 30 * 60_000;
 let cachedRelease = null;
 
@@ -41,8 +41,13 @@ export function selectReleaseAsset(assets, platform = process.platform, arch = p
 export function acceleratedDownloadUrl(value) {
   try {
     const url = new URL(value);
-    if (url.protocol !== "https:" || url.hostname !== "github.com" || !/\/releases\/download\//.test(url.pathname)) return "";
-    return `${DOWNLOAD_MIRROR}${url.href}`;
+    if (url.protocol !== "https:" || url.hostname !== "github.com") return "";
+    const match = url.pathname.match(/^\/PMZPZM0\/ecom-competitor-monitor\/releases\/download\/([^/]+)\/([^/]+)$/i);
+    if (!match) return "";
+    const tag = decodeURIComponent(match[1]);
+    const assetName = decodeURIComponent(match[2]);
+    if (!/^v[0-9]+(?:\.[0-9]+){2}(?:[-.][a-z0-9.-]+)?$/i.test(tag) || !/^[^/\\]+\.(?:exe|dmg)$/i.test(assetName)) return "";
+    return `${DOWNLOAD_MIRROR}/${encodeURIComponent(tag)}/${encodeURIComponent(assetName)}`;
   } catch {
     return "";
   }

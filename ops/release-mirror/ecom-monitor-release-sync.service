@@ -1,0 +1,13 @@
+[Unit]
+Description=Synchronize e-commerce monitor release assets
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=ubuntu
+Group=ubuntu
+ExecStart=/usr/local/bin/sync-ecom-monitor-release
+
+[Install]
+WantedBy=multi-user.target
