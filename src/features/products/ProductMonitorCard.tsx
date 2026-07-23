@@ -61,7 +61,7 @@ type Props = {
   onCapture: (product: Product, options?: ProductCaptureOptions) => Promise<Product | void>
   onRetryBuyerShows: (product: Product) => Promise<Product>
   onCaptureSearchMainImage: (product: Product) => Promise<{ ok: boolean; status: NonNullable<Product['searchMainImageStatus']>; product: Product; message: string }>
-  onReparseLocalEvidence: (product: Product, kind: 'materials' | 'buyer-show' | 'search-main-image') => Promise<{ ok: boolean; product: Product; message: string }>
+  onReparseLocalEvidence: (product: Product, kind: 'price' | 'materials' | 'buyer-show' | 'search-main-image') => Promise<{ ok: boolean; product: Product; message: string }>
   onLocalImport: (product?: Product) => void
   onDelete: (product: Product) => Promise<void>
   busy?: boolean
@@ -93,13 +93,15 @@ function benefitPriceClass(label: string) {
 function CaptureStatus({ product }: { product: Product }) {
   const snapshot = product.lastSnapshot
   const anonymous = snapshot?.accessMode === 'anonymous'
+  const partial = product.lastStatus === 'error' && snapshot?.resolutionStatus === 'partial'
+  const verifiedSkuCount = snapshot?.skuPrices?.filter((sku) => sku.resolutionStatus === 'verified').length || 0
 
   return (
     <div className="mt-3 border-t border-slate-100 pt-3">
       <div className="flex items-center justify-between gap-3">
         <div className="text-xs font-medium text-slate-700">最近抓取</div>
-        <Badge className={product.lastStatus === 'error' ? 'border-red-100 bg-red-50 text-red-700' : anonymous ? 'border-amber-100 bg-amber-50 text-amber-700' : ''}>
-          {product.lastStatus === 'ok' ? anonymous ? '匿名公开价' : '正常' : product.lastStatus === 'error' ? '异常' : '待抓取'}
+        <Badge className={partial ? 'border-amber-100 bg-amber-50 text-amber-700' : product.lastStatus === 'error' ? 'border-red-100 bg-red-50 text-red-700' : anonymous ? 'border-amber-100 bg-amber-50 text-amber-700' : ''}>
+          {partial ? `部分可用 ${verifiedSkuCount}/${snapshot?.skuPrices?.length || 0}` : product.lastStatus === 'ok' ? anonymous ? '匿名公开价' : '正常' : product.lastStatus === 'error' ? '异常' : '待抓取'}
         </Badge>
       </div>
       <div className="mt-2 flex items-center justify-between gap-3 text-xs text-slate-400">
@@ -109,7 +111,10 @@ function CaptureStatus({ product }: { product: Product }) {
         {snapshot?.source ? ` · ${snapshot.source === 'browser' ? '浏览器登录态' : snapshot.source === 'local-import' ? '本地数据导入' : '直接请求'}` : ''}
         </span>
       </div>
-      {product.lastError && <div className="mt-2 text-xs leading-5 text-red-500">{product.lastError}</div>}
+      {product.lastError && <div className={`mt-2 text-xs leading-5 ${partial ? 'text-amber-700' : 'text-red-500'}`}>{product.lastError}</div>}
+      {snapshot?.rawSignals?.timingsMs && <div className="mt-2 text-xs leading-5 text-slate-500">
+        浏览器取证 {((Number(snapshot.rawSignals.timingsMs.browserAcquisition || 0)) / 1000).toFixed(1)} 秒 · 本地解析 {Math.round(Number(snapshot.rawSignals.timingsMs.localParse || 0))} 毫秒
+      </div>}
       {snapshot?.browserEvidenceFile
         ? <div className="mt-2 break-all text-xs leading-5 text-emerald-700" title={snapshot.browserEvidenceFile}>浏览器数据已保存并读盘解析：{snapshot.browserEvidenceFile}</div>
         : snapshot?.localImportFile && <div className="mt-2 break-all text-xs leading-5 text-emerald-700" title={snapshot.localImportFile}>本地价格证据已保存：{snapshot.localImportFile}</div>}
@@ -377,6 +382,7 @@ export function ProductMonitorCard({ product, monitor, onToggle, onSchedule, onM
   const [scheduleTimeDraft, setScheduleTimeDraft] = useState(() => scheduleInputParts(product.monitorStartAt, product.nextMonitorAt, initialIntervalMinutes).time)
   const [snapshots, setSnapshots] = useState<Snapshot[]>([])
   const localOnly = product.captureMode === 'local-only'
+  const canRepairPartialPriceFromDisk = product.lastSnapshot?.resolutionStatus === 'partial' && Boolean(product.lastSnapshot?.browserEvidenceId)
   const captureMediaAssets = product.captureMediaAssets === true
   const accountCaptures = product.lastSnapshot?.accountCaptures || EMPTY_ACCOUNT_CAPTURES
   const primaryAccountCapture = accountCaptures.find((capture) => capture.sessionId === product.lastSnapshot?.primaryAccountSessionId)
@@ -565,9 +571,11 @@ export function ProductMonitorCard({ product, monitor, onToggle, onSchedule, onM
     }
   }
 
-  async function reparseLocalEvidence(kind: 'materials' | 'buyer-show' | 'search-main-image', label: string) {
+  async function reparseLocalEvidence(kind: 'price' | 'materials' | 'buyer-show' | 'search-main-image', label: string) {
     const key = `local-reparse:${kind}`
-    showOperation({ key, tone: 'progress', message: `正在仅从本地${label}证据重新解析；不会打开淘宝，也不会改动价格、监控价或飞书提醒...` })
+    showOperation({ key, tone: 'progress', message: kind === 'price'
+      ? '正在仅从本地价格证据重新计算；不会打开淘宝、改动监控价或触发飞书提醒...'
+      : `正在仅从本地${label}证据重新解析；不会打开淘宝，也不会改动价格、监控价或飞书提醒...` })
     try {
       const result = await onReparseLocalEvidence(product, kind)
       showOperation({ key, tone: result.ok ? 'success' : 'error', message: result.message }, result.ok ? 6000 : 9000)
@@ -748,6 +756,7 @@ export function ProductMonitorCard({ product, monitor, onToggle, onSchedule, onM
           <div className="product-monitor-command-deck min-w-0">
             <div className="ml-auto flex flex-wrap items-center justify-end gap-1.5">
               <Button type="button" variant="secondary" size="sm" className="h-9 rounded-lg shadow-sm active:translate-y-px" onClick={() => setPriceVerificationOpen(true)} disabled={!product.lastSnapshot?.skuPrices?.length} title="逐 SKU 核对价格证据、展示金额和计算公式"><ShieldCheck className="h-4 w-4" />核对价格</Button>
+              {canRepairPartialPriceFromDisk && <Button type="button" variant="secondary" size="sm" className="h-9 rounded-lg border-amber-200 bg-amber-50 text-amber-800 shadow-sm hover:bg-amber-100 active:translate-y-px" onClick={() => reparseLocalEvidence('price', '价格')} disabled={busy || operation?.tone === 'progress'} title="只读取已保存的本地价格证据补齐未解析 SKU，不打开淘宝"><FileJson className="h-4 w-4" />本地重算</Button>}
               {!localOnly && <Button type="button" variant="secondary" size="sm" className={`h-9 rounded-lg shadow-sm active:translate-y-px ${product.enabled ? 'border-amber-200 bg-amber-50 text-amber-800 hover:bg-amber-100' : 'border-emerald-600 bg-emerald-600 text-white hover:bg-emerald-700'}`} onClick={toggleMonitoring} disabled={togglingMonitor} title={!monitor.running ? '启用本商品计划；全局自动监控开启后执行' : product.enabled ? '暂停本商品定时监控' : '启用本商品定时监控'}>{product.enabled ? <PauseCircle className="h-4 w-4" /> : <PlayCircle className="h-4 w-4" />}{togglingMonitor ? '更新中' : product.enabled ? '暂停定时' : '启用定时'}</Button>}
               <Button type="button" variant="secondary" size="sm" className="h-9 rounded-lg shadow-sm active:translate-y-px" onClick={syncFeishu} disabled={syncingFeishu || !product.lastSnapshot}><BellRing className="h-4 w-4" />{syncingFeishu ? '同步中' : '同步飞书'}</Button>
               {localOnly ? <Button type="button" size="sm" className="h-9 rounded-lg shadow-sm" onClick={() => onLocalImport(product)} title="选择新的本地数据文件更新价格"><FileJson className="h-4 w-4" />导入新文件</Button> : <CaptureButton busy={busy} onCapture={captureNow} />}

@@ -99,7 +99,7 @@ export function HelpCenter({ onNavigate }: { onNavigate: (page: 'settings' | 'mo
         <Section id="guide-account" title="账号授权与账号类型" summary="一个账号会采集页面可见的全部价格通道" icon={KeyRound}>
           <div className="flex items-start gap-3"><KeyRound className="mt-1 h-5 w-5 shrink-0 text-blue-600" /><div><p>打开右上角“设置中心”的账号授权，填写账号备注并选择类型，然后点击扫码授权。淘宝 App 扫码完成后点击“检测登录”；未明确标记“登录失效”的扫码账号才会进入抓取候选。</p><p className="mt-2">设置中心还集中管理飞书文档与机器人、AI 模型通道和软件更新，日常监控时不需要在多个菜单之间寻找配置。</p></div></div>
           <div className="overflow-x-auto"><table className="w-full border-collapse text-left text-sm"><thead><tr className="border-y border-slate-200 bg-slate-50 text-slate-600"><th className="px-3 py-2">账号类型</th><th className="px-3 py-2">可采集价格</th><th className="px-3 py-2">重要说明</th></tr></thead><tbody className="divide-y divide-slate-100"><tr><td className="px-3 py-3 font-medium">普通账号</td><td className="px-3 py-3">普通、淘宝秒杀、国补、惊喜立减、淘金币等公共通道</td><td className="px-3 py-3">一个普通账号即可采集其页面实际可见的全部公共价格。</td></tr><tr><td className="px-3 py-3 font-medium">礼金账号</td><td className="px-3 py-3">全部可见公共通道 + 礼金价</td><td className="px-3 py-3">不再要求另有普通账号；没有真实礼金资格时显示“未获取”。</td></tr><tr><td className="px-3 py-3 font-medium">88VIP 账号</td><td className="px-3 py-3">全部可见公共通道 + 页面实际返回的礼金价、88VIP 价</td><td className="px-3 py-3">能抓多少取决于该账号对当前商品的真实权益证据。</td></tr></tbody></table></div>
-          <Checklist items={['选择账号类型是在指定首选监控视角；首选不可用时，会在其余可用账号中按 88VIP → 礼金 → 普通的能力顺序回退。', '多个账号的价格结果完全隔离，不会互相覆盖；商品卡片可切换账号视角查看，其中标记“监控”的主账号视角才用于监控阈值和飞书。', '页面没有返回可信价格证据时仍会失败或显示“未获取”，不会用标价或其他账号结果补造。', '“价格待修复”会保留当前 Cookie 并在下次抓价时后台静默同步，不需要扫码；只有明确显示“登录失效”时才点击“重新扫码”。', '“一键检测全部”只检查登录状态，不会开始商品抓取。一个账号固定使用自己的浏览器资料目录。']} />
+          <Checklist items={['选择账号类型是在指定首选监控视角；首选不可用时，会在其余可用账号中按 88VIP → 礼金 → 普通的能力顺序回退。', '多个账号的价格结果完全隔离，不会互相覆盖；商品卡片可切换账号视角查看，其中标记“监控”的主账号视角才用于监控阈值和飞书。', '页面没有返回可信价格证据时仍会失败或显示“未获取”，不会用标价或其他账号结果补造。', '“检测登录”只读取账号浏览器现有登录状态，不打开商品页；登录失效时点击“重新授权”扫码更新原账号。', '账号卡片的“导出登录包”会生成本机加密 JSON；点顶部“导入登录包”可写入新的独立浏览器并自动验证。登录包仅供本机恢复，Cookie 过期、文件被修改或换电脑都会拒绝导入。', '“一键检测全部”只检查登录状态，不会开始商品抓取。一个账号固定使用自己的浏览器资料目录。']} />
         </Section>
 
         <Section id="guide-product" title="添加商品与抓取" summary="链接和商品 ID 都能用，买家秀按需开启" icon={Search}>
@@ -169,7 +169,7 @@ export function HelpCenter({ onNavigate }: { onNavigate: (page: 'settings' | 'mo
               ['买家秀只有文字或数量很少', '打开买家秀预览查看状态 → 点击仅重试买家秀 → 检查账号登录 → 保留历史成功缓存。'],
               ['计划不执行', '检查页面顶部全局自动监控 → 检查本商品已启用 → 检查开始时间和周期 → 打开右侧任务中心的监控计划查看下次时间。'],
               ['飞书没有消息', '发送测试 → 检查 SKU 监控价 → 确认主账号视角的有效价格严格低于阈值 → 检查自动提醒开关。'],
-              ['账号显示待复检或登录失效', '待复检表示检测页临时异常，登录资料仍保留，可稍后再检测；登录失效表示已明确跳转登录页，此时才需要重新扫码。'],
+              ['账号显示待检测或登录失效', '待检测表示现有浏览器凭据暂时无法确认，登录资料仍保留，可稍后再检测；登录失效时点击“重新授权”扫码更新原账号。'],
               ['macOS 提示已损坏或运行很慢', '“已损坏”表示旧包缺少 Apple 签名与公证，请下载最新的 mac-arm64 安装包；可信旧包的临时处理命令见完整使用说明。首次浏览器授权会较慢，避免同时启动多个抓取任务。'],
             ].map(([title, text]) => <details key={title} className="group border-b border-slate-200 pb-3"><summary className="cursor-pointer list-none font-semibold text-slate-900">{title}</summary><p className="mt-2 text-slate-600">{text}</p></details>)}
           </div>

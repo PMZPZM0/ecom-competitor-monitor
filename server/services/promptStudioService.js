@@ -337,23 +337,26 @@ function promptRequestFetch(fetchImpl, idempotencyKey) {
 
 async function requestPromptModelApiJson(url, options, {
   idempotencyKey = "",
+  maxAttempts = 2,
   random = Math.random,
   retryableStatuses = PROMPT_RETRYABLE_STATUSES,
   sleep = (delayMs) => new Promise((resolve) => setTimeout(resolve, delayMs)),
 } = {}) {
   const requestFetch = promptRequestFetch(options.fetchImpl || globalThis.fetch, idempotencyKey);
   const request = () => requestModelApiJson(url, { ...options, fetchImpl: requestFetch.fetchImpl });
-  try {
-    return await request();
-  } catch (error) {
-    const retryable = requestFetch.key
-      && error instanceof ModelApiError
-      && error.code !== "MODEL_API_TIMEOUT"
-      && (error.code === "MODEL_API_NETWORK_ERROR" || retryableStatuses.has(error.status));
-    if (!retryable) throw error;
-    const jitter = Math.floor(Math.max(0, Math.min(1, Number(random()) || 0)) * PROMPT_RETRY_JITTER_MS);
-    await sleep(PROMPT_RETRY_MIN_DELAY_MS + jitter);
-    return request();
+  for (let attempt = 0; ; attempt += 1) {
+    try {
+      return await request();
+    } catch (error) {
+      const retryable = requestFetch.key
+        && attempt + 1 < maxAttempts
+        && error instanceof ModelApiError
+        && error.code !== "MODEL_API_TIMEOUT"
+        && (error.code === "MODEL_API_NETWORK_ERROR" || retryableStatuses.has(error.status));
+      if (!retryable) throw error;
+      const jitter = Math.floor(Math.max(0, Math.min(1, Number(random()) || 0)) * PROMPT_RETRY_JITTER_MS);
+      await sleep(PROMPT_RETRY_MIN_DELAY_MS * (attempt + 1) + jitter);
+    }
   }
 }
 
@@ -552,12 +555,12 @@ export async function writeFreeformImagePrompt(modelConfig = {}, input = {}, {
   const images = imageDataUrls(productImages, { label: "参考图" });
   validateImageTotal([images]);
   const resolved = resolveModelConfig(modelConfig, { env });
-  const content = [{ type: "text", text: `用户需求：${requestInput.userRequest}` }];
+  const content = [{ type: "input_text", text: `用户需求：${requestInput.userRequest}` }];
   if (images.length) content.push(
-    { type: "text", text: "用户同时提供了参考图，请结合参考图理解需求。" },
-    ...images.map((image) => ({ type: "image_url", image_url: { url: image.url } })),
+    { type: "input_text", text: "用户同时提供了参考图，请结合参考图理解需求。" },
+    ...inputImages(images),
   );
-  const data = await requestPromptModelApiJson(`${resolved.baseUrl}/chat/completions`, {
+  const data = await requestPromptModelApiJson(`${resolved.baseUrl}/responses`, {
     apiKey: resolved.apiKey,
     fetchImpl,
     label: "AI 自由帮写",
@@ -565,12 +568,15 @@ export async function writeFreeformImagePrompt(modelConfig = {}, input = {}, {
     timeoutMs,
     body: {
       model: resolved.model,
-      messages: [{
+      input: [{
         role: "system",
-        content: "根据用户需求自由发挥，写出你认为最好的生图提示词。",
-      }, { role: "user", content: images.length ? content : content[0].text }],
+        content: [{
+          type: "input_text",
+          text: "根据用户需求自由发挥，写出你认为最好的生图提示词。只输出最终可直接用于生图的提示词正文，不要标题、前言、Markdown 标记或解释。",
+        }],
+      }, { role: "user", content }],
     },
-  }, { idempotencyKey, random, retryableStatuses: FREEFORM_PROMPT_RETRYABLE_STATUSES, ...(sleep ? { sleep } : {}) });
+  }, { idempotencyKey, maxAttempts: 3, random, retryableStatuses: FREEFORM_PROMPT_RETRYABLE_STATUSES, ...(sleep ? { sleep } : {}) });
   const parsed = boundedText(PROMPT_STUDIO_OUTPUT_LIMITS.prompt, { required: true }).safeParse(outputText(data));
   if (!parsed.success) {
     throw promptError("AI 自由帮写模型没有返回可用提示词。", { code: "PROMPT_MODEL_EMPTY_RESPONSE", status: 502 });

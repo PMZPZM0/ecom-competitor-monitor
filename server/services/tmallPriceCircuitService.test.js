@@ -6,6 +6,7 @@ import {
   isTmallPriceCooldownError,
   isTmallPriceGateError,
   markTmallPriceGate,
+  markTmallPricePartial,
   markTmallPriceSuccess,
   markTmallPriceUnknown,
   resetTmallPriceCircuitForTests,
@@ -32,6 +33,16 @@ test("login sync starts with an unknown Tmall price capability", () => {
   assert.equal(tmallPriceCircuitOpen(account, 1_001), false);
 });
 
+test("partial SKU evidence degrades only price capability without expiring login", () => {
+  const account = { ...session(), loginStatus: "valid" };
+  markTmallPricePartial(account, { now: 2_000, verifiedSkuCount: 1, totalSkuCount: 3 });
+
+  assert.equal(account.loginStatus, "valid");
+  assert.equal(account.tmallPriceStatus, "degraded");
+  assert.equal(account.tmallPriceFailureReason, "PARTIAL_SKU_PRICE_EVIDENCE:1/3");
+  assert.equal(account.tmallPriceCooldownUntil, null);
+});
+
 test("a Tmall price gate opens only the affected account circuit", () => {
   const account = session();
   const result = markTmallPriceGate(account, { now: 1_000, accountCooldownMs: 10_000, deviceCooldownMs: 5_000 });
@@ -53,18 +64,31 @@ test("a Tmall price gate opens only the affected account circuit", () => {
 });
 
 test("an access restriction keeps every local account blocked for the platform recovery window", () => {
-  const account = session();
+  const account = { ...session(), browserEngine: "uc" };
   markTmallPriceGate(account, {
     now: 1_000,
     accountCooldownMs: 60_000,
     deviceCooldownMs: 60_000,
     reason: "TAOBAO_ACCESS_RESTRICTED",
   });
-  const other = { ...session(), id: "session-2", browserProfileKey: "profile-2", browserPort: 9518 };
+  const other = { ...session(), id: "session-2", browserProfileKey: "profile-2", browserPort: 9518, browserEngine: "uc" };
   assert.equal(account.tmallPriceFailureReason, "TAOBAO_ACCESS_RESTRICTED");
   assert.equal(tmallPriceCircuitOpen(other, 60_999), true);
   assert.equal(tmallAccessRestrictionOpen(other, 60_999), true);
   assert.match(createTmallPriceCooldownError(account, 2_000).message, /淘宝访问限制保护中/);
+});
+
+test("a restricted legacy Google environment does not block a newly authorized UC environment", () => {
+  const restricted = { ...session(), browserEngine: "legacy-google" };
+  const uc = { ...session(), id: "session-uc", browserProfileKey: "profile-uc", browserPort: 9519, browserEngine: "uc" };
+  markTmallPriceGate(restricted, {
+    now: 1_000,
+    accountCooldownMs: 60_000,
+    deviceCooldownMs: 60_000,
+    reason: "TAOBAO_ACCESS_RESTRICTED",
+  });
+  assert.equal(tmallPriceCircuitOpen(uc, 2_000), false);
+  assert.equal(tmallAccessRestrictionOpen(uc, 2_000), false);
 });
 
 test("a verified response clears a normal account-only gate", () => {
@@ -78,8 +102,8 @@ test("a verified response clears a normal account-only gate", () => {
 });
 
 test("a success from another account cannot clear an access-restriction circuit", () => {
-  const restricted = session();
-  const inFlightSuccess = { ...session(), id: "session-2", browserProfileKey: "profile-2", browserPort: 9518 };
+  const restricted = { ...session(), browserEngine: "uc" };
+  const inFlightSuccess = { ...session(), id: "session-2", browserProfileKey: "profile-2", browserPort: 9518, browserEngine: "uc" };
   markTmallPriceGate(restricted, {
     now: 1_000,
     accountCooldownMs: 60_000,

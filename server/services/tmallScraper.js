@@ -1389,30 +1389,6 @@ export function applyNetworkPromoData(skuPrices, networkPayloads = [], options =
   });
 }
 
-async function fetchMobilePromotionPayloads(itemId, skuPrices, authSession, renderPage = getRenderedHtml, capturedAt = new Date().toISOString()) {
-  if (authSession?.source !== "taobao-browser") return { networkPayloads: [], skuNetworkPayloads: {}, selectionResults: [] };
-  const desktopProductUrl = `https://detail.tmall.com/item.htm?id=${encodeURIComponent(itemId)}`;
-  try {
-    const capture = await renderAndReloadBrowserCapture({
-      product: { itemId, url: desktopProductUrl },
-      authSession,
-      renderPage,
-      capturedAt,
-      renderOptions: {
-        selectSkus: skuPrices.map((sku) => ({ skuId: sku.skuId, valueIds: sku.selectionValueIds || [] })),
-        localCapture: true,
-        preserveCache: true,
-      },
-    });
-    return capture.promotionCapture;
-  } catch (error) {
-    if (error?.code === "TMALL_PRICE_AUTH_REQUIRED" || error?.code === "TAOBAO_ACCESS_RESTRICTED") throw error;
-    const captureError = String(error?.message || "SKU 逐项选择抓取失败").replace(/https?:\/\/\S+/g, "[URL]").slice(0, 300);
-    console.warn("[sku-promotion-capture]", { itemId, skuCount: skuPrices.length, error: captureError });
-    return { networkPayloads: [], skuNetworkPayloads: {}, selectionResults: [], captureError };
-  }
-}
-
 export function collectProductProgramItems(value) {
   const text = String(value || "");
   const items = [];
@@ -1714,8 +1690,8 @@ export function hasTmallPriceLoginGate(networkPayloads = [], pageText = "") {
   });
 }
 
-export function shouldRequireTmallPriceAuthorization(networkPayloads = [], currentSkuResolutions = []) {
-  if (!hasTmallPriceLoginGate(networkPayloads)) return false;
+export function shouldRequireTmallPriceAuthorization(networkPayloads = [], currentSkuResolutions = [], pageText = "") {
+  if (!hasTmallPriceLoginGate(networkPayloads, pageText)) return false;
   const resolutions = currentSkuResolutions instanceof Map
     ? [...currentSkuResolutions.values()]
     : Array.from(currentSkuResolutions || []);
@@ -1725,59 +1701,17 @@ export function shouldRequireTmallPriceAuthorization(networkPayloads = [], curre
   ));
 }
 
-export function gatedSelectionSkuIds(networkPayloads = [], selectionResults = []) {
-  const payloads = Array.from(networkPayloads || []);
-  return Array.from(new Set(Array.from(selectionResults || [])
-    .filter((selection) => (
-      selection?.selected === true
-      && selection?.responseObserved !== true
-      && /^[a-z0-9_-]{1,80}$/i.test(String(selection?.captureRunId || ""))
-      && Number.isSafeInteger(selection?.responseSequenceStartExclusive)
-      && Number.isSafeInteger(selection?.responseSequenceEndInclusive)
-      && payloads.some((payload) => (
-        payload?.captureRunId === selection.captureRunId
-        && Number.isSafeInteger(payload?.responseSequence)
-        && payload.responseSequence > selection.responseSequenceStartExclusive
-        && payload.responseSequence <= selection.responseSequenceEndInclusive
-        && hasTmallPriceLoginGate([payload])
-      ))
-    ))
-    .map((selection) => String(selection.skuId || ""))
-    .filter(Boolean)));
-}
-
-export function retryableSelectionSkuIds(skuPrices = [], selectionResults = []) {
-  const resultsBySku = new Map(Array.from(selectionResults || []).map((selection) => [String(selection?.skuId || ""), selection]));
-  return Array.from(new Set(Array.from(skuPrices || [])
-    .filter((sku) => Array.isArray(sku?.selectionValueIds) && sku.selectionValueIds.length > 0)
-    .filter((sku) => resultsBySku.get(String(sku.skuId || ""))?.responseObserved !== true)
-    .map((sku) => String(sku.skuId || ""))
-    .filter(Boolean)));
-}
-
-function mergePromotionCaptureRetry(initial, retry) {
-  const retriedSkuIds = new Set((retry.selectionResults || []).map((selection) => String(selection.skuId || "")));
-  return {
-    networkPayloads: [...(initial.networkPayloads || []), ...(retry.networkPayloads || [])],
-    skuNetworkPayloads: {
-      ...(initial.skuNetworkPayloads || {}),
-      ...(retry.skuNetworkPayloads || {}),
-    },
-    selectionResults: [
-      ...(initial.selectionResults || []).filter((selection) => !retriedSkuIds.has(String(selection.skuId || ""))),
-      ...(retry.selectionResults || []),
-    ],
-    captureError: [initial.captureError, retry.captureError].filter(Boolean).join("；").slice(0, 500),
-  };
-}
-
 function tmallPriceAuthRequiredError() {
-  const error = new Error("淘宝账号仍在线，但天猫优惠价格授权暂未同步；本次未保存价格。当前登录会保留，稍后重试时软件会在后台再次同步。");
+  const error = new Error("淘宝账号仍在线，但天猫商品页本次没有返回可验证的优惠价格；本次未保存价格，当前登录会保留且不会自动重建会话。");
   error.code = "TMALL_PRICE_AUTH_REQUIRED";
   return error;
 }
 
-async function fetchHtml(product, authSession, renderPage = getRenderedHtml, { preserveCache = true, capturedAt = new Date().toISOString() } = {}) {
+async function fetchHtml(product, authSession, renderPage = getRenderedHtml, {
+  preserveCache = true,
+  capturedAt = new Date().toISOString(),
+  selectAllProductSkus = false,
+} = {}) {
   if (authSession?.source !== "taobao-browser") {
     throw new Error("商品抓取只允许使用已扫码授权的账号浏览器采集，已阻止后端直接请求淘宝接口。");
   }
@@ -1789,7 +1723,8 @@ async function fetchHtml(product, authSession, renderPage = getRenderedHtml, { p
       capturedAt,
       renderOptions: {
         captureVideo: product.captureMediaAssets === true,
-        captureBuyerShow: product.captureBuyerShows !== false,
+        captureBuyerShow: product.captureBuyerShows === true,
+        selectAllProductSkus,
         localCapture: true,
         preserveCache,
       },
@@ -1860,6 +1795,28 @@ function compactSelectionResult(selection) {
   };
 }
 
+function compactSkuSnapshot(snapshot) {
+  const start = Number(snapshot?.responseSequenceStartExclusive);
+  const end = Number(snapshot?.responseSequenceEndInclusive);
+  const validWindow = Number.isSafeInteger(start)
+    && start >= 0
+    && Number.isSafeInteger(end)
+    && end >= start;
+  return {
+    skuId: String(snapshot?.skuId || ""),
+    selected: snapshot?.selected === true,
+    clicked: Array.isArray(snapshot?.clicked) ? snapshot.clicked.map(String) : [],
+    capturedAt: String(snapshot?.capturedAt || ""),
+    html: String(snapshot?.html || ""),
+    visibleText: String(snapshot?.visibleText || ""),
+    finalUrl: String(snapshot?.finalUrl || ""),
+    ...(validWindow ? {
+      responseSequenceStartExclusive: start,
+      responseSequenceEndInclusive: end,
+    } : {}),
+  };
+}
+
 export function buildBrowserCaptureEvidence({ product, accountType, itemId, page, promotionCapture, capturedAt }) {
   const payloads = [];
   const seen = new Set();
@@ -1899,9 +1856,63 @@ export function buildBrowserCaptureEvidence({ product, accountType, itemId, page
       selectionResults: Array.isArray(promotionCapture.selectionResults)
         ? promotionCapture.selectionResults.map(compactSelectionResult)
         : [],
+      ...(Array.isArray(page.skuSnapshots) ? {
+        skuSnapshots: page.skuSnapshots.map(compactSkuSnapshot).filter((snapshot) => snapshot.skuId && snapshot.selected),
+      } : {}),
       promotionCaptureError: String(promotionCapture.captureError || "").slice(0, 500),
     },
   };
+}
+
+function hasCurrentSkuSnapshotIdentity(snapshot, selection, expectedItemId) {
+  const skuId = String(selection?.skuId || "");
+  if (!skuId || snapshot?.selected !== true || String(snapshot?.skuId || "") !== skuId) return false;
+
+  const captureRunId = String(selection?.captureRunId || "");
+  const selectionStart = Number(selection?.responseSequenceStartExclusive);
+  const selectionEnd = Number(selection?.responseSequenceEndInclusive);
+  const snapshotStart = Number(snapshot?.responseSequenceStartExclusive);
+  const snapshotEnd = Number(snapshot?.responseSequenceEndInclusive);
+  if (!/^[a-z0-9_-]{1,80}$/i.test(captureRunId)
+    || !Number.isSafeInteger(selectionStart)
+    || !Number.isSafeInteger(selectionEnd)
+    || !Number.isSafeInteger(snapshotStart)
+    || !Number.isSafeInteger(snapshotEnd)
+    || selectionStart < 0
+    || selectionEnd < selectionStart
+    || snapshotStart !== selectionStart
+    || snapshotEnd < snapshotStart
+    || snapshotEnd > selectionEnd) return false;
+
+  return extractItemId(snapshot?.finalUrl, snapshot?.html) === String(expectedItemId || "");
+}
+
+function recoverInitialSelectedSkuPayloads(networkPayloads, selection, snapshot, expectedItemId) {
+  if (selection?.selected !== true || selection?.responseReceivedAfterSelection === true) return [];
+  if (!hasCurrentSkuSnapshotIdentity(snapshot, selection, expectedItemId)) return [];
+
+  const skuId = String(selection.skuId);
+  const captureRunId = String(selection.captureRunId);
+  const selectionStart = Number(selection.responseSequenceStartExclusive);
+  const exactResponses = networkPayloads.filter((payload) => (
+    payload.responseKind === "price"
+    && payload.captureRunId === captureRunId
+    && Number.isSafeInteger(payload.responseSequence)
+    && payload.responseSequence > 0
+    && payload.responseSequence <= selectionStart
+    && /\/mtop\.taobao\.pcdetail\.data\.adjust\/1\.0\//i.test(payload.url || "")
+    && payload.responseItemId === expectedItemId
+    && payload.responseSkuId === skuId
+    && (!payload.requestItemId || payload.requestItemId === expectedItemId)
+    && (!payload.requestSkuId || payload.requestSkuId === skuId)
+  ));
+
+  // The preheat response is the latest exact response before the repeated
+  // selection. Keeping only it avoids merging an unrelated earlier page-load
+  // response, while preserving the resolver's existing formula checks.
+  return exactResponses
+    .toSorted((left, right) => right.responseSequence - left.responseSequence)
+    .slice(0, 1);
 }
 
 export function hydrateBrowserCapturePage(record) {
@@ -1924,6 +1935,9 @@ export function hydrateBrowserCapturePage(record) {
     networkPayloads.filter((payload) => payload.skuId === skuId),
   ]));
   const storedSelections = (Array.isArray(stored.selectionResults) ? stored.selectionResults : []).map(compactSelectionResult);
+  const storedSkuSnapshots = Array.isArray(stored.skuSnapshots)
+    ? stored.skuSnapshots.map(compactSkuSnapshot).filter((snapshot) => snapshot.skuId && snapshot.selected)
+    : [];
   const windowedSkuPayloads = new Map();
   const selectionResults = storedSelections.map((selection) => {
     const skuId = selection.skuId;
@@ -1932,22 +1946,36 @@ export function hydrateBrowserCapturePage(record) {
       && Number.isSafeInteger(selection.responseSequenceEndInclusive);
     const skuPayloads = allSkuNetworkPayloads[skuId] || [];
     const windowPayloads = hasSequenceWindow
-      ? skuPayloads.filter((payload) => (
+      ? networkPayloads.filter((payload) => (
         payload.captureRunId === selection.captureRunId
         && Number.isSafeInteger(payload.responseSequence)
         && payload.responseSequence > selection.responseSequenceStartExclusive
         && payload.responseSequence <= selection.responseSequenceEndInclusive
+        && /\/mtop\.taobao\.pcdetail\.data\.adjust\/1\.0\//i.test(payload.url || "")
+        && (!payload.requestItemId || payload.requestItemId === expectedItemId)
+        && (!payload.responseItemId || payload.responseItemId === expectedItemId)
+        && (!payload.requestSkuId || payload.requestSkuId === skuId)
+        && (!payload.responseSkuId || payload.responseSkuId === skuId)
       ))
       // Legacy evidence predates response windows. The payload has already
       // passed exact itemId + response-body skuId checks above, so it can be
       // restored without borrowing any other SKU's promotion response.
       : skuPayloads;
+    const currentSkuSnapshot = storedSkuSnapshots.find((snapshot) => String(snapshot.skuId) === skuId) || null;
+    const recoveredInitialSkuPayloads = windowPayloads.length === 0
+      ? recoverInitialSelectedSkuPayloads(networkPayloads, selection, currentSkuSnapshot, expectedItemId)
+      : [];
+    const boundSkuPayloads = windowPayloads.length ? windowPayloads : recoveredInitialSkuPayloads;
     if (!windowedSkuPayloads.has(skuId)) windowedSkuPayloads.set(skuId, []);
-    windowedSkuPayloads.get(skuId).push(...windowPayloads);
+    windowedSkuPayloads.get(skuId).push(...boundSkuPayloads);
     const responseObserved = selection.selected === true
       && (!hasSequenceWindow || selection.responseReceivedAfterSelection === true)
       && windowPayloads.length > 0;
-    return { ...selection, responseObserved };
+    return {
+      ...selection,
+      responseObserved,
+      ...(recoveredInitialSkuPayloads.length ? { recoveredInitialSkuPayloadCount: recoveredInitialSkuPayloads.length } : {}),
+    };
   });
   const skuNetworkPayloads = storedSelections.length
     ? Object.fromEntries([...windowedSkuPayloads].map(([skuId, payloads]) => [skuId, payloads]))
@@ -1958,6 +1986,7 @@ export function hydrateBrowserCapturePage(record) {
     finalUrl: String(stored.finalUrl || record.finalUrl || record.requestedUrl || ""),
     statusCode: Number(stored.statusCode || 200),
     source: "browser",
+    evidenceSchemaVersion: Number(record?.schemaVersion || 1) === 2 ? 2 : 1,
     accessVerified: stored.accessVerified === true,
     networkPayloads,
     buyerShowPayloads: networkPayloads.filter((payload) => payload.responseKind === "buyer-show"),
@@ -1966,14 +1995,18 @@ export function hydrateBrowserCapturePage(record) {
     buyerShowInteractions: Array.isArray(stored.buyerShowInteractions) ? stored.buyerShowInteractions : [],
     mediaObservations: normalizeMediaObservations(stored.mediaObservations),
     selectionResults,
+    skuSnapshots: storedSkuSnapshots,
     promotionCaptureError: String(stored.promotionCaptureError || "").slice(0, 500),
   };
 }
 
-async function persistAndReloadBrowserCapture(evidence) {
+async function persistAndReloadBrowserCapture(evidence, { identityHints = [] } = {}) {
   const { readBrowserCaptureSource, saveBrowserCaptureSource } = await import("./localImportService.js");
-  const saved = await saveBrowserCaptureSource(evidence);
+  const saveStartedAt = Date.now();
+  const saved = await saveBrowserCaptureSource(evidence, { identityHints });
+  const saveCompletedAt = Date.now();
   const record = await readBrowserCaptureSource(saved.captureId);
+  const readCompletedAt = Date.now();
   const page = hydrateBrowserCapturePage(record);
   return {
     page,
@@ -1986,15 +2019,22 @@ async function persistAndReloadBrowserCapture(evidence) {
     captureId: saved.captureId,
     sourceFile: record.sourceFile,
     localFirst: record.localFirst,
+    timingsMs: {
+      localEvidenceSave: saveCompletedAt - saveStartedAt,
+      localEvidenceRead: readCompletedAt - saveCompletedAt,
+      localEvidenceReload: readCompletedAt - saveStartedAt,
+    },
   };
 }
 
 async function renderAndReloadBrowserCapture({ product, authSession, renderPage = getRenderedHtml, renderOptions = {}, capturedAt }) {
   const accountType = authSession?.accountType || "normal";
   let persistedCapture = null;
+  let localSelectionPreparationCalled = false;
   const persistObservedPage = async (observedPage) => {
     const itemId = extractItemId(observedPage.finalUrl, product.url, observedPage.html);
     assertMatchingProductId(product.url, itemId, observedPage.finalUrl);
+    const identityHints = [observedPage?.authState?.nickname, authSession?.name].filter(Boolean);
     persistedCapture = await persistAndReloadBrowserCapture(buildBrowserCaptureEvidence({
       product,
       accountType,
@@ -2005,16 +2045,55 @@ async function renderAndReloadBrowserCapture({ product, authSession, renderPage 
         selectionResults: observedPage.selectionResults || [],
       },
       capturedAt: capturedAt || new Date().toISOString(),
-    }));
+    }), { identityHints });
   };
-  const observedPage = await renderPage(product.url, authSession, {
+  const prepareSelectionsFromLocalEvidence = renderOptions.selectAllProductSkus === true
+    ? async (observedPage) => {
+      localSelectionPreparationCalled = true;
+      const itemId = extractItemId(observedPage.finalUrl, product.url, observedPage.html);
+      assertMatchingProductId(product.url, itemId, observedPage.finalUrl);
+      const identityHints = [observedPage?.authState?.nickname, authSession?.name].filter(Boolean);
+      const preliminaryCapture = await persistAndReloadBrowserCapture(buildBrowserCaptureEvidence({
+        product,
+        accountType,
+        itemId,
+        page: observedPage,
+        promotionCapture: { networkPayloads: [], selectionResults: [] },
+        capturedAt: capturedAt || new Date().toISOString(),
+      }), { identityHints });
+      return extractStructuredSku(preliminaryCapture.page.html).skuPrices.map((sku) => ({
+        skuId: sku.skuId,
+        valueIds: sku.selectionValueIds || [],
+      }));
+    }
+    : undefined;
+  let observedPage = await renderPage(product.url, authSession, {
     ...renderOptions,
+    prepareSelectionsFromLocalEvidence,
     persistEvidenceBeforeClose: persistObservedPage,
   });
   // Test renderers and third-party render adapters may not implement the
   // before-close hook. They have no live browser tab, so persist their returned
   // fixture here while retaining the same disk-only parsing contract.
   if (!persistedCapture) await persistObservedPage(observedPage);
+  // Test renderers and older adapters do not know the preparation callback.
+  // Keep them compatible without affecting the real browser path, which
+  // prepares and selects every SKU inside the original product tab.
+  if (renderOptions.selectAllProductSkus === true && !localSelectionPreparationCalled) {
+    const selectSkus = extractStructuredSku(persistedCapture.page.html).skuPrices.map((sku) => ({
+      skuId: sku.skuId,
+      valueIds: sku.selectionValueIds || [],
+    }));
+    if (selectSkus.length) {
+      observedPage = await renderPage(product.url, authSession, {
+        ...renderOptions,
+        selectAllProductSkus: false,
+        selectSkus,
+        persistEvidenceBeforeClose: persistObservedPage,
+      });
+      await persistObservedPage(observedPage);
+    }
+  }
   return persistedCapture;
 }
 
@@ -2094,7 +2173,10 @@ export async function scrapeTaobaoSearchMainImage(product, authSession, { render
         throw createTaobaoAccessRestrictedError(page.visibleText || page.html || "");
       }
       const { readBrowserCaptureSource, saveBrowserCaptureSource } = await import("./localImportService.js");
-      const saved = await saveBrowserCaptureSource(searchMainImageEvidence({ authSession, itemId, query, page, capturedAt }));
+      const saved = await saveBrowserCaptureSource(
+        searchMainImageEvidence({ authSession, itemId, query, page, capturedAt }),
+        { identityHints: [page?.authState?.nickname, authSession?.name].filter(Boolean) },
+      );
       persisted = await readBrowserCaptureSource(saved.captureId);
     };
     const observedPage = await renderPage(searchUrl, authSession, {
@@ -2270,13 +2352,126 @@ export function parseTmallMaterialsEvidence(product, record) {
   });
 }
 
+function localSkuObservation(page, baseSku) {
+  const skuId = String(baseSku?.skuId || "");
+  const snapshots = Array.isArray(page?.skuSnapshots) ? page.skuSnapshots : [];
+  const snapshot = snapshots.find((candidate) => candidate?.selected === true && String(candidate?.skuId || "") === skuId) || null;
+  const schemaVersion = Number(page?.evidenceSchemaVersion);
+  const legacyCapture = Number.isInteger(schemaVersion) ? schemaVersion < 2 : snapshots.length === 0;
+  const evidenceHtml = snapshot?.html || (legacyCapture ? String(page?.html || "") : "");
+  let observedSku = null;
+  if (evidenceHtml) {
+    try {
+      observedSku = extractStructuredSku(evidenceHtml).skuPrices.find((candidate) => String(candidate.skuId) === skuId) || null;
+    } catch {
+      observedSku = null;
+    }
+  }
+  return {
+    snapshot,
+    legacyCapture,
+    observedSku: observedSku || (legacyCapture ? baseSku : null),
+    promotionComponent: evidenceHtml ? extractEmbeddedPromotionComponent(evidenceHtml) : null,
+    selectedSkuVerified: snapshot?.selected === true,
+  };
+}
+
+function skuWithObservedPriceLayers(baseSku, observedSku) {
+  if (!observedSku) return baseSku;
+  return {
+    ...baseSku,
+    originalPrice: observedSku.originalPrice,
+    price: observedSku.price,
+    normalPrice: observedSku.normalPrice,
+    surprisePrice: observedSku.surprisePrice,
+    coinPrice: observedSku.coinPrice,
+    priceTitle: observedSku.priceTitle,
+    priceLayers: observedSku.priceLayers,
+    discountItems: observedSku.discountItems,
+    quantity: observedSku.quantity,
+    quantityText: observedSku.quantityText,
+  };
+}
+
+export function resolveLocalSkuPriceRows(page, { itemId, accountType = "normal", capturedAt = new Date().toISOString() } = {}) {
+  let structuredSku = { skuPrices: [], skuImages: [], displayPrice: null };
+  try {
+    structuredSku = extractStructuredSku(String(page?.html || ""));
+  } catch {
+    // Exact endpoint evidence can remain valid when unrelated embedded JSON is malformed.
+  }
+  const structuredBySku = new Map(structuredSku.skuPrices.map((sku) => [String(sku.skuId), sku]));
+  const skuIds = new Set([
+    ...structuredBySku.keys(),
+    ...Object.keys(page?.skuNetworkPayloads || {}),
+    ...(page?.skuSnapshots || []).map((snapshot) => String(snapshot?.skuId || "")).filter(Boolean),
+  ]);
+  const observations = new Map();
+  const resolutions = new Map();
+  const skuPrices = [];
+  for (const skuId of skuIds) {
+    const baseSku = structuredBySku.get(skuId) || {
+      skuId,
+      name: `SKU ${skuId}`,
+      image: "",
+      priceLayers: [],
+      discountItems: [],
+      quantity: 0,
+      quantitySource: "local-evidence",
+    };
+    const observation = localSkuObservation(page, baseSku);
+    const selection = (page?.selectionResults || []).find((item) => String(item?.skuId || "") === skuId);
+    const skuNetworkPayloads = observation.legacyCapture || observation.selectedSkuVerified
+      ? page?.skuNetworkPayloads?.[skuId] || []
+      : [];
+    const networkResolution = resolveSkuPriceEvidence(skuNetworkPayloads, {
+      itemId,
+      skuId,
+      accountType,
+      selectedSkuVerified: observation.selectedSkuVerified || Boolean(observation.legacyCapture && selection?.responseObserved),
+      capturedAt,
+    });
+    const embeddedPromotionResolution = resolveEmbeddedPromotionPriceEvidence(observation.promotionComponent, {
+      itemId,
+      skuId,
+      accountType,
+      capturedAt,
+    });
+    const embeddedResolution = resolveEmbeddedSkuPriceEvidence(observation.observedSku, {
+      itemId,
+      skuId,
+      accountType,
+      capturedAt,
+    });
+    const explicitResolution = selectAuthoritativePriceResolution(networkResolution, embeddedPromotionResolution);
+    const resolution = selectAuthoritativePriceResolution(explicitResolution, embeddedResolution);
+    const scopedResolution = applyItemScopedNewCustomerGift(resolution, observation.promotionComponent, {
+      itemId,
+      skuId,
+      accountType,
+      capturedAt,
+    });
+    observations.set(skuId, observation);
+    resolutions.set(skuId, scopedResolution);
+    skuPrices.push({
+      ...applyPriceResolution(skuWithObservedPriceLayers(baseSku, observation.observedSku), scopedResolution),
+      accountType,
+    });
+  }
+  return {
+    structuredSku: { ...structuredSku, skuPrices },
+    observations,
+    resolutions,
+  };
+}
+
 export async function scrapeTmallProduct(product, authSession, { renderPage = getRenderedHtml } = {}) {
   if (authSession?.source !== "taobao-browser") {
     throw new Error("商品抓取只允许使用已扫码授权的账号浏览器采集，已阻止后端直接请求淘宝接口。");
   }
   const startedAtMs = Date.now();
   const startedAt = new Date(startedAtMs).toISOString();
-  let initial = await fetchHtml(product, authSession, renderPage, { capturedAt: startedAt });
+  const initial = await fetchHtml(product, authSession, renderPage, { capturedAt: startedAt, selectAllProductSkus: true });
   let page = initial.page;
   let accessMode = resolveCaptureAccessMode(authSession, page);
   if (accessMode !== "authenticated") {
@@ -2297,18 +2492,6 @@ export async function scrapeTmallProduct(product, authSession, { renderPage = ge
   // browser observation before closing its tab, then reloaded it from disk.
   // The first read supplies only selection metadata; prices are parsed from
   // the final local read below.
-  const initialHasCurrentPrice = hasCurrentSkuPriceData(initial.page.html);
-  if (!initialHasCurrentPrice) {
-    const refreshed = await fetchHtml(product, authSession, renderPage, { preserveCache: false, capturedAt: startedAt });
-    const refreshedPage = refreshed.page;
-    const refreshedItemId = extractItemId(refreshedPage.finalUrl, product.url, refreshedPage.html);
-    assertMatchingProductId(product.url, refreshedItemId, refreshedPage.finalUrl);
-    if (!hasCurrentSkuPriceData(refreshedPage.html) && hasTmallPriceLoginGate(
-      refreshedPage.networkPayloads || [],
-      `${refreshedPage.visibleText || ""}\n${refreshedPage.html || ""}`,
-    )) throw tmallPriceAuthRequiredError();
-    initial = refreshed;
-  }
   page = initial.page;
   let browserCapture = initial;
   html = page.html;
@@ -2318,26 +2501,11 @@ export async function scrapeTmallProduct(product, authSession, { renderPage = ge
   const promotionCaptureSkus = extractStructuredSku(html).skuPrices;
   const promotionCaptureStartedAt = Date.now();
   let mobilePromotionCapture = promotionCaptureSkus.length
-    ? await fetchMobilePromotionPayloads(itemId, promotionCaptureSkus, authSession, renderPage, startedAt)
+    ? initial.promotionCapture
     : { networkPayloads: [], skuNetworkPayloads: {}, selectionResults: [] };
-  const retrySkuIds = new Set(retryableSelectionSkuIds(
-    promotionCaptureSkus,
-    mobilePromotionCapture.selectionResults,
-  ));
-  if (retrySkuIds.size) {
-    const retrySkus = promotionCaptureSkus.filter((sku) => retrySkuIds.has(String(sku.skuId)));
-    const retryCapture = await fetchMobilePromotionPayloads(itemId, retrySkus, authSession, renderPage, startedAt);
-    mobilePromotionCapture = mergePromotionCaptureRetry(mobilePromotionCapture, retryCapture);
-  }
   const promotionCaptureCompletedAt = Date.now();
-  const reloaded = await persistAndReloadBrowserCapture(buildBrowserCaptureEvidence({
-    product,
-    accountType,
-    itemId,
-    page,
-    promotionCapture: mobilePromotionCapture,
-    capturedAt: startedAt,
-  }));
+  const reloaded = initial;
+  const localParseStartedAt = Date.now();
   try {
   page = reloaded.page;
   mobilePromotionCapture = reloaded.promotionCapture;
@@ -2352,36 +2520,22 @@ export async function scrapeTmallProduct(product, authSession, { renderPage = ge
   if (domData.title === "登录" && !/skuCore|skuBase/i.test(html)) {
     throw new Error("当前抓到的是登录页，请在账号授权中重新同步淘宝扫码会话。");
   }
-  const structuredSku = extractStructuredSku(html);
-  const embeddedPromotionComponent = extractEmbeddedPromotionComponent(html);
-  const embeddedResolutions = new Map(structuredSku.skuPrices.map((sku) => [
-    String(sku.skuId),
-    resolveEmbeddedSkuPriceEvidence(sku, { itemId, skuId: sku.skuId, accountType, capturedAt: startedAt }),
-  ]));
-  const currentSkuResolutions = new Map(structuredSku.skuPrices.map((sku) => {
-    const skuPayloads = [
-      ...(page.skuNetworkPayloads?.[sku.skuId] || []),
-      ...(mobilePromotionCapture.skuNetworkPayloads?.[sku.skuId] || []),
-    ];
-    const selection = mobilePromotionCapture.selectionResults.find((item) => String(item.skuId) === String(sku.skuId));
-    const networkResolution = resolveSkuPriceEvidence(skuPayloads, {
-      itemId,
-      skuId: sku.skuId,
-      accountType,
-      selectedSkuVerified: Boolean(selection?.responseObserved),
-      capturedAt: startedAt,
-    });
-    const embeddedPromotionResolution = resolveEmbeddedPromotionPriceEvidence(embeddedPromotionComponent, {
-      itemId,
-      skuId: sku.skuId,
-      accountType,
-      capturedAt: startedAt,
-    });
-    const explicitResolution = selectAuthoritativePriceResolution(networkResolution, embeddedPromotionResolution);
-    return [String(sku.skuId), selectAuthoritativePriceResolution(explicitResolution, embeddedResolutions.get(String(sku.skuId)))];
-  }));
+  const { structuredSku, resolutions: currentSkuResolutions } = resolveLocalSkuPriceRows(page, {
+    itemId,
+    accountType,
+    capturedAt: startedAt,
+  });
   const finalPricePayloads = [...(page.networkPayloads || []), ...(mobilePromotionCapture.networkPayloads || [])];
-  if (shouldRequireTmallPriceAuthorization(finalPricePayloads, currentSkuResolutions)) {
+  const observedPageText = [
+    page.visibleText,
+    html,
+    ...(page.skuSnapshots || []).flatMap((snapshot) => [snapshot.visibleText, snapshot.html]),
+  ].filter(Boolean).join("\n");
+  if (shouldRequireTmallPriceAuthorization(
+    finalPricePayloads,
+    currentSkuResolutions,
+    observedPageText,
+  )) {
     throw tmallPriceAuthRequiredError();
   }
   const excludedPromotionSkuImages = new Set(structuredSku.skuPrices
@@ -2393,15 +2547,6 @@ export async function scrapeTmallProduct(product, authSession, { renderPage = ge
     mobilePromotionCapture.selectionResults.find((item) => String(item.skuId) === String(sku.skuId)),
   ));
   structuredSku.skuImages = structuredSku.skuImages.filter((image) => !excludedPromotionSkuImages.has(image));
-  structuredSku.skuPrices = structuredSku.skuPrices.map((sku) => {
-    const scopedResolution = applyItemScopedNewCustomerGift(currentSkuResolutions.get(String(sku.skuId)), embeddedPromotionComponent, {
-      itemId,
-      skuId: sku.skuId,
-      accountType,
-      capturedAt: startedAt,
-    });
-    return applyPriceResolution(sku, scopedResolution);
-  });
   const shopName = extractShopName(html, jsonData, domData, page.finalUrl);
   const shopLogo = extractShopLogo(html, jsonData, domData);
   const model = extractModel(html, jsonData, domData);
@@ -2497,11 +2642,11 @@ export async function scrapeTmallProduct(product, authSession, { renderPage = ge
       highResImageCount: mainImages.length + media.detailImages.length,
       networkPriceResponseCount: page.networkPayloads?.length || 0,
       mobilePromotionResponseCount: mobilePromotionCapture.networkPayloads.length,
-      verifiedSkuSelectionCount: mobilePromotionCapture.selectionResults.filter((item) => item.responseObserved).length,
+      verifiedSkuSelectionCount: new Set((page.skuSnapshots || []).filter((item) => item.selected).map((item) => String(item.skuId))).size,
       skuSelectionCount: mobilePromotionCapture.selectionResults.length,
       skuSelectionResults: mobilePromotionCapture.selectionResults,
-      retriedSkuSelectionCount: retrySkuIds.size,
-      unresolvedSkuSelectionCount: retryableSelectionSkuIds(promotionCaptureSkus, mobilePromotionCapture.selectionResults).length,
+      skuHtmlSnapshotCount: new Set((page.skuSnapshots || []).filter((item) => item.selected).map((item) => String(item.skuId))).size,
+      unresolvedSkuSelectionCount: Math.max(0, promotionCaptureSkus.length - new Set((page.skuSnapshots || []).filter((item) => item.selected).map((item) => String(item.skuId))).size),
       promotionCaptureError: mobilePromotionCapture.captureError || "",
       observedSkuCount,
       outputSkuCount: skuPrices.length,
@@ -2509,6 +2654,11 @@ export async function scrapeTmallProduct(product, authSession, { renderPage = ge
       timingsMs: {
         pageCapture: pageCaptureCompletedAt - startedAtMs,
         promotionCapture: promotionCaptureCompletedAt - promotionCaptureStartedAt,
+        browserAcquisition: (pageCaptureCompletedAt - startedAtMs) + (promotionCaptureCompletedAt - promotionCaptureStartedAt),
+        localEvidenceSave: reloaded.timingsMs?.localEvidenceSave || 0,
+        localEvidenceRead: reloaded.timingsMs?.localEvidenceRead || 0,
+        localEvidenceReload: reloaded.timingsMs?.localEvidenceReload || 0,
+        localParse: Date.now() - localParseStartedAt,
         mobileDetail: 0,
         buyerShow: buyerShowCompletedAt - buyerShowStartedAt,
         total: Date.now() - startedAtMs,

@@ -71,6 +71,7 @@ test("masked edits reject candidates that alter protected pixels and rank valid 
   const mask = await sharp(maskPixels, { raw: { width: 64, height: 64, channels: 4 } }).png().toBuffer();
   const good = await sharp(goodPixels, { raw: { width: 64, height: 64, channels: 4 } }).png().toBuffer();
   const bad = await sharp({ create: { width: 64, height: 64, channels: 4, background: "#f4f0e8" } }).png().toBuffer();
+  let requestIndex = 0;
   const result = await generateImages(config, {
     prompt: "只修改左半边",
     ratio: "1:1",
@@ -83,11 +84,22 @@ test("masked edits reject candidates that alter protected pixels and rank valid 
     env,
     referenceImages: [{ buffer: source, mimetype: "image/png", originalname: "source.png" }],
     maskImage: { buffer: mask, mimetype: "image/png", originalname: "mask.png" },
-    fetchImpl: async () => new Response(JSON.stringify({ data: [
-      { b64_json: bad.toString("base64") },
-      { b64_json: good.toString("base64") },
-    ] }), { status: 200 }),
+    fetchImpl: async (_url, init) => {
+      assert.equal(init.body.has("n"), false);
+      const [submittedSource, submittedMask] = await Promise.all([
+        sharp(Buffer.from(await init.body.get("image").arrayBuffer())).metadata(),
+        sharp(Buffer.from(await init.body.get("mask").arrayBuffer())).metadata(),
+      ]);
+      assert.deepEqual(
+        { width: submittedSource.width, height: submittedSource.height },
+        { width: submittedMask.width, height: submittedMask.height },
+      );
+      const candidate = requestIndex === 0 ? bad : good;
+      requestIndex += 1;
+      return new Response(JSON.stringify({ data: [{ b64_json: candidate.toString("base64") }] }), { status: 200 });
+    },
   });
+  assert.equal(requestIndex, 2);
   assert.equal(result.images.length, 1);
   assert.equal(result.images[0].validation.passed, true);
   assert.ok(result.images[0].validation.score >= 70);
@@ -180,7 +192,7 @@ test("application copy layer uses a real font render after generating a text-fre
   assert.deepEqual(await sharp(result.images[0].buffer).metadata().then(({ width, height }) => ({ width, height })), { width: 1024, height: 1024 });
 });
 
-test("image request supports quality, format, background, compression and count", () => {
+test("image request supports quality, format, background and compression without forwarding count", () => {
   assert.deepEqual(buildImageGenerationRequest({
     prompt: "studio product photo",
     negativePrompt: "text",
@@ -197,7 +209,6 @@ test("image request supports quality, format, background, compression and count"
     quality: "high",
     output_format: "webp",
     background: "transparent",
-    n: 4,
     output_compression: 82,
   });
   assert.equal("output_compression" in buildImageGenerationRequest({ prompt: "x", format: "png", compression: 20 }), false);
@@ -326,7 +337,7 @@ test("generateImages sends a Bearer request and reports the actual result count"
     imageModel: "gpt-image-2",
   }, { env });
   const raw = (await sharp({ create: { width: 16, height: 16, channels: 4, background: "#336699" } }).png().toBuffer()).toString("base64");
-  let request;
+  const requests = [];
   const result = await generateImages(config, {
     prompt: "clean product photo",
     ratio: "16:9",
@@ -338,17 +349,19 @@ test("generateImages sends a Bearer request and reports the actual result count"
   }, {
     env,
     fetchImpl: async (url, init) => {
-      request = { url, init, body: JSON.parse(init.body) };
+      requests.push({ url, init, body: JSON.parse(init.body) });
       return new Response(JSON.stringify({ created: 123, data: [{ b64_json: raw }] }), { status: 200 });
     },
   });
-  assert.equal(request.url, `${MODEL_CHANNELS.stable.baseUrl}/images/generations`);
-  assert.equal(request.init.headers.authorization, "Bearer sk-image-private");
-  assert.equal(request.body.size, "1536x1024");
-  assert.equal(request.body.output_compression, 75);
+  assert.equal(requests.length, 4);
+  assert.equal(requests[0].url, `${MODEL_CHANNELS.stable.baseUrl}/images/generations`);
+  assert.equal(requests[0].init.headers.authorization, "Bearer sk-image-private");
+  assert.equal(requests[0].body.size, "1536x1024");
+  assert.equal(requests[0].body.output_compression, 75);
+  assert.equal(requests.every(({ body }) => !("n" in body)), true);
   assert.equal(result.requestedCount, 4);
-  assert.equal(result.generatedCount, 1);
-  assert.equal(result.images.length, 1);
+  assert.equal(result.generatedCount, 4);
+  assert.equal(result.images.length, 4);
   assert.equal(result.size, "1024x576");
   assert.equal(result.images[0].outputSize, "1024x576");
   assert.equal(result.images[0].processing, "upscaled");
@@ -383,10 +396,37 @@ test("reference images use the compatible multipart edits endpoint", async () =>
   assert.equal(request.init.headers["content-type"], undefined);
   assert.ok(request.init.body instanceof FormData);
   assert.ok(request.init.body.get("image") instanceof Blob);
+  assert.equal(request.init.body.has("n"), false);
   assert.equal(request.init.body.get("prompt"), mergeImagePrompt("change the package color", "", "reference"));
   assert.doesNotMatch(request.init.body.get("prompt"), /第一张图片是待编辑原图/);
   assert.equal(result.appliedOptions.mode, "edit");
   assert.equal(result.appliedOptions.referenceImageCount, 1);
+});
+
+test("reference redraw submits the requested portrait model canvas before generation", async () => {
+  const config = updateModelConfig({}, { channel: "fast", apiKey: "sk-image-private", imageModel: "gpt-image-2" }, { env });
+  const source = await sharp({ create: { width: 120, height: 80, channels: 4, background: "#ffffff" } }).png().toBuffer();
+  const edited = await sharp({ create: { width: 120, height: 80, channels: 4, background: "#2457d6" } }).png().toBuffer();
+  let submittedSize = null;
+  let submittedReference = null;
+  const result = await generateImages(config, {
+    prompt: "重新设计竖版商品画面",
+    ratio: "3:4",
+    resolution: "1k",
+    format: "png",
+    editIntent: "redraw",
+  }, {
+    env,
+    referenceImages: [{ buffer: source, mimetype: "image/png", originalname: "source.png" }],
+    fetchImpl: async (_url, init) => {
+      submittedSize = init.body.get("size");
+      submittedReference = await sharp(Buffer.from(await init.body.get("image").arrayBuffer())).metadata();
+      return new Response(JSON.stringify({ data: [{ b64_json: edited.toString("base64") }] }), { status: 200 });
+    },
+  });
+  assert.equal(submittedSize, "1024x1536");
+  assert.deepEqual({ width: submittedReference.width, height: submittedReference.height }, { width: 1024, height: 1536 });
+  assert.equal(result.appliedOptions.referenceCanvasPrepared, true);
 });
 
 test("reference edits reject an unchanged image instead of reporting false success", async () => {
@@ -425,6 +465,48 @@ test("reference edits always save the exact selected 3:4 canvas size", async () 
   assert.deepEqual({ width: metadata.width, height: metadata.height }, { width: 1536, height: 2048 });
   assert.equal(result.images[0].outputSize, "1536x2048");
   assert.equal(result.appliedOptions.ratio, "3:4");
+});
+
+test("mismatched model output extends continuous edges without stretching the complete foreground", async () => {
+  const config = updateModelConfig({}, { channel: "fast", apiKey: "sk-image-private", imageModel: "gpt-image-2" }, { env });
+  const source = await sharp({ create: { width: 90, height: 120, channels: 4, background: "#ffffff" } }).png().toBuffer();
+  const pixels = Buffer.alloc(120 * 80 * 4);
+  for (let row = 0; row < 80; row += 1) {
+    for (let column = 0; column < 120; column += 1) {
+      const offset = (row * 120 + column) * 4;
+      const color = row < 4 ? [239, 41, 41] : row >= 76 ? [36, 161, 72] : [36, 87 + row, 214 - row];
+      pixels[offset] = color[0];
+      pixels[offset + 1] = color[1];
+      pixels[offset + 2] = color[2];
+      pixels[offset + 3] = 255;
+    }
+  }
+  const edited = await sharp(pixels, { raw: { width: 120, height: 80, channels: 4 } }).png().toBuffer();
+  const result = await generateImages(config, {
+    prompt: "重新设计画面",
+    ratio: "3:4",
+    resolution: "1k",
+    format: "png",
+  }, {
+    env,
+    referenceImages: [{ buffer: source, mimetype: "image/png", originalname: "source.png" }],
+    fetchImpl: async () => new Response(JSON.stringify({ data: [{ b64_json: edited.toString("base64") }] }), { status: 200 }),
+  });
+  const { data, info } = await sharp(result.images[0].buffer).removeAlpha().raw().toBuffer({ resolveWithObject: true });
+  const pixel = (x, y) => [...data.subarray((y * info.width + x) * info.channels, (y * info.width + x) * info.channels + 3)];
+  const foregroundTop = pixel(Math.floor(info.width / 2), 258);
+  const foregroundBottom = pixel(Math.floor(info.width / 2), 765);
+  const lowerBackgroundA = pixel(Math.floor(info.width / 2), 850);
+  const lowerBackgroundB = pixel(Math.floor(info.width / 2), 1000);
+  assert.ok(foregroundTop[0] > 200 && foregroundTop[1] < 100, `complete top edge was lost: ${foregroundTop}`);
+  assert.ok(foregroundBottom[1] > 100 && foregroundBottom[0] < 100, `complete bottom edge was lost: ${foregroundBottom}`);
+  assert.notDeepEqual(lowerBackgroundA, lowerBackgroundB, "the missing canvas was filled by repeating one stretched edge row");
+  const topSeamOutside = pixel(Math.floor(info.width / 2), 255);
+  const topSeamInside = pixel(Math.floor(info.width / 2), 256);
+  assert.ok(topSeamOutside.every((value, index) => Math.abs(value - topSeamInside[index]) <= 12), `the extended edge contains a visible seam: ${topSeamOutside} / ${topSeamInside}`);
+  assert.deepEqual({ width: info.width, height: info.height }, { width: 768, height: 1024 });
+  assert.equal(result.images[0].processing, "upscaled");
+  assert.match(result.warnings.join(" "), /不会拉伸或裁切产品/);
 });
 
 test("an edit endpoint missing on a compatible gateway returns a clear error", async () => {

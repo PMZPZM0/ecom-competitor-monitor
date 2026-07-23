@@ -19,6 +19,7 @@ import type { ImageGenerationJob, ImageGenerationJobStatus, ImageLibraryItem } f
 import { visiblePrompt } from '../prompt-studio/promptLayers'
 
 type Props = {
+  active?: boolean
   jobs: ImageGenerationJob[]
   loading: boolean
   error: string
@@ -69,17 +70,17 @@ function jobSummary(job: ImageGenerationJob, now: number) {
   return job.startedAt ? `运行 ${durationLabel(elapsedMs(job, now))} 后取消` : '排队时取消'
 }
 
-export function ImageJobQueue({ jobs, loading, error, feedback, clearing, busyJobId, onRefresh, onClear, onRetry, onCancel, onOpenImage }: Props) {
+export function ImageJobQueue({ active = true, jobs, loading, error, feedback, clearing, busyJobId, onRefresh, onClear, onRetry, onCancel, onOpenImage }: Props) {
   const [expanded, setExpanded] = useState(false)
   const [now, setNow] = useState(Date.now())
   const [unavailableImageIds, setUnavailableImageIds] = useState<Set<string>>(() => new Set())
   const hasActive = jobs.some((job) => job.status === 'queued' || job.status === 'running')
 
   useEffect(() => {
-    if (!hasActive) return undefined
+    if (!active || !hasActive) return undefined
     const timer = window.setInterval(() => setNow(Date.now()), 1000)
     return () => window.clearInterval(timer)
-  }, [hasActive])
+  }, [active, hasActive])
 
   const ordered = useMemo(() => [...jobs].sort((left, right) => {
     const leftActive = left.status === 'queued' || left.status === 'running'
@@ -94,7 +95,7 @@ export function ImageJobQueue({ jobs, loading, error, feedback, clearing, busyJo
   const clearableCount = jobs.filter((job) => !['running', 'saving'].includes(job.status)).length
 
   return (
-    <section className="border-b border-white/80 bg-white/30 backdrop-blur-sm" aria-labelledby="image-job-queue-title">
+    <section className="border-b border-white/80 bg-white/72" aria-labelledby="image-job-queue-title">
       <div className="flex flex-wrap items-center justify-between gap-3 px-4 py-3">
         <div className="flex min-w-0 items-center gap-2.5">
           <span className={`inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-md ${activeCount ? 'bg-blue-600 text-white' : 'bg-slate-100 text-slate-500'}`}><ListChecks className="h-4 w-4" /></span>

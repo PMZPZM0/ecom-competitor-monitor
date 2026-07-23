@@ -16,7 +16,7 @@ type Props = {
   onCapture: (product: Product, options?: ProductCaptureOptions) => Promise<Product | void>
   onRetryBuyerShows: (product: Product) => Promise<Product>
   onCaptureSearchMainImage: (product: Product) => Promise<{ ok: boolean; status: NonNullable<Product['searchMainImageStatus']>; product: Product; message: string }>
-  onReparseLocalEvidence: (product: Product, kind: 'materials' | 'buyer-show' | 'search-main-image') => Promise<{ ok: boolean; product: Product; message: string }>
+  onReparseLocalEvidence: (product: Product, kind: 'price' | 'materials' | 'buyer-show' | 'search-main-image') => Promise<{ ok: boolean; product: Product; message: string }>
   onLocalImport: (product?: Product) => void
   onDelete: (product: Product) => Promise<void>
   busyProductId?: string

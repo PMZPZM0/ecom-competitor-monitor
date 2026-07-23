@@ -12,7 +12,15 @@ export default defineConfig({
     watch: {
       // Runtime state written by the local canvas helper is not application
       // source. Watching it causes Vite to full-reload the page every few seconds.
-      ignored: ['**/server/data/**', '**/canvas/**', '**/release/**', '**/release-downloads/**'],
+      ignored: [
+        '**/server/data/**',
+        '**/canvas/**',
+        '**/release/**',
+        '**/release-downloads/**',
+        '**/output/**',
+        '**/dist/**',
+        '**/.git/**',
+      ],
     },
     proxy: {
       '/api': 'http://127.0.0.1:4317',

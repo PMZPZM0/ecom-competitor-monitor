@@ -5,6 +5,7 @@ import { Button } from '../../components/ui/button'
 import { api } from '../../lib/api'
 import type { ImageLibraryItem } from '../../types/domain'
 import { visibleNegativePrompt, visiblePrompt } from '../prompt-studio/promptLayers'
+import { ImageInspectViewport } from './ImageInspectViewport'
 
 type Props = {
   item: ImageLibraryItem
@@ -68,8 +69,8 @@ export function ImageDetailDialog({ item, src, busy, onClose, onDownload, onDele
         </header>
 
         <div className="flex min-h-0 flex-1 flex-col lg:grid lg:grid-cols-[minmax(0,1fr)_320px]">
-          <div className={`min-h-[320px] overflow-hidden bg-slate-100 p-3 sm:p-6 ${compare && item.parentImageId ? 'grid grid-cols-1 gap-3 sm:grid-cols-2' : 'flex items-center justify-center'}`}>
-            {compare && item.parentImageId ? <><figure className="flex min-h-0 flex-col"><figcaption className="mb-2 text-center text-xs font-medium text-slate-500">原图</figcaption><img src={api.imageFileUrl(item.parentImageId)} alt="编辑前原图" className="min-h-0 flex-1 object-contain shadow-lg" /></figure><figure className="flex min-h-0 flex-col"><figcaption className="mb-2 text-center text-xs font-medium text-blue-700">编辑结果</figcaption><img src={src} alt="编辑后结果" className="min-h-0 flex-1 object-contain shadow-lg" /></figure></> : <img src={src} alt="AI 生成图片详情" className="max-h-full max-w-full object-contain shadow-lg" />}
+          <div className={`h-[52dvh] min-h-[320px] overflow-hidden bg-slate-200 lg:h-auto lg:min-h-0 ${compare && item.parentImageId ? 'grid grid-cols-1 gap-px bg-slate-300 sm:grid-cols-2' : ''}`}>
+            {compare && item.parentImageId ? <><figure className="flex min-h-0 flex-col bg-slate-100"><figcaption className="shrink-0 border-b border-slate-200 bg-white px-3 py-2 text-center text-xs font-medium text-slate-600">原图</figcaption><ImageInspectViewport src={api.imageFileUrl(item.parentImageId)} alt="编辑前原图" className="flex-1" /></figure><figure className="flex min-h-0 flex-col bg-slate-100"><figcaption className="shrink-0 border-b border-slate-200 bg-white px-3 py-2 text-center text-xs font-medium text-blue-700">编辑结果</figcaption><ImageInspectViewport src={src} alt="编辑后结果" className="flex-1" /></figure></> : <ImageInspectViewport src={src} alt="AI 生成图片详情" className="h-full w-full" />}
           </div>
           <aside className="scrollbar-thin overflow-y-auto border-t border-slate-200 p-4 lg:border-l lg:border-t-0">
             <div className="flex flex-wrap gap-2">

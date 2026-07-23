@@ -253,6 +253,10 @@ export async function clearStaleCaptureJobs(validProductIds) {
     const jobs = Array.isArray(db.captureJobs) ? db.captureJobs : [];
     const retained = jobs.filter((job) => {
       if (isRunning(job)) return true;
+      // A failed first capture can remove its temporary empty product card.
+      // Keep the terminal diagnostic in the queue until normal retention or
+      // an explicit clear, otherwise the failure disappears with the card.
+      if (job?.status === "failed" || job?.stage === "failed") return true;
       const referencedIds = captureJobProductIds(job);
       const stale = referencedIds.length > 0 && !referencedIds.some((id) => validIds.has(id));
       if (stale) removed.push(job);

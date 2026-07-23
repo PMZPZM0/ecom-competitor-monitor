@@ -104,9 +104,9 @@ function App() {
     setCustomWallpaperUrl(nextUrl)
   }, [])
 
-  async function refresh() {
+  const refresh = useCallback(async () => {
     setOverview(await api.overview())
-  }
+  }, [])
 
   useEffect(() => {
     const refreshWhenVisible = () => {
@@ -119,7 +119,7 @@ function App() {
       window.clearInterval(timer)
       document.removeEventListener('visibilitychange', refreshWhenVisible)
     }
-  }, [])
+  }, [refresh])
 
   useEffect(() => {
     const check = () => checkUpdates(false, true).catch(() => undefined)
@@ -204,19 +204,6 @@ function App() {
     return overview?.authSessions.some((session) => session.source === 'taobao-browser' && (session.enabled ?? session.active) && session.loginStatus !== 'expired' && (!accountType || (session.accountType || 'normal') === accountType)) === true
   }
 
-  function hasDegradedTmallAccount(accountType: AccountType) {
-    const sessions = overview?.authSessions.filter((session) => session.source === 'taobao-browser' && (session.enabled ?? session.active) && session.loginStatus !== 'expired' && (session.accountType || 'normal') === accountType) || []
-    return sessions.length > 0 && sessions.every((session) => session.tmallPriceStatus === 'degraded')
-  }
-
-  async function prepareDegradedTmallAccounts(accountType: AccountType) {
-    const sessions = overview?.authSessions.filter((session) => session.source === 'taobao-browser' && (session.enabled ?? session.active) && session.loginStatus !== 'expired' && session.tmallPriceStatus === 'degraded' && (session.accountType || 'normal') === accountType) || []
-    for (const session of sessions) {
-      const result = await api.reauthorizeAuthSession(session.id)
-      if (result.mode !== 'silent') throw new Error('账号登录状态已变化，请完成淘宝扫码后再抓取。')
-    }
-  }
-
   function showAuthGuide(accountType: AccountType) {
     setNotice('')
     setError('')
@@ -229,12 +216,8 @@ function App() {
       throw new Error('尚未授权可用的淘宝扫码账号。')
     }
     setError('')
-    setNotice(hasDegradedTmallAccount(payload.accountType)
-      ? '正在保留当前登录状态并后台静默恢复天猫价格授权...'
-      : '正在后台采集价格、800 主图和 SKU 图；采集后将脱敏保存并从本地证据解析...')
+    setNotice('正在后台采集价格、800 主图和 SKU 图；采集后将脱敏保存并从本地证据解析...')
     try {
-      if (hasDegradedTmallAccount(payload.accountType)) await prepareDegradedTmallAccounts(payload.accountType)
-      setNotice('正在后台采集价格、800 主图和 SKU 图；采集后将脱敏保存并从本地证据解析...')
       const product = await api.addProduct(payload)
       setBusyProductId(product.id)
       const result = await api.captureProduct(product.id, 'price', true)
@@ -259,12 +242,8 @@ function App() {
     }
     setBusy(true)
     setError('')
-    setNotice(hasDegradedTmallAccount(payload.accountType)
-      ? '正在保留当前登录状态并后台静默恢复天猫价格授权...'
-      : `正在按队列采集 ${payload.urls.length} 个新商品的价格、800 主图和 SKU 图；每个商品采集后都会脱敏保存并从本地证据解析...`)
+    setNotice(`正在按队列采集 ${payload.urls.length} 个新商品的价格、800 主图和 SKU 图；每个商品采集后都会脱敏保存并从本地证据解析...`)
     try {
-      if (hasDegradedTmallAccount(payload.accountType)) await prepareDegradedTmallAccounts(payload.accountType)
-      setNotice(`正在按队列采集 ${payload.urls.length} 个新商品的价格、800 主图和 SKU 图；每个商品采集后都会脱敏保存并从本地证据解析...`)
       const result = await api.addProductsBatch(payload)
       setNotice(result.message)
       await refresh()
@@ -373,7 +352,7 @@ function App() {
     }
   }
 
-  async function reparseProductLocalEvidence(product: Product, kind: 'materials' | 'buyer-show' | 'search-main-image') {
+  async function reparseProductLocalEvidence(product: Product, kind: 'price' | 'materials' | 'buyer-show' | 'search-main-image') {
     setBusyProductId(product.id)
     try {
       const result = await api.reparseProductLocalEvidence(product.id, kind)
@@ -633,17 +612,20 @@ function App() {
   const selectedWallpaperSrc = selectedWallpaper.id === CUSTOM_APP_WALLPAPER_ID ? customWallpaperUrl : selectedWallpaper.src
 
   return (
-    <div
-      className={`wallpaper-${selectedWallpaper.id} min-h-screen bg-[#f6f8fa]`}
-      style={selectedWallpaperSrc ? {
-        backgroundAttachment: 'fixed',
-        backgroundImage: `linear-gradient(rgba(246, 248, 250, 0.46), rgba(246, 248, 250, 0.46)), url(${selectedWallpaperSrc})`,
-        backgroundPosition: selectedWallpaper.position,
-        backgroundRepeat: 'no-repeat',
-        backgroundSize: 'contain',
-      } : undefined}
-    >
-      <aside className="app-sidebar app-sidebar-surface fixed inset-y-0 left-0 flex w-64 flex-col border-r border-white/70">
+    <div className={`wallpaper-${selectedWallpaper.id} relative min-h-screen ${selectedWallpaperSrc ? 'bg-transparent' : 'bg-[#f6f8fa]'}`}>
+      {selectedWallpaperSrc && (
+        <div
+          aria-hidden="true"
+          className="pointer-events-none fixed inset-0 z-0 bg-[#f6f8fa]"
+          style={{
+            backgroundImage: `linear-gradient(rgba(246, 248, 250, 0.46), rgba(246, 248, 250, 0.46)), url(${selectedWallpaperSrc})`,
+            backgroundPosition: selectedWallpaper.position,
+            backgroundRepeat: 'no-repeat',
+            backgroundSize: 'contain',
+          }}
+        />
+      )}
+      <aside className="app-sidebar app-sidebar-surface fixed inset-y-0 left-0 z-10 flex w-64 flex-col border-r border-white/70">
         <div className="flex h-16 items-center gap-3 border-b border-slate-200 px-5">
           <div className="flex h-9 w-9 items-center justify-center rounded-md bg-blue-600 text-white">
             <Search className="h-5 w-5" />
@@ -675,7 +657,7 @@ function App() {
         <div className="app-sidebar-footer border-t border-slate-200 px-5 py-4 text-xs text-slate-400">本机运行 · v{data.runtime.version}</div>
       </aside>
 
-      <main className="app-main ml-64 min-h-screen">
+      <main className="app-main relative z-10 ml-64 min-h-screen">
         <header className="app-topbar-surface sticky top-0 z-10 flex min-h-16 flex-wrap items-center justify-between gap-3 border-b border-white/70 px-3 py-2 sm:px-6">
           <div className="min-w-0 flex-1">
             <h1 className="truncate text-xl font-semibold text-slate-950">{currentPage.title}</h1>
@@ -706,14 +688,8 @@ function App() {
               <div className="flex items-start gap-3">
                 <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-md bg-blue-50 text-blue-700"><Settings className="h-5 w-5" /></div>
                 <div>
-                  <h2 id="auth-guide-title" className="text-lg font-semibold text-slate-950">
-                    {hasDegradedTmallAccount(authGuideAccountType) ? '后台修复价格同步' : '先完成账号授权'}
-                  </h2>
-                  <p className="mt-1 text-sm leading-6 text-slate-600">
-                    {hasDegradedTmallAccount(authGuideAccountType)
-                      ? '淘宝账号仍在线，无需重新登录。请在账号卡片点击“静默修复”，软件会保留 Cookie 并在下一次抓价时后台重新同步。'
-                      : '当前没有可用的淘宝扫码账号。授权并检测在线后，再开始抓取商品。'}
-                  </p>
+                  <h2 id="auth-guide-title" className="text-lg font-semibold text-slate-950">先完成账号授权</h2>
+                  <p className="mt-1 text-sm leading-6 text-slate-600">当前没有可用的淘宝扫码账号。授权并检测在线后，再开始抓取商品。</p>
                 </div>
               </div>
               <button type="button" className="inline-flex h-8 w-8 shrink-0 items-center justify-center rounded text-slate-400 hover:bg-slate-100 hover:text-slate-700" onClick={() => setAuthGuideAccountType(null)} aria-label="关闭账号授权引导" title="关闭"><X className="h-4 w-4" /></button>
@@ -722,7 +698,7 @@ function App() {
               <Button type="button" variant="secondary" onClick={() => setAuthGuideAccountType(null)}>稍后设置</Button>
               <Button type="button" onClick={() => { setAuthGuideAccountType(null); openSettings('accounts') }}>
                 <Settings className="h-4 w-4" />
-                {hasDegradedTmallAccount(authGuideAccountType) ? '去静默修复' : '去账号授权'}
+                去账号授权
               </Button>
             </div>
           </div>

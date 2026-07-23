@@ -206,18 +206,22 @@ test("prompt studio routes persist profiles, presets, generated variants, and hi
     globalThis.fetch = async (url, init) => {
       const body = JSON.parse(init.body);
       upstreamRequests.push({ url: String(url), body });
-      if (String(url).endsWith("/chat/completions")) {
-        const systemPrompt = body?.messages?.find((message) => message.role === "system")?.content || "";
-        const content = systemPrompt.includes("根据用户需求自由发挥")
-          ? "国庆主题形成大胆的空间层次与独特视觉叙事，文字自然融入画面焦点。"
-          : "OK";
-        return new Response(JSON.stringify({ choices: [{ message: { content } }] }), {
+      const systemPrompt = body?.input?.find((message) => message.role === "system")?.content
+        ?.map((item) => item.text || "").join(" ") || "";
+      if (systemPrompt.includes("根据用户需求自由发挥")) {
+        return new Response(JSON.stringify({ output_text: "国庆主题形成大胆的空间层次与独特视觉叙事，文字自然融入画面焦点。" }), {
           status: 200,
           headers: { "content-type": "application/json" },
         });
       }
       const name = body?.text?.format?.name;
       const requestText = JSON.stringify(body?.input || []);
+      if (requestText.includes("只回复 OK")) {
+        return new Response(JSON.stringify({ output_text: "OK" }), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        });
+      }
       if (name === "prompt_set" && requestText.includes("国庆海报")) {
         return new Response("upstream timeout", { status: 524 });
       }
@@ -410,11 +414,14 @@ test("prompt studio routes persist profiles, presets, generated variants, and hi
     assert.equal(promptConnection.body.model, "gpt-4.1-mini");
 
     assert.equal(upstreamRequests.length, 15);
-    assert.equal(upstreamRequests.filter((request) => request.url === "https://cn.pptoken.cc/v1/chat/completions").length, 2);
-    assert.equal(upstreamRequests.filter((request) => request.url === "https://cn.pptoken.cc/v1/responses").length, 13);
-    assert.deepEqual(upstreamRequests.map((request) => request.body.messages
-      ? (request.body.messages.some((message) => message.role === "system") ? "freeform_prompt" : "connection_test")
-      : request.body.text.format.name), [
+    assert.equal(upstreamRequests.filter((request) => request.url === "https://cn.pptoken.cc/v1/chat/completions").length, 0);
+    assert.equal(upstreamRequests.filter((request) => request.url === "https://cn.pptoken.cc/v1/responses").length, 15);
+    assert.deepEqual(upstreamRequests.map((request) => {
+      const inputText = JSON.stringify(request.body.input || []);
+      if (inputText.includes("根据用户需求自由发挥")) return "freeform_prompt";
+      if (inputText.includes("只回复 OK")) return "connection_test";
+      return request.body.text.format.name;
+    }), [
       "product_facts",
       "freeform_prompt",
       "prompt_set",
@@ -431,9 +438,9 @@ test("prompt studio routes persist profiles, presets, generated variants, and hi
       "quick_prompt_interpretation",
       "connection_test",
     ]);
-    assert.deepEqual(upstreamRequests.slice(0, 5).map((request) => request.body.messages
-      ? request.body.messages.flatMap((message) => Array.isArray(message.content) ? message.content : []).filter((item) => item.type === "image_url").length
-      : request.body.input[1].content.filter((item) => item.type === "input_image").length), [1, 1, 2, 1, 1]);
+    assert.deepEqual(upstreamRequests.slice(0, 5).map((request) => (
+      request.body.input[1].content.filter((item) => item.type === "input_image").length
+    )), [1, 1, 2, 1, 1]);
     assert.deepEqual(upstreamRequests.slice(5, 11).map((request) => (
       request.body.input[1].content.filter((item) => item.type === "input_image").length
     )), [0, 0, 0, 0, 0, 0]);
@@ -444,7 +451,7 @@ test("prompt studio routes persist profiles, presets, generated variants, and hi
     assert.match(upstreamRequests[5].body.input[1].content[0].text, /当前为自由生图模式/);
     assert.match(upstreamRequests[11].body.input[1].content[0].text, /当前为商品生图模式/);
     assert.equal(upstreamRequests[14].body.model, "gpt-4.1-mini");
-    assert.deepEqual(upstreamRequests[14].body.messages, [{ role: "user", content: "只回复 OK" }]);
+    assert.deepEqual(upstreamRequests[14].body.input, [{ role: "user", content: [{ type: "input_text", text: "只回复 OK" }] }]);
 
     const updatedHistory = await api(nativeFetch, `${baseUrl}/api/prompt-studio/history/${generated.body.id}`, jsonOptions("PATCH", {
       name: "压力锅夏季活动海报",

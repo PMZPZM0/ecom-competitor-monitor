@@ -159,7 +159,7 @@ export function DataRecords({ snapshots, products, onClear, onEvidenceChanged }:
     try {
       const result = await api.syncExcelWorkbook()
       setExcelStatus(await api.excelSyncStatus())
-      setExcelFeedback({ tone: 'success', message: `已同步 ${result.currentRows} 条当前价格和 ${result.promotionRows} 条优惠数据，公式测算 ${result.calculationMs.toFixed(1)} ms。` })
+      setExcelFeedback({ tone: 'success', message: `已生成 ${result.indexRows} 个唯一索引并同步 ${result.currentRows} 条 SKU 价格；索引查找 ${result.indexLookupMs.toFixed(1)} ms，公式测算 ${result.calculationMs.toFixed(1)} ms。` })
     } catch (error) {
       setExcelFeedback({ tone: 'error', message: error instanceof Error ? error.message : 'Excel 同步失败' })
     } finally {
@@ -186,7 +186,7 @@ export function DataRecords({ snapshots, products, onClear, onEvidenceChanged }:
         <CardHeader className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
           <div>
             <CardTitle className="flex items-center gap-2"><FolderOpen className="h-4 w-4 text-blue-600" />本地价格证据</CardTitle>
-            <div className="mt-1 text-sm text-slate-500">抓取成功后自动保存脱敏证据；修改目录只影响后续保存。</div>
+            <div className="mt-1 text-sm text-slate-500">抓取后自动保存脱敏证据并同步 Excel；成功证据保留 7 天，系统每天自动清理，最新证据不会误删。</div>
           </div>
           <div className="inline-flex w-fit items-center gap-2 rounded-md bg-slate-100 px-3 py-1.5 text-xs text-slate-600">
             {busy === 'load' ? <LoaderCircle className="h-3.5 w-3.5 animate-spin" /> : evidence ? <CheckCircle2 className="h-3.5 w-3.5 text-emerald-600" /> : <CircleAlert className="h-3.5 w-3.5 text-red-500" />}
@@ -240,7 +240,7 @@ export function DataRecords({ snapshots, products, onClear, onEvidenceChanged }:
         <CardHeader className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
           <div>
             <CardTitle className="flex items-center gap-2"><FileSpreadsheet className="h-4 w-4 text-emerald-600" />Excel 公式自动测算</CardTitle>
-            <div className="mt-1 text-sm text-slate-500">本地优惠数据进入表格后，按商品、SKU 和账号匹配优惠码并立即验算到分。</div>
+            <div className="mt-1 text-sm text-slate-500">本地证据按商品、SKU、账号和价格通道生成唯一索引；当前价格由 Excel XLOOKUP 自动回填，再按优惠码验算到分。</div>
           </div>
           <div className="flex flex-wrap gap-2">
             <Button type="button" variant="secondary" onClick={() => void syncExcel()} disabled={Boolean(excelBusy)}>
@@ -252,7 +252,7 @@ export function DataRecords({ snapshots, products, onClear, onEvidenceChanged }:
           </div>
         </CardHeader>
         <CardContent className="space-y-3">
-          <div className="grid gap-2 sm:grid-cols-3">
+          <div className="grid gap-2 sm:grid-cols-2 xl:grid-cols-4">
             <div className="rounded-md bg-slate-50 px-3 py-2">
               <div className="text-xs text-slate-500">同步状态</div>
               <div className="mt-1 text-sm font-medium text-slate-800">{excelBusy === 'load' ? '正在读取' : excelStatus?.exists ? '工作簿已生成' : '等待首次同步'}</div>
@@ -262,11 +262,16 @@ export function DataRecords({ snapshots, products, onClear, onEvidenceChanged }:
               <div className="mt-1 text-sm font-medium text-slate-800">{excelStatus?.modifiedAt ? new Date(excelStatus.modifiedAt).toLocaleString() : '--'}</div>
             </div>
             <div className="rounded-md bg-slate-50 px-3 py-2">
+              <div className="text-xs text-slate-500">索引查找耗时</div>
+              <div className="mt-1 text-sm font-medium text-slate-800">{excelStatus?.indexLookupMs != null ? `${excelStatus.indexLookupMs.toFixed(1)} ms` : '--'}</div>
+            </div>
+            <div className="rounded-md bg-slate-50 px-3 py-2">
               <div className="text-xs text-slate-500">公式测算耗时</div>
               <div className="mt-1 text-sm font-medium text-slate-800">{excelStatus?.calculationMs != null ? `${excelStatus.calculationMs.toFixed(1)} ms` : '--'}</div>
             </div>
           </div>
           <div className="break-all text-xs text-slate-400">文件位置：{excelStatus?.path || '读取中...'}</div>
+          <div className="break-all text-xs text-slate-400">索引位置：{excelStatus?.indexPath || '读取中...'}</div>
           <div className="text-xs text-slate-500">工作簿包含原始优惠数据、优惠码规则和公式计算。未通过本地证据验证的结果只标为待核验，不参与页面展示或飞书提醒。</div>
           {(excelFeedback || excelStatus?.lastError) && <div className={`flex items-start gap-2 rounded-md px-3 py-2 text-sm ${(excelFeedback?.tone === 'error' || (!excelFeedback && excelStatus?.lastError)) ? 'bg-red-50 text-red-700' : 'bg-emerald-50 text-emerald-800'}`} role={(excelFeedback?.tone === 'error' || (!excelFeedback && excelStatus?.lastError)) ? 'alert' : 'status'} aria-live="polite">{(excelFeedback?.tone === 'error' || (!excelFeedback && excelStatus?.lastError)) ? <CircleAlert className="mt-0.5 h-4 w-4 shrink-0" /> : <CheckCircle2 className="mt-0.5 h-4 w-4 shrink-0" />}<span>{excelFeedback?.message || excelStatus?.lastError}</span></div>}
         </CardContent>

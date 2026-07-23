@@ -9,6 +9,7 @@ process.env.ECOM_MONITOR_DATA_DIR = dataDir;
 process.env.ECOM_MONITOR_EAGER_BROWSER_WARMUP = "0";
 
 const { startServer, stopServer } = await import("../index.js");
+const { updateDb } = await import("../storage/db.js");
 
 function priceResponse(skuId) {
   return {
@@ -253,6 +254,45 @@ test("local import routes reject cross-site writes and commit verified prices id
     assert.equal(resetEvidence.body.directory, resetEvidence.body.defaultDirectory);
   } finally {
     await stopServer(server);
-    await fs.rm(dataDir, { recursive: true, force: true });
   }
+});
+
+test("local evidence reparse route accepts price and rejects unknown replay kinds", async () => {
+  const server = await startServer({ port: 0 });
+  const address = server.address();
+  const baseUrl = `http://127.0.0.1:${address.port}`;
+  const productId = "local-price-replay-route";
+  try {
+    await updateDb((db) => {
+      db.products.push({
+        id: productId,
+        itemId: "843315272599",
+        url: "https://detail.tmall.com/item.htm?id=843315272599",
+        name: "本地重放路由测试",
+        accountType: "normal",
+        lastSnapshot: { itemId: "843315272599", skuPrices: [] },
+      });
+      return db;
+    });
+    const acceptedKind = await jsonRequest(`${baseUrl}/api/products/${productId}/reparse-local-evidence`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ kind: "price" }),
+    });
+    assert.equal(acceptedKind.status, 409);
+    assert.match(acceptedKind.body.message, /价格本地证据/);
+
+    const rejectedKind = await jsonRequest(`${baseUrl}/api/products/${productId}/reparse-local-evidence`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ kind: "unsupported" }),
+    });
+    assert.equal(rejectedKind.status, 400);
+  } finally {
+    await stopServer(server);
+  }
+});
+
+test.after(async () => {
+  await fs.rm(dataDir, { recursive: true, force: true });
 });

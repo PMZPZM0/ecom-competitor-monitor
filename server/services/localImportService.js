@@ -2,16 +2,8 @@ import crypto from "node:crypto";
 import fs from "node:fs/promises";
 import path from "node:path";
 import { dbRuntimeInfo, readDb } from "../storage/db.js";
-import {
-  applyItemScopedNewCustomerGift,
-  applyPriceResolution,
-  PRICE_PARSER_VERSION,
-  resolveEmbeddedPromotionPriceEvidence,
-  resolveEmbeddedSkuPriceEvidence,
-  resolveSkuPriceEvidence,
-  selectAuthoritativePriceResolution,
-} from "./priceResolver.js";
-import { extractEmbeddedPromotionComponent, extractStructuredSku, hydrateBrowserCapturePage } from "./tmallScraper.js";
+import { PRICE_PARSER_VERSION } from "./priceResolver.js";
+import { hydrateBrowserCapturePage, resolveLocalSkuPriceRows } from "./tmallScraper.js";
 
 export const LOCAL_IMPORT_MAX_BYTES = 8 * 1024 * 1024;
 export const LOCAL_IMPORT_MAX_FILES = 200;
@@ -28,6 +20,9 @@ const automaticEvidenceFilenamePattern = /^(local_[a-f0-9]{32})\.json$/;
 const localImportSourceFilenamePattern = /^(local_[a-f0-9]{32})\.source\.txt$/;
 const browserCaptureIdPattern = /^capture_[a-f0-9]{32}$/;
 const browserCaptureSourceFilenamePattern = /^(capture_[a-f0-9]{32})\.source\.txt$/;
+const browserCaptureSkuSourceFilenamePattern = /^(capture_[a-f0-9]{32})\.sku-(\d{4})\.source\.txt$/;
+const BROWSER_CAPTURE_MAX_SKU_SNAPSHOTS = 1000;
+const BROWSER_CAPTURE_MAX_TOTAL_BYTES = 256 * 1024 * 1024;
 const itemIdPattern = /^\d{6,20}$/;
 const skuIdPattern = /^\d{1,30}$/;
 const discardedSourceKeyPattern = /^(?:body|content|rawContent|networkPayloads|payloads)$/i;
@@ -42,6 +37,55 @@ const sensitiveAssignmentPattern = new RegExp(`((?:^|[\\s,{;])["']?(?:${sensitiv
 const sensitiveEscapedStringAssignmentPattern = new RegExp(`((?:\\\\["'])(?:${sensitiveTextKeySource})(?:\\\\["'])\\s*:\\s*\\\\["'])(.*?)(\\\\["'])`, "gi");
 const sensitiveEscapedScalarAssignmentPattern = new RegExp(`((?:\\\\["'])(?:${sensitiveTextKeySource})(?:\\\\["'])\\s*:\\s*)(-?\\d+(?:\\.\\d+)?|true|false|null)`, "gi");
 const encodedCredentialQueryPattern = /((?:[?&]|&amp;)(?:data|ex[_-]?params)=)[^&#\s"'<>]*/gi;
+
+function identityTextVariants(values = []) {
+  const variants = new Set();
+  const add = (value) => {
+    const candidate = String(value || "").trim();
+    // Very short values can be ordinary SKU or price characters. Structured
+    // identity keys still redact them; plain-text hints require two characters.
+    if (candidate.length >= 2) variants.add(candidate);
+  };
+  for (const value of values) {
+    const raw = String(value || "").trim();
+    if (!raw) continue;
+    const decoded = (() => {
+      try {
+        return decodeURIComponent(raw);
+      } catch {
+        return raw;
+      }
+    })();
+    for (const candidate of new Set([raw, decoded])) {
+      add(candidate);
+      const encoded = encodeURIComponent(candidate);
+      add(encoded);
+      add(encoded.toLowerCase());
+      add(candidate
+        .replaceAll("&", "&amp;")
+        .replaceAll("<", "&lt;")
+        .replaceAll(">", "&gt;")
+        .replaceAll('"', "&quot;")
+        .replaceAll("'", "&#39;"));
+      add(JSON.stringify(candidate).slice(1, -1));
+      add(Array.from(candidate, (character) => {
+        const codePoint = character.codePointAt(0);
+        if (codePoint <= 0xffff) return `\\u${codePoint.toString(16).padStart(4, "0")}`;
+        const adjusted = codePoint - 0x10000;
+        const high = 0xd800 + (adjusted >> 10);
+        const low = 0xdc00 + (adjusted & 0x3ff);
+        return `\\u${high.toString(16)}\\u${low.toString(16)}`;
+      }).join(""));
+    }
+  }
+  return [...variants].sort((left, right) => right.length - left.length);
+}
+
+function redactKnownIdentityText(value, variants) {
+  let redacted = String(value);
+  for (const variant of variants) redacted = redacted.split(variant).join("[REDACTED_ACCOUNT]");
+  return redacted;
+}
 
 function fail(code, message) {
   const error = new Error(message);
@@ -155,6 +199,9 @@ function redactBrowserEncodedQueries(value, depth = 0) {
 function sanitizeBrowserCaptureShape(capture) {
   const itemId = String(capture?.itemId || "");
   const page = capture?.page && typeof capture.page === "object" && !Array.isArray(capture.page) ? capture.page : {};
+  const pageText = `${page.finalUrl || capture?.finalUrl || ""}\n${page.visibleText || ""}\n${page.html || ""}`;
+  const loginOrVerificationPage = !/skuCore|skuBase|skuOptionsArea/i.test(pageText)
+    && /(?:login|passport)\.(?:m\.)?(?:taobao|tmall)\.com|手机扫码登录|密码登录|短信登录|安全验证|请完成验证/i.test(pageText);
   return redactBrowserEncodedQueries({
     ...capture,
     requestedUrl: safeProductEvidenceUrl(capture?.requestedUrl, itemId),
@@ -162,7 +209,9 @@ function sanitizeBrowserCaptureShape(capture) {
     page: {
       ...page,
       finalUrl: safeProductEvidenceUrl(page.finalUrl, itemId),
-      networkPayloads: Array.isArray(page.networkPayloads)
+      // Login responses can contain short-lived QR credentials. They have no
+      // product evidence value and must never be written to a local capture.
+      networkPayloads: !loginOrVerificationPage && Array.isArray(page.networkPayloads)
         ? page.networkPayloads.map((payload) => {
           const captureRunId = String(payload?.captureRunId || "");
           const responseSequence = Number(payload?.responseSequence);
@@ -353,12 +402,6 @@ function metadataFrom(parsed, content) {
 
 function buildSnapshot({ content, parsed, itemId, accountType, capturedAt }) {
   const evidenceHtml = typeof parsed?.page?.html === "string" ? parsed.page.html : content;
-  let structured = { skuPrices: [], skuImages: [], displayPrice: null };
-  try {
-    structured = extractStructuredSku(evidenceHtml);
-  } catch {
-    // A malformed embedded SKU object must not block valid imported API evidence.
-  }
   const browserPage = parsed?.captureType === "account-browser-local-source"
     ? hydrateBrowserCapturePage(parsed)
     : null;
@@ -374,43 +417,17 @@ function buildSnapshot({ content, parsed, itemId, accountType, capturedAt }) {
     entries.push(entry.payload);
     payloadsBySku.set(entry.skuId, entries);
   }
-  const structuredBySku = new Map(structured.skuPrices.map((sku) => [String(sku.skuId), sku]));
-  const embeddedPromotionComponent = extractEmbeddedPromotionComponent(evidenceHtml);
-  const skuIds = new Set([...structuredBySku.keys(), ...normalizedPayloads.map((entry) => entry.skuId)]);
-  const allowEmbeddedFallback = /https?:\/\/chaoshi\.detail\.tmall\.com(?:[/:?#]|$)/i.test(content);
-  const skuPrices = [...skuIds].map((skuId) => {
-    const sku = {
-      ...(structuredBySku.get(skuId) || {
-        skuId,
-        name: `SKU ${skuId}`,
-        priceLayers: [],
-        discountItems: [],
-        quantity: 0,
-        quantitySource: "local-import",
-      }),
-      image: "",
-    };
-    const selection = browserPage?.selectionResults?.find((item) => String(item.skuId) === skuId);
-    const networkResolution = resolveSkuPriceEvidence(payloadsBySku.get(skuId) || [], {
-      itemId,
-      skuId,
-      accountType,
-      selectedSkuVerified: browserPage ? Boolean(selection?.responseObserved) : undefined,
-      capturedAt,
-    });
-    const embeddedResolution = resolveEmbeddedSkuPriceEvidence(sku, { itemId, skuId, accountType, capturedAt });
-    const embeddedPromotionResolution = resolveEmbeddedPromotionPriceEvidence(embeddedPromotionComponent, { itemId, skuId, accountType, capturedAt });
-    const explicitResolution = selectAuthoritativePriceResolution(networkResolution, embeddedPromotionResolution);
-    const resolution = selectAuthoritativePriceResolution(explicitResolution, embeddedResolution, { allowEmbeddedFallback });
-    const scopedResolution = applyItemScopedNewCustomerGift(resolution, embeddedPromotionComponent, {
-      itemId,
-      skuId,
-      accountType,
-      capturedAt,
-    });
-    return { ...applyPriceResolution(sku, scopedResolution), accountType };
-  });
-  const observedSkuCount = skuIds.size;
+  const localPage = browserPage || {
+    html: evidenceHtml,
+    skuNetworkPayloads: Object.fromEntries([...new Set(normalizedPayloads.map((entry) => entry.skuId).filter(Boolean))]
+      .map((skuId) => [skuId, payloadsBySku.get(skuId) || []])),
+    selectionResults: [...new Set(normalizedPayloads.map((entry) => entry.skuId).filter(Boolean))]
+      .map((skuId) => ({ skuId, selected: true, responseObserved: true })),
+    skuSnapshots: [],
+  };
+  const { structuredSku } = resolveLocalSkuPriceRows(localPage, { itemId, accountType, capturedAt });
+  const skuPrices = structuredSku.skuPrices;
+  const observedSkuCount = skuPrices.length;
   const verifiedSkuCount = skuPrices.filter((sku) => sku.resolutionStatus === "verified").length;
   const prices = skuPrices.filter((sku) => sku.resolutionStatus === "verified").map((sku) => Number(sku.normalPrice)).filter((price) => Number.isFinite(price) && price > 0);
   const metadata = metadataFrom(parsed, content);
@@ -466,6 +483,7 @@ function buildSnapshot({ content, parsed, itemId, accountType, capturedAt }) {
       observedSkuCount,
       outputSkuCount: skuPrices.length,
       verifiedPriceSkuCount: verifiedSkuCount,
+      skuHtmlSnapshotCount: new Set((browserPage?.skuSnapshots || []).filter((snapshot) => snapshot?.selected).map((snapshot) => String(snapshot.skuId))).size,
       unverifiedPriceSkuCount: observedSkuCount - verifiedSkuCount,
       originalContentDiscarded: true,
       localSourceStored: true,
@@ -482,35 +500,36 @@ function redactDeep(value) {
   }));
 }
 
-function redactSensitiveText(value) {
-  return String(value)
+function redactSensitiveText(value, identityVariants = []) {
+  return redactKnownIdentityText(value, identityVariants)
     .replace(sensitiveQueryPattern, "$1[REDACTED]")
     .replace(sensitiveAssignmentPattern, "$1\"[REDACTED]\"")
     .replace(sensitiveEscapedStringAssignmentPattern, "$1[REDACTED]$3")
     .replace(sensitiveEscapedScalarAssignmentPattern, "$1\"[REDACTED]\"");
 }
 
-function sanitizeLocalSourceValue(value, depth = 0) {
+function sanitizeLocalSourceValue(value, depth = 0, identityVariants = []) {
   if (depth > 50) return "[DISCARDED_DEEP_CONTENT]";
   if (value == null) return value;
-  if (Array.isArray(value)) return value.map((child) => sanitizeLocalSourceValue(child, depth + 1));
+  if (Array.isArray(value)) return value.map((child) => sanitizeLocalSourceValue(child, depth + 1, identityVariants));
   if (typeof value === "object") {
     return Object.fromEntries(Object.entries(value).map(([key, child]) => [
       key,
-      isSensitiveKey(key) ? "[REDACTED]" : sanitizeLocalSourceValue(child, depth + 1),
+      isSensitiveKey(key) ? "[REDACTED]" : sanitizeLocalSourceValue(child, depth + 1, identityVariants),
     ]));
   }
   if (typeof value !== "string") return value;
   const nested = parseJsonLike(value);
   return nested && typeof nested === "object"
-    ? JSON.stringify(sanitizeLocalSourceValue(nested, depth + 1))
-    : redactSensitiveText(value);
+    ? JSON.stringify(sanitizeLocalSourceValue(nested, depth + 1, identityVariants))
+    : redactSensitiveText(value, identityVariants);
 }
 
-function sanitizeLocalImportSource(content) {
+function sanitizeLocalImportSource(content, identityHints = []) {
+  const identityVariants = identityTextVariants(identityHints);
   const parsed = parseJsonLike(content);
-  if (!parsed || typeof parsed !== "object") return redactSensitiveText(content);
-  const serialized = JSON.stringify(sanitizeLocalSourceValue(parsed));
+  if (!parsed || typeof parsed !== "object") return redactSensitiveText(content, identityVariants);
+  const serialized = JSON.stringify(sanitizeLocalSourceValue(parsed, 0, identityVariants));
   const callback = content.trim().match(/^([\w$.]+)\s*\(/)?.[1];
   return callback ? `${callback}(${serialized})` : serialized;
 }
@@ -620,13 +639,60 @@ function safePriceDetails(value, resolution) {
   return result;
 }
 
+function unavailablePriceDetails(value) {
+  const sourceResolution = safePriceResolution(value?.priceResolution);
+  const reason = safeText(sourceResolution?.reason || "当前 SKU 缺少可闭合到分的价格证据", 200);
+  const priceResolution = {
+    status: "unavailable",
+    reason,
+    parserVersion: safeText(value?.parserVersion || sourceResolution?.parserVersion || PRICE_PARSER_VERSION, 80),
+    channels: Object.fromEntries(priceKinds.map((kind) => [kind, {
+      status: "unavailable",
+      valueCents: null,
+      reason,
+      evidenceIds: [],
+    }])),
+  };
+  return {
+    price: null,
+    normalPrice: null,
+    originalPrice: null,
+    billionPrice: null,
+    billionStatus: "none",
+    seckillPrice: null,
+    seckillStatus: "none",
+    governmentPrice: null,
+    governmentStatus: "none",
+    governmentDiscountAmount: null,
+    surprisePrice: null,
+    surpriseStatus: "none",
+    surpriseDiscountAmount: null,
+    giftPrice: null,
+    giftStatus: "none",
+    giftDiscountAmount: null,
+    vipPrice: null,
+    vipStatus: "none",
+    vipDiscountAmount: null,
+    coinPrice: null,
+    coinStatus: "none",
+    coinDiscountAmount: null,
+    resolutionStatus: "unavailable",
+    priceResolution,
+    parserVersion: priceResolution.parserVersion,
+    priceTitle: safeText(value?.priceTitle || "价格不可用", 80),
+    priceCalculation: {},
+    priceLayers: [],
+    discountItems: [],
+  };
+}
+
 function safeCapturedSku(value, itemId) {
   const skuId = safeText(value?.skuId, 80);
   const resolution = verifiedNormalResolution(value);
-  if (!skuId || !resolution) return null;
+  if (!skuId) return null;
   const accountPrices = [];
   const seenAccountTypes = new Set();
-  for (const accountPrice of value.accountPrices || []) {
+  for (const accountPrice of resolution ? value.accountPrices || [] : []) {
     const accountType = accountTypes.has(accountPrice?.accountType) ? accountPrice.accountType : "normal";
     const accountResolution = verifiedNormalResolution(accountPrice);
     if (!accountResolution || seenAccountTypes.has(accountType)) continue;
@@ -639,7 +705,7 @@ function safeCapturedSku(value, itemId) {
       ...safePriceDetails(accountPrice, accountResolution),
     });
   }
-  const priceEvidence = (value.priceEvidence || []).map((evidence) => {
+  const priceEvidence = (resolution ? value.priceEvidence || [] : []).map((evidence) => {
     if (!evidence || String(evidence.itemId) !== itemId || String(evidence.skuId) !== skuId || evidence.selectedSkuVerified !== true) return null;
     const valueCents = Number(evidence.valueCents);
     if (!Number.isSafeInteger(valueCents) || valueCents <= 0) return null;
@@ -663,7 +729,7 @@ function safeCapturedSku(value, itemId) {
     skuId,
     name: safeText(value.name || `SKU ${skuId}`, 240),
     image: "",
-    ...safePriceDetails(value, resolution),
+    ...(resolution ? safePriceDetails(value, resolution) : unavailablePriceDetails(value)),
     priceEvidence,
     accountPrices,
     quantity: Number.isFinite(Number(value.quantity)) && Number(value.quantity) >= 0 ? Number(value.quantity) : 0,
@@ -677,10 +743,12 @@ function capturedSnapshotRecord(snapshot) {
   if (!itemIdPattern.test(itemId)) throw fail("INVALID_CAPTURE_SNAPSHOT", "抓取结果缺少可靠商品 ID，未生成本地证据。");
   const observedSkuCount = (snapshot.skuPrices || []).length;
   const skuPrices = (snapshot.skuPrices || []).map((sku) => safeCapturedSku(sku, itemId)).filter(Boolean);
-  if (!skuPrices.length) throw fail("UNVERIFIED_CAPTURE_SNAPSHOT", "抓取结果没有通过核验的 SKU 普通价，未生成本地证据。");
-  if (skuPrices.length !== observedSkuCount) throw fail("INCOMPLETE_CAPTURE_SNAPSHOT", "抓取结果存在未核验 SKU，未生成会覆盖完整价格的本地证据。");
+  if (!skuPrices.length) throw fail("INVALID_CAPTURE_SNAPSHOT", "抓取结果缺少可识别的 SKU，未生成本地证据。");
   const capturedAt = safeText(snapshot.capturedAt, 40) || new Date().toISOString();
-  const prices = skuPrices.map((sku) => sku.normalPrice);
+  const verifiedSkuPrices = skuPrices.filter((sku) => sku.resolutionStatus === "verified");
+  const prices = verifiedSkuPrices.map((sku) => sku.normalPrice);
+  const verifiedSkuCount = verifiedSkuPrices.length;
+  const unverifiedSkuCount = observedSkuCount - verifiedSkuCount;
   const accountType = accountTypes.has(snapshot.primaryAccountType) ? snapshot.primaryAccountType : "normal";
   return {
     schemaVersion: 1,
@@ -690,11 +758,13 @@ function capturedSnapshotRecord(snapshot) {
     createdAt: new Date().toISOString(),
     accountType,
     itemId,
-    canCommit: true,
-    blockingReasons: [],
+    canCommit: verifiedSkuCount > 0,
+    blockingReasons: verifiedSkuCount ? [] : ["没有 SKU 通过价格证据核验"],
     snapshot: {
       parserVersion: safeText(snapshot.parserVersion || PRICE_PARSER_VERSION, 80),
-      resolutionStatus: "verified",
+      resolutionStatus: observedSkuCount > 0 && verifiedSkuCount === observedSkuCount && skuPrices.length === observedSkuCount
+        ? "verified"
+        : verifiedSkuCount ? "partial" : "unavailable",
       capturedAt,
       source: "local-import",
       accessMode: "authenticated",
@@ -711,8 +781,8 @@ function capturedSnapshotRecord(snapshot) {
       videoUrls: [],
       skuImages: [],
       skuPrices,
-      price: Math.min(...prices),
-      priceRange: [Math.min(...prices), Math.max(...prices)],
+      price: prices.length ? Math.min(...prices) : null,
+      priceRange: prices.length ? [Math.min(...prices), Math.max(...prices)] : null,
       buyerShows: [],
       buyerShowCapture: {
         status: "skipped",
@@ -732,7 +802,7 @@ function capturedSnapshotRecord(snapshot) {
         htmlBytes: 0,
         imageCount: 0,
         skuImageCount: 0,
-        priceCount: skuPrices.length,
+        priceCount: verifiedSkuCount,
         highResImageCount: 0,
         videoCount: 0,
         buyerShowCount: 0,
@@ -740,8 +810,8 @@ function capturedSnapshotRecord(snapshot) {
         skuCount: observedSkuCount,
         observedSkuCount,
         outputSkuCount: skuPrices.length,
-        verifiedPriceSkuCount: skuPrices.length,
-        unverifiedPriceSkuCount: observedSkuCount - skuPrices.length,
+        verifiedPriceSkuCount: verifiedSkuCount,
+        unverifiedPriceSkuCount: unverifiedSkuCount,
         originalContentDiscarded: true,
         automaticCaptureEvidence: true,
       },
@@ -777,6 +847,36 @@ async function automaticEvidenceFiles(directory) {
   return files;
 }
 
+function browserCaptureSkuSourceFilename(captureId, ordinal) {
+  return `${captureId}.sku-${String(ordinal).padStart(4, "0")}.source.txt`;
+}
+
+async function browserCaptureArtifactFiles(directory, captureId) {
+  let entries;
+  try {
+    entries = await fs.readdir(directory, { withFileTypes: true });
+  } catch (error) {
+    if (error?.code === "ENOENT") return [];
+    throw error;
+  }
+  const manifestFilename = `${captureId}.source.txt`;
+  const files = [];
+  for (const entry of entries) {
+    const skuCaptureId = entry.name.match(browserCaptureSkuSourceFilenamePattern)?.[1] || "";
+    if (!entry.isFile() || (entry.name !== manifestFilename && skuCaptureId !== captureId)) continue;
+    const file = path.join(directory, entry.name);
+    const stat = await fs.lstat(file).catch(() => null);
+    if (!stat?.isFile() || stat.isSymbolicLink()) continue;
+    files.push({ name: entry.name, file, size: stat.size });
+  }
+  return files;
+}
+
+async function removeBrowserCaptureArtifacts(directory, captureId) {
+  const files = await browserCaptureArtifactFiles(directory, captureId);
+  await Promise.all(files.map((file) => fs.rm(file.file, { force: true })));
+}
+
 async function browserCaptureSourceFiles(directory) {
   let entries;
   try {
@@ -795,7 +895,9 @@ async function browserCaptureSourceFiles(directory) {
       if (!stat.isFile() || stat.isSymbolicLink() || stat.size > BROWSER_CAPTURE_MAX_BYTES) continue;
       const record = JSON.parse(await fs.readFile(file, "utf8"));
       if (record?.captureType !== "account-browser-local-source" || record.captureId !== captureId) continue;
-      files.push({ captureId, name: entry.name, file, mtimeMs: stat.mtimeMs, size: stat.size });
+      const artifacts = await browserCaptureArtifactFiles(directory, captureId);
+      const totalSize = artifacts.reduce((total, artifact) => total + artifact.size, 0);
+      files.push({ captureId, name: entry.name, file, mtimeMs: stat.mtimeMs, size: totalSize || stat.size });
     } catch {
       // Unknown or user-owned files are not managed as browser evidence.
     }
@@ -847,7 +949,7 @@ async function pruneBrowserCaptureSourceFiles(directory, keepFilename) {
     if (right.name === keepFilename) return 1;
     return right.mtimeMs - left.mtimeMs;
   });
-  await Promise.all(sources.slice(CAPTURE_EVIDENCE_MAX_FILES).map((entry) => fs.rm(path.join(directory, entry.name), { force: true })));
+  await Promise.all(sources.slice(CAPTURE_EVIDENCE_MAX_FILES).map((entry) => removeBrowserCaptureArtifacts(directory, entry.captureId)));
 }
 
 async function atomicSaveText(destination, content) {
@@ -867,24 +969,95 @@ async function atomicSaveText(destination, content) {
   }
 }
 
-export async function saveBrowserCaptureSource(capture) {
+export async function saveBrowserCaptureSource(capture, { identityHints = [] } = {}) {
   if (!capture || typeof capture !== "object" || Array.isArray(capture)) {
     throw fail("INVALID_BROWSER_CAPTURE", "浏览器采集数据无效，未写入本地文件。");
   }
   const captureId = `capture_${crypto.randomUUID().replaceAll("-", "")}`;
-  const record = {
-    schemaVersion: 1,
-    ...sanitizeBrowserCaptureShape(capture),
-    captureId,
-    localFirst: { sourceSaved: true, sourceSanitized: true, parsedFromDisk: false, networkAccessedAfterCapture: false },
-  };
-  const sanitized = sanitizeLocalImportSource(JSON.stringify(record));
-  if (Buffer.byteLength(sanitized, "utf8") > BROWSER_CAPTURE_MAX_BYTES) {
-    throw fail("IMPORT_TOO_LARGE", "浏览器已加载的数据超过 32MB，未写入不完整的本地证据。");
+  const sanitizedCapture = sanitizeBrowserCaptureShape(capture);
+  const hasSkuSnapshots = Array.isArray(capture?.page?.skuSnapshots);
+  const skuSnapshots = hasSkuSnapshots && Array.isArray(sanitizedCapture.page?.skuSnapshots)
+    ? sanitizedCapture.page.skuSnapshots
+    : [];
+  if (skuSnapshots.length > BROWSER_CAPTURE_MAX_SKU_SNAPSHOTS) {
+    throw fail("INVALID_BROWSER_CAPTURE", "浏览器 SKU 快照数量异常，未写入本地证据。");
   }
   const directory = await configuredLocalEvidenceDirectory();
   const filename = `${captureId}.source.txt`;
-  await atomicSaveText(path.join(directory, filename), sanitized);
+  const itemId = String(sanitizedCapture.itemId || "").trim();
+  const snapshotFiles = [];
+  const snapshotWrites = [];
+  let snapshotTotalBytes = 0;
+  if (hasSkuSnapshots) {
+    if (!itemIdPattern.test(itemId)) throw fail("INVALID_CAPTURE_ITEM_ID", "浏览器 SKU 快照缺少可靠商品 ID，未写入本地证据。");
+    for (let index = 0; index < skuSnapshots.length; index += 1) {
+      const ordinal = index + 1;
+      const snapshot = skuSnapshots[index];
+      const skuId = String(snapshot?.skuId || "").trim();
+      if (!snapshot || typeof snapshot !== "object" || Array.isArray(snapshot) || !skuIdPattern.test(skuId)) {
+        throw fail("INVALID_BROWSER_CAPTURE", `第 ${ordinal} 个 SKU 快照身份无效，未写入本地证据。`);
+      }
+      const skuFilename = browserCaptureSkuSourceFilename(captureId, ordinal);
+      const envelope = {
+        schemaVersion: 2,
+        captureType: "account-browser-local-sku-source",
+        captureId,
+        itemId,
+        ordinal,
+        skuId,
+        snapshot: {
+          ...snapshot,
+          skuId,
+          finalUrl: safeProductEvidenceUrl(snapshot.finalUrl, itemId),
+        },
+      };
+      const content = sanitizeLocalImportSource(JSON.stringify(envelope), identityHints);
+      const bytes = Buffer.byteLength(content, "utf8");
+      if (bytes > BROWSER_CAPTURE_MAX_BYTES) {
+        throw fail("IMPORT_TOO_LARGE", `第 ${ordinal} 个 SKU 本地证据超过 32MB，未写入不完整文件。`);
+      }
+      snapshotTotalBytes += bytes;
+      if (snapshotTotalBytes > BROWSER_CAPTURE_MAX_TOTAL_BYTES) {
+        throw fail("IMPORT_TOO_LARGE", "本轮 SKU 本地证据合计超过 256MB，已停止写入不完整证据。");
+      }
+      snapshotFiles.push({
+        ordinal,
+        skuId,
+        filename: skuFilename,
+        bytes,
+        sha256: crypto.createHash("sha256").update(content).digest("hex"),
+      });
+      snapshotWrites.push({ destination: path.join(directory, skuFilename), content });
+    }
+  }
+  const page = { ...(sanitizedCapture.page || {}) };
+  delete page.skuSnapshots;
+  const record = {
+    ...sanitizedCapture,
+    schemaVersion: hasSkuSnapshots ? 2 : 1,
+    captureType: "account-browser-local-source",
+    captureId,
+    itemId,
+    page: hasSkuSnapshots ? { ...page, skuSnapshotFiles: snapshotFiles } : page,
+    localFirst: { sourceSaved: true, sourceSanitized: true, parsedFromDisk: false, networkAccessedAfterCapture: false },
+  };
+  const manifest = sanitizeLocalImportSource(JSON.stringify(record), identityHints);
+  if (Buffer.byteLength(manifest, "utf8") > BROWSER_CAPTURE_MAX_BYTES) {
+    throw fail("IMPORT_TOO_LARGE", "浏览器已加载的数据超过 32MB，未写入不完整的本地证据。");
+  }
+  const writtenFiles = [];
+  try {
+    for (const write of snapshotWrites) {
+      await atomicSaveText(write.destination, write.content);
+      writtenFiles.push(write.destination);
+    }
+    // The manifest is the commit marker. Readers cannot observe a complete
+    // schema-v2 capture until every independently atomic SKU file exists.
+    await atomicSaveText(path.join(directory, filename), manifest);
+  } catch (error) {
+    await Promise.all(writtenFiles.map((file) => fs.rm(file, { force: true }).catch(() => undefined)));
+    throw error;
+  }
   await pruneBrowserCaptureSourceFiles(directory, filename).catch(() => undefined);
   return {
     captureId,
@@ -922,11 +1095,78 @@ export async function readBrowserCaptureSource(captureId) {
   } catch {
     throw fail("INVALID_BROWSER_CAPTURE", "浏览器本地采集文件不是有效 JSON，已停止解析。");
   }
-  if (record?.captureId !== captureId || record?.schemaVersion !== 1) {
+  if (record?.captureId !== captureId
+    || record?.captureType !== "account-browser-local-source"
+    || ![1, 2].includes(record?.schemaVersion)) {
     throw fail("INVALID_BROWSER_CAPTURE", "浏览器本地采集文件身份校验失败。");
+  }
+  let skuSnapshots = null;
+  if (record.schemaVersion === 2) {
+    const references = record.page?.skuSnapshotFiles;
+    if (!Array.isArray(references) || references.length > BROWSER_CAPTURE_MAX_SKU_SNAPSHOTS) {
+      throw fail("INVALID_BROWSER_CAPTURE", "浏览器 SKU 快照清单无效。");
+    }
+    skuSnapshots = [];
+    const seenSkuFiles = new Set();
+    let skuSnapshotTotalBytes = 0;
+    for (let index = 0; index < references.length; index += 1) {
+      const reference = references[index];
+      const ordinal = index + 1;
+      const skuId = String(reference?.skuId || "").trim();
+      const expectedFilename = browserCaptureSkuSourceFilename(captureId, ordinal);
+      if (reference?.ordinal !== ordinal
+        || reference?.filename !== expectedFilename
+        || !skuIdPattern.test(skuId)
+        || seenSkuFiles.has(expectedFilename)) {
+        throw fail("INVALID_BROWSER_CAPTURE", `第 ${ordinal} 个 SKU 快照清单身份校验失败。`);
+      }
+      seenSkuFiles.add(expectedFilename);
+      const skuFile = path.join(path.dirname(file), expectedFilename);
+      let skuStat;
+      try {
+        skuStat = await fs.lstat(skuFile);
+      } catch (error) {
+        if (error?.code === "ENOENT") throw fail("IMPORT_SOURCE_NOT_FOUND", `第 ${ordinal} 个 SKU 本地采集文件不存在。`);
+        throw error;
+      }
+      if (!skuStat.isFile() || skuStat.isSymbolicLink()) throw fail("INVALID_IMPORT_SOURCE", `第 ${ordinal} 个 SKU 本地采集文件无效。`);
+      if (skuStat.size > BROWSER_CAPTURE_MAX_BYTES) throw fail("IMPORT_TOO_LARGE", `第 ${ordinal} 个 SKU 本地采集文件超过 32MB。`);
+      if (!Number.isSafeInteger(reference.bytes) || reference.bytes !== skuStat.size || !/^[a-f0-9]{64}$/.test(String(reference.sha256 || ""))) {
+        throw fail("INVALID_BROWSER_CAPTURE", `第 ${ordinal} 个 SKU 本地采集文件大小或摘要无效。`);
+      }
+      skuSnapshotTotalBytes += reference.bytes;
+      if (skuSnapshotTotalBytes > BROWSER_CAPTURE_MAX_TOTAL_BYTES) {
+        throw fail("IMPORT_TOO_LARGE", "SKU 本地采集文件合计超过 256MB，已停止解析。");
+      }
+      const skuContent = await fs.readFile(skuFile, "utf8");
+      if (Buffer.byteLength(skuContent, "utf8") !== reference.bytes
+        || crypto.createHash("sha256").update(skuContent).digest("hex") !== reference.sha256) {
+        throw fail("INVALID_BROWSER_CAPTURE", `第 ${ordinal} 个 SKU 本地采集文件完整性校验失败。`);
+      }
+      let envelope;
+      try {
+        envelope = JSON.parse(skuContent);
+      } catch {
+        throw fail("INVALID_BROWSER_CAPTURE", `第 ${ordinal} 个 SKU 本地采集文件不是有效 JSON。`);
+      }
+      if (envelope?.schemaVersion !== 2
+        || envelope?.captureType !== "account-browser-local-sku-source"
+        || envelope?.captureId !== captureId
+        || envelope?.itemId !== record.itemId
+        || envelope?.ordinal !== ordinal
+        || envelope?.skuId !== skuId
+        || !envelope.snapshot
+        || typeof envelope.snapshot !== "object"
+        || Array.isArray(envelope.snapshot)
+        || String(envelope.snapshot.skuId || "") !== skuId) {
+        throw fail("INVALID_BROWSER_CAPTURE", `第 ${ordinal} 个 SKU 本地采集文件身份校验失败。`);
+      }
+      skuSnapshots.push(envelope.snapshot);
+    }
   }
   return {
     ...record,
+    page: skuSnapshots ? { ...(record.page || {}), skuSnapshots } : record.page,
     sourceFile: samePath(path.dirname(file), defaultLocalEvidenceDirectory()) ? `capture-evidence/${filename}` : file,
     localFirst: { sourceSaved: true, sourceSanitized: true, parsedFromDisk: true, networkAccessedAfterCapture: false },
   };
@@ -950,13 +1190,6 @@ function reparseBrowserCaptureRecord(capture, { accountType, itemIdHint, sourceF
     browserEvidenceFile: sourceFile || capture.sourceFile || "",
     localFirst: { ...capture.localFirst },
   };
-  const observedSkuCount = Number(snapshot.rawSignals?.observedSkuCount || 0);
-  const outputSkuCount = Number(snapshot.rawSignals?.outputSkuCount || 0);
-  const verifiedPriceSkuCount = Number(snapshot.rawSignals?.verifiedPriceSkuCount || 0);
-  if (!observedSkuCount || observedSkuCount !== outputSkuCount || outputSkuCount !== verifiedPriceSkuCount) {
-    throw fail("INCOMPLETE_CAPTURE_REPARSE", "浏览器证据重解析后 SKU 价格不完整，未生成可展示快照。");
-  }
-
   return {
     snapshot,
     sourceFile: sourceFile || capture.sourceFile || "",
@@ -1038,7 +1271,7 @@ export async function clearLocalEvidenceFiles(configuredDirectory) {
     try {
       const record = JSON.parse(await fs.readFile(file.file, "utf8"));
       if (record?.captureType !== "account-browser-local-source" || record.captureId !== file.captureId) continue;
-      await fs.rm(file.file, { force: true });
+      await removeBrowserCaptureArtifacts(directory, file.captureId);
       deletedCaptureIds.push(file.captureId);
     } catch {
       // A file changed after scanning; leave it untouched instead of guessing ownership.
@@ -1119,7 +1352,7 @@ export function localImportPublicPreview(record) {
     priceRange: Array.isArray(snapshot.priceRange) ? snapshot.priceRange : null,
     warnings: [
       ...(Array.isArray(record.blockingReasons) ? record.blockingReasons : []),
-      ...(unverifiedCount ? [`${unverifiedCount} 个 SKU 未通过价格证据核验，未写入正式快照`] : []),
+      ...(unverifiedCount ? [`${unverifiedCount} 个 SKU 未通过价格证据核验，价格已保留为空；其他已核验 SKU 不受影响`] : []),
     ],
     skuPrices: Array.isArray(snapshot.skuPrices) ? snapshot.skuPrices : [],
   };
@@ -1178,14 +1411,9 @@ export async function createLocalImportFromSavedSource(importId, options = {}) {
   const createdAt = new Date().toISOString();
   const snapshot = buildSnapshot({ content, parsed, itemId, accountType, capturedAt: createdAt });
   const verifiedPriceSkuCount = snapshot.rawSignals.verifiedPriceSkuCount;
-  const observedSkuCount = snapshot.rawSignals.observedSkuCount;
-  const outputSkuCount = snapshot.rawSignals.outputSkuCount;
   const blockingReasons = [];
   if (!itemId) blockingReasons.push("未可靠识别商品 ID");
   if (!verifiedPriceSkuCount) blockingReasons.push("没有 SKU 通过价格证据核验");
-  if (!observedSkuCount || observedSkuCount !== outputSkuCount || outputSkuCount !== verifiedPriceSkuCount) {
-    blockingReasons.push("SKU 证据不完整：观察、输出与已验证数量必须完全一致");
-  }
   const record = {
     schemaVersion: 1,
     importId,

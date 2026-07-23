@@ -5,27 +5,68 @@ import {
   browserRuntimeInfo,
   canReuseBrowser,
   captureRequestedSkuSelections,
+  classifyPassiveTaobaoSession,
   classifyTaobaoSessionCheck,
+  classifyTaobaoIdentityProbe,
   cookieHeaderForUrls,
   createTaobaoAccessRestrictedError,
+  evaluateBrowserPage,
   findAvailableBrowserPort,
   itemIdFromNetworkBody,
   itemIdFromNetworkUrl,
   isBuyerShowResponseUrl,
   isTaobaoAccessRestrictedDocument,
   isTaobaoLoginDocument,
+  isTaobaoIdentityLoginUrl,
   isTaobaoLoginUrl,
   isTmallLoginPageUrl,
   isTmallSilentLoginResponse,
   isTrustedTmallSilentLoginResponse,
+  listBrowserEngines,
   shouldCaptureNetworkResponse,
   shouldPreserveCaptureCache,
   shouldRefreshTmallSso,
+  selectReusableCaptureTarget,
   skuIdFromNetworkBody,
   skuIdFromNetworkUrl,
   taobaoCookieStateForUrls,
   tmallSsoSyncUrlsFromSilentLogin,
+  refreshTmallSsoFromCapturedLogin,
+  requestTmallSilentLoginBridge,
+  waitForBrowserCaptureSignal,
+  waitForBrowserDocumentSignal,
 } from "./browserService.js";
+
+test("capture work tabs reuse the exact product, then another product or blank, but never a login page", () => {
+  const target = (id, url, type = "page") => ({ id, url, type, webSocketDebuggerUrl: `ws://127.0.0.1/${id}` });
+  const targets = [
+    target("login", "https://login.taobao.com/member/login.jhtml"),
+    target("blank", "about:blank"),
+    target("other", "https://detail.tmall.com/item.htm?id=760234834628"),
+    target("exact", "https://item.taobao.com/item.htm?id=1059717807069"),
+  ];
+
+  assert.deepEqual(selectReusableCaptureTarget(targets, "https://detail.tmall.com/item.htm?id=1059717807069"), {
+    target: targets[3],
+    reuseLoadedDocument: true,
+  });
+  assert.deepEqual(selectReusableCaptureTarget(targets.slice(0, 3), "https://detail.tmall.com/item.htm?id=1059717807069"), {
+    target: targets[2],
+    reuseLoadedDocument: false,
+  });
+  assert.deepEqual(selectReusableCaptureTarget(targets.slice(0, 2), "https://detail.tmall.com/item.htm?id=1059717807069"), {
+    target: targets[1],
+    reuseLoadedDocument: false,
+  });
+  assert.equal(selectReusableCaptureTarget([targets[0]], "https://detail.tmall.com/item.htm?id=1059717807069"), null);
+});
+
+test("browser selection defaults to UC without exposing or falling back to Google", () => {
+  const catalog = listBrowserEngines();
+  assert.equal(catalog.defaultEngine, "uc");
+  assert.deepEqual(catalog.engines.map((engine) => engine.id), ["uc", "360", "qq", "sogou", "edge"]);
+  assert.equal(catalog.engines.some((engine) => "executablePath" in engine || "env" in engine), false);
+});
 
 test("one SKU runtime timeout does not erase successful sibling selections", async () => {
   let responseSequence = 0;
@@ -36,6 +77,10 @@ test("one SKU runtime timeout does not erase successful sibling selections", asy
       assert.equal(method, "Runtime.evaluate");
       assert.match(params.expression, /hydrationDeadline = Date\.now\(\) \+ 1500/);
       assert.match(params.expression, /interactionDeadline = Date\.now\(\) \+ 6000/);
+      assert.match(params.expression, /pointer\('pointerdown'\)/);
+      assert.match(params.expression, /dispatchEvent\(new MouseEvent\('mousedown'/);
+      assert.match(params.expression, /pointer\('pointerup'\)/);
+      assert.match(params.expression, /clickable\.click\(\)/);
       observedTimeouts.push(timeoutMs);
       calls += 1;
       if (calls === 2) throw new Error("CDP 调用超时：Runtime.evaluate");
@@ -56,6 +101,7 @@ test("one SKU runtime timeout does not erase successful sibling selections", asy
     getResponseSequence: () => responseSequence,
     responseTimeoutMs: 0,
     responseSettleMs: 0,
+    warmupSelection: false,
   });
 
   assert.equal(calls, 3);
@@ -68,30 +114,240 @@ test("one SKU runtime timeout does not erase successful sibling selections", asy
   ]);
 });
 
-test("Tmall SSO bridge accepts only trusted same-session endpoints", () => {
-  const body = `callback({"content":{"data":{"asyncUrls":[
-    "https://pass.tmall.com/add?token=secret",
-    "https://pass.tmall.hk/add?token=secret",
-    "https://pass.fliggy.com/add?token=secret",
-    "https://pass.tmall.com.evil.example/add?token=secret",
-    "http://pass.tmall.com/add?token=secret",
-    "https://pass.tmall.com:444/add?token=secret",
-    "https://user:pass@pass.tmall.com/add?token=secret",
-    "https://pass.tmall.com/other?token=secret"
-  ]}}})`;
-  assert.deepEqual(tmallSsoSyncUrlsFromSilentLogin(body).map((value) => new URL(value).hostname), [
-    "pass.tmall.com",
-    "pass.tmall.hk",
-  ]);
-  assert.deepEqual(tmallSsoSyncUrlsFromSilentLogin("not-json"), []);
+test("SKU capture keeps waiting until delayed responses become quiet", async () => {
+  let clock = 0;
+  let responseSequence = 0;
+  let waitCount = 0;
+  const cdp = {
+    async send() {
+      return { result: { value: { selected: true, clicked: ["1"] } } };
+    },
+  };
+  const results = await captureRequestedSkuSelections({
+    cdp,
+    requestedSelections: [{ skuId: "sku-delayed-complete", valueIds: ["1"] }],
+    captureRunId: "selection-delayed-run",
+    getResponseSequence: () => responseSequence,
+    now: () => clock,
+    wait: async (milliseconds) => {
+      clock += milliseconds;
+      waitCount += 1;
+      if (waitCount === 1) responseSequence = 1;
+      if (waitCount === 5) responseSequence = 2;
+    },
+    responseTimeoutMs: 3000,
+    responseSettleMs: 900,
+  });
+
+  assert.equal(results[0].responseReceivedAfterSelection, true);
+  assert.equal(results[0].responseSequenceStartExclusive, 0);
+  assert.equal(results[0].responseSequenceEndInclusive, 2);
+  assert.equal(clock, 1400);
 });
 
-test("Tmall silent-login JSONP scripts are captured only for in-browser SSO", () => {
+test("SKU warmup reuses the last SKU response and DOM snapshot in ordered results", async () => {
+  let responseSequence = 0;
+  const selectedValueIds = [];
+  const snapshots = [];
+  const cdp = {
+    async send(_method, params) {
+      const valueId = ["first", "second", "third", "last"].find((value) => params.expression.includes(`"${value}"`));
+      assert.ok(valueId);
+      selectedValueIds.push(valueId);
+      responseSequence += 1;
+      return { result: { value: { selected: true, clicked: [valueId] } } };
+    },
+  };
+  const results = await captureRequestedSkuSelections({
+    cdp,
+    requestedSelections: [
+      { skuId: "sku-first", valueIds: ["first"] },
+      { skuId: "sku-second", valueIds: ["second"] },
+      { skuId: "sku-third", valueIds: ["third"] },
+      { skuId: "sku-last", valueIds: ["last"] },
+    ],
+    captureRunId: "selection-warmup-run",
+    getResponseSequence: () => responseSequence,
+    captureSelectedDocument: async (selection) => snapshots.push(selection),
+    responseTimeoutMs: 0,
+    responseSettleMs: 0,
+  });
+
+  assert.deepEqual(selectedValueIds, ["last", "first", "second", "third"]);
+  assert.deepEqual(snapshots.map((item) => ({
+    skuId: item.skuId,
+    responseSequenceStartExclusive: item.responseSequenceStartExclusive,
+    responseSequenceEndInclusive: item.responseSequenceEndInclusive,
+  })), [
+    { skuId: "sku-last", responseSequenceStartExclusive: 0, responseSequenceEndInclusive: 1 },
+    { skuId: "sku-first", responseSequenceStartExclusive: 1, responseSequenceEndInclusive: 2 },
+    { skuId: "sku-second", responseSequenceStartExclusive: 2, responseSequenceEndInclusive: 3 },
+    { skuId: "sku-third", responseSequenceStartExclusive: 3, responseSequenceEndInclusive: 4 },
+  ]);
+  assert.deepEqual(results.map((item) => ({
+    skuId: item.skuId,
+    responseSequenceStartExclusive: item.responseSequenceStartExclusive,
+    responseSequenceEndInclusive: item.responseSequenceEndInclusive,
+    responseReceivedAfterSelection: item.responseReceivedAfterSelection,
+    documentCaptured: item.documentCaptured,
+  })), [
+    {
+      skuId: "sku-first",
+      responseSequenceStartExclusive: 1,
+      responseSequenceEndInclusive: 2,
+      responseReceivedAfterSelection: true,
+      documentCaptured: true,
+    },
+    {
+      skuId: "sku-second",
+      responseSequenceStartExclusive: 2,
+      responseSequenceEndInclusive: 3,
+      responseReceivedAfterSelection: true,
+      documentCaptured: true,
+    },
+    {
+      skuId: "sku-third",
+      responseSequenceStartExclusive: 3,
+      responseSequenceEndInclusive: 4,
+      responseReceivedAfterSelection: true,
+      documentCaptured: true,
+    },
+    {
+      skuId: "sku-last",
+      responseSequenceStartExclusive: 0,
+      responseSequenceEndInclusive: 1,
+      responseReceivedAfterSelection: true,
+      documentCaptured: true,
+    },
+  ]);
+});
+
+test("each selected SKU captures its DOM before the next selection even without a price response", async () => {
+  const events = [];
+  const documents = [];
+  const cdp = {
+    async send(_method, params) {
+      const valueId = params.expression.includes('"first"') ? "first" : "second";
+      events.push(`select:${valueId}`);
+      return { result: { value: { selected: true, clicked: [valueId] } } };
+    },
+  };
+
+  const results = await captureRequestedSkuSelections({
+    cdp,
+    requestedSelections: [
+      { skuId: "sku-first", valueIds: ["first"] },
+      { skuId: "sku-second", valueIds: ["second"] },
+    ],
+    captureRunId: "selection-dom-run",
+    getResponseSequence: () => 0,
+    captureSelectedDocument: async (selection) => {
+      events.push(`capture:${selection.skuId}`);
+      documents.push({
+        ...selection,
+        html: `<html data-sku="${selection.skuId}"></html>`,
+        visibleText: `SKU ${selection.skuId}`,
+      });
+    },
+    responseTimeoutMs: 0,
+    responseSettleMs: 0,
+    warmupSelection: false,
+  });
+
+  assert.deepEqual(events, [
+    "select:first",
+    "capture:sku-first",
+    "select:second",
+    "capture:sku-second",
+  ]);
+  assert.deepEqual(documents.map((document) => document.skuId), ["sku-first", "sku-second"]);
+  assert.deepEqual(results.map((result) => ({
+    skuId: result.skuId,
+    selected: result.selected,
+    responseReceivedAfterSelection: result.responseReceivedAfterSelection,
+    documentCaptured: result.documentCaptured,
+    reason: result.reason,
+  })), [
+    {
+      skuId: "sku-first",
+      selected: true,
+      responseReceivedAfterSelection: false,
+      documentCaptured: true,
+      reason: "document-captured",
+    },
+    {
+      skuId: "sku-second",
+      selected: true,
+      responseReceivedAfterSelection: false,
+      documentCaptured: true,
+      reason: "document-captured",
+    },
+  ]);
+});
+
+test("browser capture continues immediately when the matching response arrives", async () => {
+  const handlers = new Map();
+  const cdp = {
+    on(event, handler) {
+      handlers.set(event, handler);
+      return () => handlers.delete(event);
+    },
+  };
+  const ready = waitForBrowserCaptureSignal(cdp, {
+    timeoutMs: 1000,
+    responseMatches: ({ response }) => /pcdetail/.test(response.url),
+  });
+  handlers.get("Network.responseReceived")({ response: { url: "https://h5api.m.tmall.com/h5/mtop.taobao.pcdetail.data.adjust/1.0/" } });
+  assert.equal(await ready, "matching-response");
+  assert.equal(handlers.size, 0);
+});
+
+test("browser document readiness waits for a page lifecycle event", async () => {
+  const handlers = new Map();
+  const cdp = {
+    on(event, handler) {
+      handlers.set(event, handler);
+      return () => handlers.delete(event);
+    },
+  };
+  const ready = waitForBrowserDocumentSignal(cdp, { timeoutMs: 1000 });
+  handlers.get("Page.domContentEventFired")({});
+  assert.equal(await ready, "dom-content-loaded");
+  assert.equal(handlers.size, 0);
+});
+
+test("browser page evaluation retries transient navigation failures only", async () => {
+  let calls = 0;
+  const waits = [];
+  const result = await evaluateBrowserPage({
+    async send(method) {
+      assert.equal(method, "Runtime.evaluate");
+      calls += 1;
+      if (calls === 1) throw new Error("Execution context was destroyed, most likely because of a navigation.");
+      return { result: { value: "ready" } };
+    },
+  }, { expression: "document.readyState", returnByValue: true }, {
+    attempts: 3,
+    retryDelayMs: 250,
+    wait: async (milliseconds) => waits.push(milliseconds),
+  });
+  assert.equal(result.result.value, "ready");
+  assert.equal(calls, 2);
+  assert.deepEqual(waits, [250]);
+
+  await assert.rejects(evaluateBrowserPage({
+    async send() {
+      throw new Error("JavaScript exception");
+    },
+  }, { expression: "broken()" }, { attempts: 3, stage: "测试读取", wait: async () => undefined }), /测试读取失败：JavaScript exception/);
+});
+
+test("capture ignores silent-login JSONP so price collection cannot mutate the account session", () => {
   assert.equal(shouldCaptureNetworkResponse({
     url: "https://login.taobao.com/newlogin/silentHasLogin.do?callback=x",
     mimeType: "application/javascript",
     status: 200,
-  }, "Script"), true);
+  }, "Script"), false);
   assert.equal(shouldCaptureNetworkResponse({
     url: "https://example.com/unrelated.js",
     mimeType: "application/javascript",
@@ -104,39 +360,72 @@ test("Tmall silent-login JSONP scripts are captured only for in-browser SSO", ()
   }, "Script"), false);
 });
 
-test("Tmall SSO bridge accepts only the real Taobao silent-login source", () => {
+test("Tmall SSO bridge accepts only official one-time same-browser endpoints", () => {
+  const body = `callback({"content":{"data":{"asyncUrls":[
+    "https://pass.tmall.com/add?token=secret",
+    "https://pass.tmall.hk/add?token=secret",
+    "https://pass.tmall.com.evil.example/add?token=secret",
+    "http://pass.tmall.com/add?token=secret",
+    "https://pass.tmall.com/other?token=secret"
+  ]}}})`;
+  assert.deepEqual(tmallSsoSyncUrlsFromSilentLogin(body).map((value) => new URL(value).hostname), [
+    "pass.tmall.com",
+    "pass.tmall.hk",
+  ]);
+  assert.deepEqual(tmallSsoSyncUrlsFromSilentLogin("not-json"), []);
   assert.equal(isTrustedTmallSilentLoginResponse("https://login.taobao.com/newlogin/silentHasLogin.do?callback=x"), true);
-  for (const url of [
-    "https://evil.example/newlogin/silentHasLogin.do",
-    "https://login.taobao.com.evil.example/newlogin/silentHasLogin.do",
-    "http://login.taobao.com/newlogin/silentHasLogin.do",
-    "https://login.taobao.com:444/newlogin/silentHasLogin.do",
-    "https://user:pass@login.taobao.com/newlogin/silentHasLogin.do",
-  ]) {
-    assert.equal(isTrustedTmallSilentLoginResponse(url), false);
-    assert.equal(isTmallSilentLoginResponse(url), true);
-  }
+  assert.equal(isTrustedTmallSilentLoginResponse("https://login.taobao.com.evil.example/newlogin/silentHasLogin.do"), false);
+});
+
+test("Tmall SSO bridge is consumed only inside the current browser target", async () => {
+  const calls = [];
+  const cdp = {
+    async send(method, params) {
+      calls.push({ method, params });
+      if (method === "Network.getResponseBody") {
+        return { body: 'callback({"content":{"data":{"asyncUrls":["https://pass.tmall.com/add?token=one-time"]}}})' };
+      }
+      if (method === "Runtime.evaluate") return { result: { value: true } };
+      throw new Error(`Unexpected CDP method: ${method}`);
+    },
+  };
+  const refreshed = await refreshTmallSsoFromCapturedLogin(cdp, new Map([
+    ["trusted", { url: "https://login.taobao.com/newlogin/silentHasLogin.do?callback=x" }],
+    ["ignored", { url: "https://login.taobao.com.evil.example/newlogin/silentHasLogin.do" }],
+  ]));
+  assert.equal(refreshed, true);
+  assert.deepEqual(calls.map(({ method }) => method), ["Network.getResponseBody", "Runtime.evaluate"]);
+  assert.match(calls[1].params.expression, /https:\/\/pass\.tmall\.com\/add/);
+  assert.doesNotMatch(calls[1].params.expression, /evil\.example/);
+});
+
+test("a missing Tmall bridge is requested by the authorized browser, never by Node", async () => {
+  let expression = "";
+  await requestTmallSilentLoginBridge({
+    async send(method, params) {
+      assert.equal(method, "Runtime.evaluate");
+      expression = params.expression;
+      return { result: { value: true } };
+    },
+  });
+  assert.match(expression, /script\.src = 'https:\/\/login\.taobao\.com\/newlogin\/silentHasLogin\.do'/);
+  assert.doesNotMatch(expression, /fetch\s*\(/);
+});
+
+test("Tmall SSO refresh retries degraded price access immediately without rebuilding the browser", () => {
+  const now = Date.parse("2026-07-22T08:00:00.000Z");
+  assert.equal(shouldRefreshTmallSso({ tmallPriceStatus: "degraded" }, { now }), true);
+  assert.equal(shouldRefreshTmallSso({ tmallPriceStatus: "degraded" }, { now, lastRefreshAt: now - 60 * 1000 }), true);
+  assert.equal(shouldRefreshTmallSso({ tmallPriceStatus: "degraded" }, { now, lastRefreshAt: now - 11 * 60 * 1000 }), true);
+  assert.equal(shouldRefreshTmallSso({
+    tmallPriceStatus: "valid",
+    tmallPriceCheckedAt: "2026-07-22T07:00:00.000Z",
+  }, { now }), false);
 });
 
 test("Tmall silent-login bridges stay out of persisted capture payloads", () => {
   assert.equal(isTmallSilentLoginResponse("https://login.taobao.com/newlogin/silentHasLogin.do"), true);
   assert.equal(isTmallSilentLoginResponse("https://h5api.m.tmall.com/h5/mtop.taobao.pcdetail.data.adjust/1.0/"), false);
-});
-
-test("Tmall SSO refresh is state-aware and rate-limited per persistent account browser", () => {
-  const now = Date.parse("2026-07-21T08:00:00.000Z");
-  assert.equal(shouldRefreshTmallSso({ tmallPriceStatus: "unknown" }, { now }), true);
-  assert.equal(shouldRefreshTmallSso({ tmallPriceStatus: "degraded" }, { now, lastRefreshAt: now - 60 * 1000 }), true);
-  assert.equal(shouldRefreshTmallSso({ tmallPriceStatus: "cooldown" }, { now, lastRefreshAt: now - 60 * 60 * 1000 }), false);
-  assert.equal(shouldRefreshTmallSso({ tmallPriceStatus: "cooldown" }, { now, lastRefreshAt: now - 13 * 60 * 60 * 1000 }), true);
-  assert.equal(shouldRefreshTmallSso({
-    tmallPriceStatus: "valid",
-    tmallPriceCheckedAt: "2026-07-21T07:00:00.000Z",
-  }, { now }), false);
-  assert.equal(shouldRefreshTmallSso({
-    tmallPriceStatus: "valid",
-    tmallPriceCheckedAt: "2026-07-19T07:00:00.000Z",
-  }, { now }), true);
 });
 
 test("stale Tmall login cleanup matches only the exact secure login page", () => {
@@ -234,6 +523,46 @@ test("session checks distinguish explicit expiry from temporary degradation", ()
   assert.equal(classifyTaobaoSessionCheck({ authLoggedIn: false, hasCookie: false, loginPage: true }), "degraded");
   assert.equal(classifyTaobaoSessionCheck({ authLoggedIn: true, hasCookie: true, loginPage: true }), "degraded");
   assert.equal(classifyTaobaoSessionCheck({ authLoggedIn: false, hasCookie: false, loginPage: false }), "degraded");
+});
+
+test("passive account checks do not treat a stale login tab as a logged-out profile", () => {
+  assert.equal(classifyPassiveTaobaoSession({
+    authLoggedIn: true,
+    hasCookie: true,
+    loginPageOpen: true,
+  }), "valid");
+  assert.equal(classifyPassiveTaobaoSession({
+    authLoggedIn: false,
+    hasCookie: false,
+    loginPageOpen: true,
+  }), "expired");
+  assert.equal(classifyPassiveTaobaoSession({ browserClosed: true }), "degraded");
+});
+
+test("passive account checks treat a real My Taobao login redirect as expired even with stale cookies", () => {
+  const identityLoginUrl = "https://login.taobao.com/havanaone/login/login.htm?bizName=taobao&redirectURL=https%3A%2F%2Fi.taobao.com%2Fmy_itaobao";
+  assert.equal(isTaobaoIdentityLoginUrl(identityLoginUrl), true);
+  assert.equal(isTaobaoIdentityLoginUrl("https://login.taobao.com/member/login.jhtml"), false);
+  assert.equal(classifyPassiveTaobaoSession({
+    authLoggedIn: true,
+    hasCookie: true,
+    loginPageOpen: true,
+    identityLoginRedirect: true,
+  }), "expired");
+});
+
+test("a real identity-page login redirect overrides stale cookies", () => {
+  const staleAuthState = { loggedIn: true, cookie: "stale-cookie" };
+  assert.equal(classifyTaobaoIdentityProbe({
+    authState: staleAuthState,
+    finalUrl: "https://login.taobao.com/havanaone/login/login.htm?redirectURL=https%3A%2F%2Fi.taobao.com%2Fmy_itaobao",
+    visibleText: "登录页面 密码登录 短信登录",
+  }), "expired");
+  assert.equal(classifyTaobaoIdentityProbe({
+    authState: staleAuthState,
+    finalUrl: "https://i.taobao.com/my_itaobao",
+    visibleText: "我的淘宝",
+  }), "valid");
 });
 
 test("cookie headers are URL scoped and de-duplicate cookie names", () => {

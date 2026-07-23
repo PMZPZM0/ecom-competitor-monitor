@@ -17,7 +17,8 @@ import { clearFailedCaptureJobs, clearFinishedCaptureJobs, clearStaleCaptureQueu
 import { monitorChannelSupported } from "./services/monitorRuleService.js";
 import { createNotificationLog, effectivePriceForSku, publicFeishuConfig, sendFeishuNotification, updateFeishuConfig } from "./services/feishuService.js";
 import { appendPriceDocument, cliStatus, createPriceDocument, readAuthQr, startCliLogin, startCliSetup } from "./services/larkCliService.js";
-import { browserRuntimeInfo, checkTaobaoSession, closeAccountBrowser, closeAccountTab, findAvailableBrowserPort, getTaobaoAuthState, isTaobaoLoginUrl, isTmallLoginPageUrl, keepAccountBrowserWarm, minimizeAccountBrowser, openProductInAccountChrome, openTaobaoLogin, resetTmallSsoRefreshWindow } from "./services/browserService.js";
+import { browserRuntimeInfo, checkTaobaoSession, closeAccountBrowser, exportTaobaoBrowserCookies, findAvailableBrowserPort, getTaobaoAuthState, isTaobaoLoginUrl, keepAccountBrowserWarm, listBrowserEngines, minimizeAccountBrowser, openBrowserInstallPage, openProductInAccountBrowser, openTaobaoLogin, resetTmallSsoRefreshWindow, restoreTaobaoBrowserCookies } from "./services/browserService.js";
+import { AUTH_BUNDLE_MAX_BYTES, createAuthBundle, openAuthBundle } from "./services/authBundleService.js";
 import { scrapeTmallProduct, SCRAPER_VERSION } from "./services/tmallScraper.js";
 import { normalizeProductUrl } from "./utils/productUrl.js";
 import { checkForUpdate } from "./services/updateService.js";
@@ -242,8 +243,15 @@ function reserveImageGeneration(req, res, next) {
 
 function publicAuthSession(session) {
   const identityOnline = session.loginStatus === "valid";
-  const priceUsable = identityOnline && session.tmallPriceStatus === TMALL_PRICE_STATUS.VALID;
-  const availabilityStatus = session.loginStatus === "expired"
+  const restrictionUntil = Math.max(
+    Date.parse(String(session.tmallPriceCooldownUntil || "")) || 0,
+    Date.parse(String(session.tmallPriceDeviceCooldownUntil || "")) || 0,
+  );
+  const accessRestricted = session.tmallPriceFailureReason === "TAOBAO_ACCESS_RESTRICTED" && restrictionUntil > Date.now();
+  const priceUsable = identityOnline && session.tmallPriceStatus === TMALL_PRICE_STATUS.VALID && !accessRestricted;
+  const availabilityStatus = accessRestricted
+    ? "access-restricted"
+    : session.loginStatus === "expired"
     ? "login-expired"
     : priceUsable
       ? "ready"
@@ -259,6 +267,8 @@ function publicAuthSession(session) {
     availabilityStatus,
     availabilityReason: availabilityStatus === "ready"
       ? "淘宝身份与商品价格响应均已验证。"
+      : availabilityStatus === "access-restricted"
+        ? `当前浏览器环境已被淘宝限制，应用采集暂停至 ${new Date(restrictionUntil).toLocaleString("zh-CN", { hour12: false })}。登录和历史价格均已保留。`
       : availabilityStatus === "login-expired"
         ? "淘宝登录已失效，需要重新扫码。"
         : availabilityStatus === "price-unavailable"
@@ -829,6 +839,16 @@ app.post("/api/products", async (req, res) => {
   await rescheduleMonitor();
   res.status(201).json(product);
 });
+const authBundleUpload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: AUTH_BUNDLE_MAX_BYTES, files: 1, fields: 2, parts: 3 },
+  fileFilter: (_req, file, callback) => {
+    const validName = String(file.originalname || "").toLowerCase().endsWith(".json");
+    const validType = ["application/json", "text/json", "text/plain", "application/octet-stream", ""].includes(String(file.mimetype || "").toLowerCase());
+    if (validName && validType) return callback(null, true);
+    callback(Object.assign(new Error("请选择由本应用导出的 JSON 登录包。"), { status: 400, code: "AUTH_BUNDLE_FILE_INVALID" }));
+  },
+});
 
 app.get("/api/excel-sync", async (_req, res) => {
   res.json(await getExcelSyncStatus());
@@ -1220,7 +1240,7 @@ app.post("/api/products/:id/search-main-image", async (req, res) => {
 });
 
 app.post("/api/products/:id/reparse-local-evidence", async (req, res) => {
-  const { kind } = z.object({ kind: z.enum(["materials", "buyer-show", "search-main-image"]) }).parse(req.body || {});
+  const { kind } = z.object({ kind: z.enum(["price", "materials", "buyer-show", "search-main-image"]) }).parse(req.body || {});
   res.json(await reparseProductLocalEvidence(req.params.id, kind));
 });
 
@@ -1242,7 +1262,7 @@ app.post("/api/products/:id/open", async (req, res) => {
     res.status(409).json({ message: `没有可用的${accountLabel}账号登录态，也没有其他可回退的扫码账号，请先在账号授权页面登录。` });
     return;
   }
-  res.json(await openProductInAccountChrome(product.url, authSession));
+  res.json(await openProductInAccountBrowser(product.url, authSession));
 });
 
 app.get("/api/products/:id/snapshots", async (req, res) => {
@@ -1858,12 +1878,114 @@ app.get("/api/auth/taobao/oauth-url", (_req, res) => {
   res.json(buildTaobaoOAuthUrl());
 });
 
+app.get("/api/auth/browser-engines", (_req, res) => {
+  res.json(listBrowserEngines());
+});
+
+app.post("/api/auth/browser-engines/:engine/install", (req, res) => {
+  res.json(openBrowserInstallPage(req.params.engine));
+});
+
+app.get("/api/auth/sessions/:id/login-bundle", async (req, res) => {
+  const db = await readDb();
+  const session = db.authSessions.find((item) => item.id === req.params.id);
+  if (!session) return res.status(404).json({ message: "账号不存在。" });
+  if (session.source !== "taobao-browser" || !session.browserProfileKey || !session.browserPort) {
+    return res.status(400).json({ message: "旧 Cookie 账号无法导出完整登录包，请改用扫码授权账号。" });
+  }
+  if (session.loginStatus === "expired" || session.tmallPriceStatus === TMALL_PRICE_STATUS.DEGRADED) {
+    return res.status(409).json({ message: "当前账号登录或天猫查价会话已经失效，不能生成不完整登录包；请先重新授权并成功抓取一个商品后再导出。" });
+  }
+  const cookies = await exportTaobaoBrowserCookies({
+    profileKey: session.browserProfileKey,
+    port: session.browserPort,
+    browserEngine: session.browserEngine,
+  });
+  const document = await createAuthBundle({ cookies, session });
+  const filename = `${String(session.name || "淘宝账号").replace(/[^\w\u4e00-\u9fa5-]+/g, "_").slice(0, 40)}_登录包.json`;
+  res.setHeader("content-type", "application/json; charset=utf-8");
+  res.setHeader("cache-control", "no-store");
+  res.setHeader("content-disposition", `attachment; filename*=UTF-8''${encodeURIComponent(filename)}`);
+  res.send(JSON.stringify(document, null, 2));
+});
+
+app.post("/api/auth/login-bundles/import", authBundleUpload.single("bundle"), async (req, res) => {
+  if (!req.file?.buffer) return res.status(400).json({ message: "请选择登录包 JSON 文件。" });
+  const bundle = await openAuthBundle(req.file.buffer);
+  const requestedEngine = String(req.body?.browserEngine || "").toLowerCase();
+  const browserEngine = ["uc", "360", "qq", "sogou", "edge"].includes(requestedEngine)
+    ? requestedEngine
+    : bundle.browserEngine || listBrowserEngines().defaultEngine;
+  const db = await readDb();
+  const browserPort = await findAvailableBrowserPort([
+    ...db.authSessions.map((session) => session.browserPort),
+    ...(Array.isArray(db.pendingAuthScans) ? db.pendingAuthScans.map((scan) => scan.browserPort) : []),
+    ...Array.from(pendingScans.values(), (scan) => scan.browserPort),
+    ...pendingBrowserPorts,
+  ].filter(Boolean));
+  const profileKey = newId(`taobao_import_${browserEngine}`);
+  pendingBrowserPorts.add(browserPort);
+  let authState;
+  try {
+    authState = await restoreTaobaoBrowserCookies(bundle.cookies, { profileKey, port: browserPort, browserEngine });
+  } catch (error) {
+    await closeAccountBrowser({ profileKey, port: browserPort, browserEngine }).catch(() => undefined);
+    throw error;
+  } finally {
+    pendingBrowserPorts.delete(browserPort);
+  }
+
+  const now = new Date().toISOString();
+  const session = {
+    id: newId("auth"),
+    name: bundle.name || authState.nickname || "导入的淘宝账号",
+    accountType: bundle.accountType || "normal",
+    cookie: authState.cookie,
+    source: "taobao-browser",
+    browserEngine,
+    browserProfileKey: profileKey,
+    browserPort,
+    active: true,
+    enabled: true,
+    loginStatus: "valid",
+    tmallPriceStatus: TMALL_PRICE_STATUS.UNKNOWN,
+    tmallPriceCheckedAt: null,
+    tmallPriceCooldownUntil: null,
+    tmallPriceDeviceCooldownUntil: null,
+    tmallPriceLastFailureAt: null,
+    tmallPriceFailureReason: null,
+    tmallPriceFailureCount: 0,
+    lastCheckedAt: now,
+    healthStatus: "degraded",
+    consecutiveFailures: 0,
+    lastFailureAt: null,
+    createdAt: now,
+  };
+  try {
+    await updateDb((current) => {
+      current.authSessions.unshift(session);
+      return current;
+    });
+  } catch (error) {
+    await closeAccountBrowser({ profileKey, port: browserPort, browserEngine }).catch(() => undefined);
+    throw error;
+  }
+  await minimizeAccountBrowser({ profileKey, port: browserPort, browserEngine }).catch(() => undefined);
+  await resumeAuthRequiredCaptureJobs();
+  res.status(201).json({
+    session: publicAuthSession(session),
+    message: `已导入「${session.name}」并恢复淘宝登录；天猫优惠价格能力将在首次真实商品抓取后确认。`,
+  });
+});
+
 app.post("/api/auth/taobao/scan/start", async (req, res) => {
   const schema = z.object({
     name: z.string().min(1).max(40).default("淘宝扫码账号"),
     accountType: z.enum(["normal", "gift", "vip88"]).default("normal"),
+    browserEngine: z.enum(["uc", "360", "qq", "sogou", "edge"]).optional(),
   });
   const parsed = schema.parse(req.body || {});
+  parsed.browserEngine ||= listBrowserEngines().defaultEngine;
   const profileKey = newId("taobao");
   const db = await readDb();
   const browserPort = await findAvailableBrowserPort([
@@ -1874,7 +1996,7 @@ app.post("/api/auth/taobao/scan/start", async (req, res) => {
   ].filter(Boolean));
   pendingBrowserPorts.add(browserPort);
   try {
-    const login = await openTaobaoLogin({ profileKey, port: browserPort });
+    const login = await openTaobaoLogin({ profileKey, port: browserPort, browserEngine: parsed.browserEngine });
     await rememberPendingScan({ ...parsed, profileKey, browserPort, loginTargetId: login.targetId, createdAt: Date.now() });
     res.json(login);
   } catch (error) {
@@ -1893,60 +2015,33 @@ app.post("/api/auth/sessions/:id/reauthorize", async (req, res) => {
     return res.status(400).json({ message: "旧 Cookie 账号不支持自动恢复，请删除后改用扫码账号。" });
   }
 
-  if (session.loginStatus !== "expired") {
-    const browserOptions = { profileKey: session.browserProfileKey, port: session.browserPort };
-    resetTmallSsoRefreshWindow(browserOptions);
-    let updated;
-    await updateDb((current) => {
-      current.authSessions = current.authSessions.map((item) => {
-        if (item.id !== session.id) return item;
-        updated = {
-          ...item,
-          tmallPriceStatus: item.tmallPriceStatus === TMALL_PRICE_STATUS.VALID
-            ? TMALL_PRICE_STATUS.VALID
-            : TMALL_PRICE_STATUS.DEGRADED,
-          tmallPriceCooldownUntil: null,
-          tmallPriceDeviceCooldownUntil: null,
-          tmallPriceFailureReason: item.tmallPriceStatus === TMALL_PRICE_STATUS.VALID
-            ? null
-            : item.tmallPriceFailureReason || "PRICE_REVALIDATION_REQUIRED",
-          healthStatus: item.tmallPriceStatus === TMALL_PRICE_STATUS.VALID ? "healthy" : "degraded",
-        };
-        return updated;
-      });
-      return current;
-    });
-    const authState = await getTaobaoAuthState(browserOptions).catch(() => null);
-    for (const target of authState?.targets || []) {
-      if (target.type === "page" && isTmallLoginPageUrl(target.url)) {
-        await closeAccountTab(target.id, browserOptions).catch(() => undefined);
-      }
-    }
-    await minimizeAccountBrowser(browserOptions).catch(() => undefined);
-    return res.json({
-      ok: true,
-      mode: "silent",
-      url: "",
-      profileKey: session.browserProfileKey,
-      port: session.browserPort,
-      session: publicAuthSession(updated),
-      message: updated.tmallPriceStatus === TMALL_PRICE_STATUS.VALID
-        ? "当前账号已经通过真实商品价格验证，无需修复；登录和浏览器会继续保留。"
-        : "已保留当前登录和浏览器，没有打开登录页或删除 Cookie；这一步只准备价格复检，不代表账号已经可用，请手动抓取一个商品完成真实价格验证。",
-    });
-  }
-
-  const login = await openTaobaoLogin({ profileKey: session.browserProfileKey, port: session.browserPort });
+  const parsed = z.object({ browserEngine: z.enum(["uc", "360", "qq", "sogou", "edge"]).optional() }).parse(req.body || {});
+  const browserEngine = parsed.browserEngine || session.browserEngine || listBrowserEngines().defaultEngine;
+  const switchingBrowser = browserEngine !== session.browserEngine;
+  const profileKey = switchingBrowser ? newId(`taobao_${browserEngine}`) : session.browserProfileKey;
+  const browserPort = switchingBrowser
+    ? await findAvailableBrowserPort([
+      ...db.authSessions.map((item) => item.browserPort),
+      ...(Array.isArray(db.pendingAuthScans) ? db.pendingAuthScans.map((scan) => scan.browserPort) : []),
+      ...Array.from(pendingScans.values(), (scan) => scan.browserPort),
+      ...pendingBrowserPorts,
+    ].filter(Boolean))
+    : session.browserPort;
+  const login = await openTaobaoLogin({ profileKey, port: browserPort, browserEngine });
   await rememberPendingScan({
     sessionId: session.id,
     name: session.name,
     accountType: session.accountType || "normal",
-    profileKey: session.browserProfileKey,
-    browserPort: session.browserPort,
+    browserEngine,
+    profileKey,
+    browserPort,
+    previousBrowserProfileKey: switchingBrowser ? session.browserProfileKey : "",
+    previousBrowserPort: switchingBrowser ? session.browserPort : null,
+    previousBrowserEngine: switchingBrowser ? session.browserEngine || "legacy-google" : "",
     loginTargetId: login.targetId,
     createdAt: Date.now(),
   });
-  res.json({ ...login, mode: "interactive" });
+  res.json(login);
 });
 
 async function syncPendingScan(profileKey) {
@@ -1960,14 +2055,14 @@ async function syncPendingScan(profileKey) {
     return { status: "synced", session: existing };
   }
   pendingScans.set(profileKey, pending);
-  const authState = await getTaobaoAuthState({ profileKey: pending.profileKey, port: pending.browserPort });
+  const authState = await getTaobaoAuthState({ profileKey: pending.profileKey, port: pending.browserPort, browserEngine: pending.browserEngine });
   if (authState.browserClosed) {
     await forgetPendingScan(profileKey);
     return { status: "cancelled" };
   }
   const loginTarget = authState.targets?.find((target) => target.id === pending.loginTargetId);
-  if (loginTarget && isTaobaoLoginUrl(loginTarget.url)) return { status: "waiting" };
   if (!authState.loggedIn || !authState.cookie) {
+    if (loginTarget && isTaobaoLoginUrl(loginTarget.url)) return { status: "waiting" };
     if (!loginTarget) {
       await forgetPendingScan(profileKey);
       return { status: "cancelled" };
@@ -1983,6 +2078,9 @@ async function syncPendingScan(profileKey) {
         session = {
           ...item,
           cookie: authState.cookie,
+          browserEngine: pending.browserEngine || item.browserEngine || listBrowserEngines().defaultEngine,
+          browserProfileKey: pending.profileKey,
+          browserPort: pending.browserPort,
           active: true,
           enabled: true,
           loginStatus: "valid",
@@ -2009,6 +2107,7 @@ async function syncPendingScan(profileKey) {
         accountType: pending.accountType,
         cookie: authState.cookie,
         source: "taobao-browser",
+        browserEngine: pending.browserEngine || listBrowserEngines().defaultEngine,
         browserProfileKey: pending.profileKey,
         browserPort: pending.browserPort,
         active: true,
@@ -2031,8 +2130,18 @@ async function syncPendingScan(profileKey) {
     return db;
   });
   pendingScans.delete(profileKey);
-  await closeAccountTab(pending.loginTargetId, { profileKey: pending.profileKey, port: pending.browserPort });
-  await minimizeAccountBrowser({ profileKey: pending.profileKey, port: pending.browserPort }).catch((error) => console.error("[browser-minimize]", error.message));
+  // Keep the completed Taobao/Tmall landing tab alive in this account's
+  // persistent browser. Closing it immediately after cookie detection can
+  // interrupt the cross-site session hand-off; the whole browser is only
+  // minimized and reused by later captures.
+  await minimizeAccountBrowser({ profileKey: pending.profileKey, port: pending.browserPort, browserEngine: pending.browserEngine }).catch((error) => console.error("[browser-minimize]", error.message));
+  if (pending.previousBrowserProfileKey && pending.previousBrowserPort) {
+    await closeAccountBrowser({
+      profileKey: pending.previousBrowserProfileKey,
+      port: pending.previousBrowserPort,
+      browserEngine: pending.previousBrowserEngine,
+    }).catch(() => undefined);
+  }
   await resumeAuthRequiredCaptureJobs();
   return { status: "synced", session };
 }
@@ -2041,16 +2150,38 @@ async function checkAuthSession(session) {
   if (session.source !== "taobao-browser" || !session.browserProfileKey || !session.browserPort) {
     return { id: session.id, loginStatus: "manual", message: "手动 Cookie 无法无损检测，请通过实际抓取或重新粘贴 Cookie 更新。" };
   }
-  const state = await checkTaobaoSession({ profileKey: session.browserProfileKey, port: session.browserPort });
+  if (!session.browserEngine || session.browserEngine === "legacy-google") {
+    return {
+      id: session.id,
+      status: "degraded",
+      loginStatus: session.loginStatus || "valid",
+      tmallPriceStatus: session.tmallPriceStatus || TMALL_PRICE_STATUS.UNKNOWN,
+      priceUsable: false,
+      message: "旧版浏览器环境已停用；请选择 UC 浏览器并重新授权，历史价格不会删除。",
+      session: publicAuthSession(session),
+    };
+  }
+  const state = await checkTaobaoSession({ profileKey: session.browserProfileKey, port: session.browserPort, browserEngine: session.browserEngine });
   const checkedAt = new Date().toISOString();
   const status = state.status || (state.loggedIn && state.cookie ? "valid" : "degraded");
   const loginStatus = status === "valid" ? "valid" : status === "expired" ? "expired" : session.loginStatus || "valid";
-  const tmallPriceStatus = status === "expired"
+  const restrictionUntil = Math.max(
+    Date.parse(String(session.tmallPriceCooldownUntil || "")) || 0,
+    Date.parse(String(session.tmallPriceDeviceCooldownUntil || "")) || 0,
+  );
+  const accessRestricted = session.tmallPriceFailureReason === "TAOBAO_ACCESS_RESTRICTED" && restrictionUntil > Date.now();
+  const tmallPriceStatus = accessRestricted
+    ? TMALL_PRICE_STATUS.COOLDOWN
+    : status === "expired"
     ? TMALL_PRICE_STATUS.UNKNOWN
     : session.tmallPriceStatus === TMALL_PRICE_STATUS.COOLDOWN
       ? TMALL_PRICE_STATUS.UNKNOWN
       : session.tmallPriceStatus || TMALL_PRICE_STATUS.UNKNOWN;
-  const priceUsable = loginStatus === "valid" && tmallPriceStatus === TMALL_PRICE_STATUS.VALID;
+  const identityOnline = loginStatus === "valid";
+  const priceUsable = identityOnline && tmallPriceStatus === TMALL_PRICE_STATUS.VALID && !accessRestricted;
+  if (status === "valid") {
+    resetTmallSsoRefreshWindow({ profileKey: session.browserProfileKey, port: session.browserPort, browserEngine: session.browserEngine });
+  }
   let updated;
   await updateDb((db) => {
     db.authSessions = db.authSessions.map((item) => {
@@ -2073,15 +2204,17 @@ async function checkAuthSession(session) {
     });
     return db;
   });
-  const message = status === "valid"
-    ? priceUsable
-      ? "账号可用：淘宝身份在线，商品价格响应已经过真实抓取验证。"
-      : tmallPriceStatus === TMALL_PRICE_STATUS.DEGRADED
-        ? "账号暂不可用于采价：淘宝身份仍在线，但最近商品页没有返回可用价格数据；请手动抓取一个商品复检。"
-        : "账号尚未完成采价验证：淘宝身份在线，但必须成功抓取一个真实商品价格后才会显示可用。"
+  const message = accessRestricted
+    ? `登录状态未清除，但当前浏览器环境被淘宝限制；应用采集已暂停至 ${new Date(restrictionUntil).toLocaleString("zh-CN", { hour12: false })}。`
     : status === "expired"
       ? "登录已明确失效，请重新扫码。"
-      : "账号浏览器仍保留，检测页面暂时异常；本次仅标记为待复检，不会清除登录状态。";
+      : identityOnline && tmallPriceStatus === TMALL_PRICE_STATUS.DEGRADED
+        ? "淘宝身份仍在线，但天猫商品查价会话异常，当前不能采价；请重新授权后再抓取。"
+        : identityOnline && tmallPriceStatus === TMALL_PRICE_STATUS.VALID
+          ? "淘宝身份在线，天猫商品查价能力可用。"
+          : identityOnline
+            ? "淘宝身份在线；天猫商品查价能力尚未通过真实商品验证。"
+      : "账号浏览器仍保留，但现有登录凭据暂时无法确认；不会打开新页面或清除登录状态。";
   return { id: session.id, status, loginStatus, tmallPriceStatus, priceUsable, checkedAt, message, session: publicAuthSession(updated) };
 }
 
@@ -2097,8 +2230,10 @@ app.post("/api/auth/sessions/check-all", async (_req, res) => {
     }
     res.json({
       total: results.length,
-      valid: results.filter((result) => result.priceUsable === true).length,
+      valid: results.filter((result) => result.loginStatus === "valid").length,
       identityOnline: results.filter((result) => result.loginStatus === "valid").length,
+      priceUsable: results.filter((result) => result.priceUsable === true).length,
+      priceUnavailable: results.filter((result) => result.loginStatus === "valid" && result.priceUsable !== true).length,
       degraded: results.filter((result) => result.status === "degraded").length,
       expired: results.filter((result) => result.status === "expired").length,
       manual: results.filter((result) => result.loginStatus === "manual").length,
@@ -2144,7 +2279,7 @@ app.post("/api/auth/taobao/scan/cancel", async (req, res) => {
     || (Array.isArray(data.pendingAuthScans) ? data.pendingAuthScans.find((scan) => scan.profileKey === parsed.profileKey) : null);
   if (pending) {
     await forgetPendingScan(parsed.profileKey);
-    if (pending.sessionId) await minimizeAccountBrowser({ profileKey: pending.profileKey, port: pending.browserPort }).catch((error) => console.error("[browser-minimize]", error.message));
+    if (pending.sessionId && !pending.previousBrowserProfileKey) await minimizeAccountBrowser({ profileKey: pending.profileKey, port: pending.browserPort, browserEngine: pending.browserEngine }).catch((error) => console.error("[browser-minimize]", error.message));
     else await closeAccountBrowser({ profileKey: pending.profileKey, port: pending.browserPort });
   }
   res.json({ ok: true });
@@ -2197,7 +2332,7 @@ app.delete("/api/auth/sessions/:id", async (req, res) => {
     return db;
   });
   if (current?.browserProfileKey && current?.browserPort) {
-    await closeAccountBrowser({ profileKey: current.browserProfileKey, port: current.browserPort });
+    await closeAccountBrowser({ profileKey: current.browserProfileKey, port: current.browserPort, browserEngine: current.browserEngine });
   }
   res.status(204).end();
 });
@@ -2217,9 +2352,9 @@ app.post("/api/auth/sessions/:id/activate", async (req, res) => {
     res.status(404).json({ message: "会话不存在。" });
     return;
   }
-  if (activated.source === "taobao-browser" && activated.browserProfileKey && activated.browserPort) {
+  if (activated.source === "taobao-browser" && activated.browserProfileKey && activated.browserPort && activated.browserEngine) {
     if (activated.enabled) await keepAccountBrowserWarm(activated);
-    else await minimizeAccountBrowser({ profileKey: activated.browserProfileKey, port: activated.browserPort }).catch((error) => console.error("[browser-minimize]", error.message));
+    else await minimizeAccountBrowser({ profileKey: activated.browserProfileKey, port: activated.browserPort, browserEngine: activated.browserEngine }).catch((error) => console.error("[browser-minimize]", error.message));
   }
   if (activated.enabled) await resumeAuthRequiredCaptureJobs();
   res.json(publicAuthSession(activated));

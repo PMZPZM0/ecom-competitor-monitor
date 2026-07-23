@@ -5,6 +5,7 @@ import { dbRuntimeInfo, readDb } from "../storage/db.js";
 import { PRICE_PROMOTION_INDEX } from "./priceResolver.js";
 
 const WORKBOOK_NAME = "电商竞品监控-价格自动同步.xlsx";
+const PRICE_INDEX_NAME = "电商竞品监控-价格索引.json";
 const CHANNEL_KINDS = ["normal", "billion", "seckill", "government", "surprise", "gift", "vip88", "coin"];
 const channelFields = [
   ["标价", "originalPrice", "list"],
@@ -17,7 +18,7 @@ const channelFields = [
   ["88VIP价", "vipPrice", "vip88"],
   ["淘金币价", "coinPrice", "coin"],
 ];
-let runtimeStatus = { lastSyncedAt: null, lastError: "", calculationMs: null, workbookMs: null };
+let runtimeStatus = { lastSyncedAt: null, lastError: "", calculationMs: null, indexLookupMs: null, workbookMs: null };
 
 function outputDirectory(db) {
   const configured = String(db?.localEvidence?.directory || "").trim();
@@ -28,6 +29,10 @@ function outputDirectory(db) {
 
 export function excelSyncPath(db) {
   return path.join(outputDirectory(db), WORKBOOK_NAME);
+}
+
+export function priceIndexPath(db) {
+  return path.join(outputDirectory(db), PRICE_INDEX_NAME);
 }
 
 function verifiedPrice(value, status) {
@@ -111,8 +116,53 @@ function entryFor(product, snapshot, sku, view) {
     lowest: lowestVerified(view),
     resolutionStatus: view.resolutionStatus || sku.resolutionStatus || view.priceResolution?.status || "unavailable",
     formulaSummary: formulaSummary(view),
+    channelFormulas: Object.fromEntries(CHANNEL_KINDS.map((kind) => [kind, String(view.priceResolution?.channels?.[kind]?.formula || "")])),
     evidenceFile: snapshot.browserEvidenceFile || "",
     promotions,
+  };
+}
+
+export function buildPriceIndexRows(entries) {
+  const latestByKey = new Map();
+  const ordered = [...entries].sort((left, right) => right.capturedAt.getTime() - left.capturedAt.getTime());
+  for (const entry of ordered) {
+    for (const [label, , kind] of channelFields) {
+      const key = `${entry.lookupKey}|${kind}`;
+      if (latestByKey.has(key)) continue;
+      const value = Number(entry.prices[kind]);
+      const verified = Number.isFinite(value) && value > 0;
+      latestByKey.set(key, {
+        key,
+        lookupKey: entry.lookupKey,
+        itemId: entry.itemId,
+        skuId: entry.skuId,
+        accountType: entry.accountType,
+        channel: kind,
+        channelLabel: label,
+        value: verified ? value : null,
+        status: verified ? "verified" : "unavailable",
+        formula: kind === "list" ? (verified ? "页面明确标价" : "") : entry.channelFormulas?.[kind] || "",
+        capturedAt: entry.capturedAt,
+        evidenceFile: entry.evidenceFile,
+      });
+    }
+  }
+  return [...latestByKey.values()].sort((left, right) => left.key.localeCompare(right.key));
+}
+
+export function benchmarkPriceIndex(entries, rows = buildPriceIndexRows(entries), iterations = 100) {
+  const index = new Map(rows.map((row) => [row.key, row]));
+  const keys = entries.flatMap((entry) => channelFields.map(([, , kind]) => `${entry.lookupKey}|${kind}`));
+  const started = performance.now();
+  let hits = 0;
+  for (let iteration = 0; iteration < iterations; iteration += 1) {
+    for (const key of keys) if (index.get(key)?.status === "verified") hits += 1;
+  }
+  return {
+    rows: rows.length,
+    lookups: keys.length * iterations,
+    hits,
+    elapsedMs: Number((performance.now() - started).toFixed(3)),
   };
 }
 
@@ -134,12 +184,20 @@ function historyEntries(db) {
   });
 }
 
-function priceRow(entry) {
+function priceLookupFormula(row, indexEnd, kind) {
+  return `XLOOKUP($J${row}&"|${kind}",'价格索引'!$A$2:$A$${indexEnd},'价格索引'!$I$2:$I$${indexEnd},"")`;
+}
+
+function priceRow(entry, row, indexEnd, indexed = false) {
+  const indexedPrices = channelFields.map(([, , kind]) => indexed
+    ? formulaValue(priceLookupFormula(row, indexEnd, kind), entry.prices[kind])
+    : entry.prices[kind]);
   return [
     entry.capturedAt, entry.productName, entry.shopName, entry.model, entry.itemId, entry.skuId,
     entry.skuName, entry.accountName, entry.accountType, entry.lookupKey,
-    ...channelFields.map(([, , kind]) => entry.prices[kind]),
-    entry.lowest, entry.resolutionStatus, entry.formulaSummary, entry.evidenceFile,
+    ...indexedPrices,
+    indexed ? formulaValue(`IF(COUNT(L${row}:S${row})=0,"",MIN(L${row}:S${row}))`, entry.lowest) : entry.lowest,
+    entry.resolutionStatus, entry.formulaSummary, entry.evidenceFile,
   ];
 }
 
@@ -262,14 +320,32 @@ function stylePriceSheet(sheet, rowCount) {
   stripeRows(sheet);
 }
 
-function addPriceSheet(workbook, name, entries) {
+function addPriceSheet(workbook, name, entries, { indexRowCount = 0, indexed = false } = {}) {
   const sheet = workbook.addWorksheet(name, { properties: { showGridLines: false } });
   sheet.addRow([
     "更新时间", "商品名", "店铺", "型号", "商品ID", "SKU ID", "SKU名称", "账号", "账号类型", "查找键",
     ...channelFields.map(([label]) => label), "最低已验证价", "解析状态", "价格公式", "本地证据文件",
   ]);
-  entries.forEach((entry) => sheet.addRow(priceRow(entry)));
+  const indexEnd = Math.max(2, indexRowCount + 1);
+  entries.forEach((entry, index) => sheet.addRow(priceRow(entry, index + 2, indexEnd, indexed)));
   stylePriceSheet(sheet, entries.length);
+  return sheet;
+}
+
+function addPriceIndexSheet(workbook, rows) {
+  const sheet = workbook.addWorksheet("价格索引", { properties: { showGridLines: false } });
+  sheet.addRow(["唯一索引键", "查找键", "商品ID", "SKU ID", "账号类型", "价格通道", "通道名称", "验证状态", "价格", "更新时间", "闭合公式", "本地证据文件"]);
+  rows.forEach((item) => sheet.addRow([
+    item.key, item.lookupKey, item.itemId, item.skuId, item.accountType, item.channel, item.channelLabel,
+    item.status, item.value, item.capturedAt, item.formula, item.evidenceFile,
+  ]));
+  sheet.views = [{ state: "frozen", ySplit: 1, xSplit: 2 }];
+  sheet.autoFilter = { from: "A1", to: `L${Math.max(1, rows.length + 1)}` };
+  headerStyle(sheet.getRow(1), "FF0F766E");
+  sheet.getColumn(9).numFmt = "¥#,##0.00";
+  sheet.getColumn(10).numFmt = "yyyy-mm-dd hh:mm:ss";
+  [48, 42, 16, 18, 12, 14, 18, 14, 13, 20, 56, 38].forEach((width, index) => { sheet.getColumn(index + 1).width = width; });
+  stripeRows(sheet);
   return sheet;
 }
 
@@ -403,14 +479,24 @@ export async function syncPriceWorkbook(dbDocument = null) {
     const calculationStarted = performance.now();
     const dataset = buildExcelSyncDataset(db);
     const benchmark = benchmarkFormulaEntries(dataset.current);
+    const indexRows = buildPriceIndexRows(dataset.current);
+    const indexBenchmark = benchmarkPriceIndex(dataset.current, indexRows);
     const calculationMs = Number((performance.now() - calculationStarted).toFixed(3));
+    const indexDestination = priceIndexPath(db);
+    await replaceFileAtomic(indexDestination, Buffer.from(JSON.stringify({
+      schemaVersion: 1,
+      generatedAt: new Date().toISOString(),
+      keyFormat: "itemId|skuId|accountType|channel",
+      rows: indexRows,
+    }, null, 2)));
     const workbook = new ExcelJS.Workbook();
     workbook.creator = "电商竞品监控";
     workbook.created = new Date();
     workbook.modified = new Date();
     workbook.calcProperties.fullCalcOnLoad = true;
     workbook.calcProperties.forceFullCalc = true;
-    addPriceSheet(workbook, "当前价格", dataset.current);
+    addPriceIndexSheet(workbook, indexRows);
+    addPriceSheet(workbook, "当前价格", dataset.current, { indexRowCount: indexRows.length, indexed: true });
     addPriceSheet(workbook, "价格历史", dataset.history);
     addRawPromotionSheet(workbook, dataset.promotions);
     addRuleSheet(workbook);
@@ -423,8 +509,10 @@ export async function syncPriceWorkbook(dbDocument = null) {
       ["历史价格行数", dataset.history.length],
       ["原始优惠行数", dataset.promotions.length],
       ["内存公式测算", `${benchmark.elapsedMs.toFixed(3)} ms / ${dataset.current.length} 行`],
+      ["本地索引查找", `${indexBenchmark.elapsedMs.toFixed(3)} ms / ${indexBenchmark.lookups} 次查找`],
+      ["索引文件", indexDestination],
       ["Excel 公式链", "原始优惠数据.XLOOKUP 匹配优惠码 → 公式计算.SUMIFS 按商品/SKU/账号汇总 → 逐通道计算 → 精确到分校验"],
-      ["自动同步", "每次成功保存价格后自动更新；也可在数据记录页手动同步并打开。"],
+      ["自动同步", "每次保存价格后原子更新本地价格索引与 Excel；当前价格通过 XLOOKUP 从唯一索引键自动回填。"],
       ["安全规则", "Excel 只读取本地已脱敏证据的解析结果；未验证、缺失或冲突证据不会变成可展示或可提醒价格。"],
     ]);
     status.mergeCells("A1:B1");
@@ -442,11 +530,14 @@ export async function syncPriceWorkbook(dbDocument = null) {
       currentRows: dataset.current.length,
       historyRows: dataset.history.length,
       promotionRows: dataset.promotions.length,
+      indexRows: indexRows.length,
+      indexPath: indexDestination,
+      indexLookupMs: indexBenchmark.elapsedMs,
       calculationMs,
       workbookMs,
       syncedAt: new Date().toISOString(),
     };
-    runtimeStatus = { lastSyncedAt: result.syncedAt, lastError: "", calculationMs, workbookMs };
+    runtimeStatus = { lastSyncedAt: result.syncedAt, lastError: "", calculationMs, indexLookupMs: result.indexLookupMs, workbookMs };
     return result;
   } catch (error) {
     runtimeStatus = { ...runtimeStatus, lastError: String(error?.message || "Excel 自动同步失败。") };
@@ -457,9 +548,16 @@ export async function syncPriceWorkbook(dbDocument = null) {
 export async function getExcelSyncStatus() {
   const db = await readDb();
   const destination = excelSyncPath(db);
+  const indexDestination = priceIndexPath(db);
   let stat = null;
+  let indexStat = null;
   try {
     stat = await fs.stat(destination);
+  } catch (error) {
+    if (error?.code !== "ENOENT") throw error;
+  }
+  try {
+    indexStat = await fs.stat(indexDestination);
   } catch (error) {
     if (error?.code !== "ENOENT") throw error;
   }
@@ -469,6 +567,9 @@ export async function getExcelSyncStatus() {
     exists: Boolean(stat?.isFile()),
     size: stat?.size || 0,
     modifiedAt: stat?.mtime?.toISOString() || null,
+    indexPath: indexDestination,
+    indexExists: Boolean(indexStat?.isFile()),
+    indexSize: indexStat?.size || 0,
     ...runtimeStatus,
   };
 }

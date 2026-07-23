@@ -32,7 +32,7 @@ type Props = {
   onCapture: (product: Product, options?: ProductCaptureOptions) => Promise<Product | void>
   onRetryBuyerShows: (product: Product) => Promise<Product>
   onCaptureSearchMainImage: (product: Product) => Promise<{ ok: boolean; status: NonNullable<Product['searchMainImageStatus']>; product: Product; message: string }>
-  onReparseLocalEvidence: (product: Product, kind: 'materials' | 'buyer-show' | 'search-main-image') => Promise<{ ok: boolean; product: Product; message: string }>
+  onReparseLocalEvidence: (product: Product, kind: 'price' | 'materials' | 'buyer-show' | 'search-main-image') => Promise<{ ok: boolean; product: Product; message: string }>
   onLocalImport: (product?: Product) => void
   onDelete: (product: Product) => Promise<void>
   onDeleteBatch: (products: Product[]) => Promise<void>
@@ -131,6 +131,11 @@ function accountClass(product: Product) {
 }
 
 function productState(product: Product, monitor: Overview['monitor']) {
+  if (product.lastStatus === 'error' && product.lastSnapshot?.resolutionStatus === 'partial') {
+    const total = product.lastSnapshot.skuPrices?.length || 0
+    const verified = product.lastSnapshot.skuPrices?.filter((sku) => sku.resolutionStatus === 'verified').length || 0
+    return { label: `部分可用 ${verified}/${total}`, detail: product.lastError || '部分 SKU 缺少当前优惠证据', tone: 'amber', rail: 'border-l-amber-400', badge: 'border-amber-100 bg-amber-50 text-amber-700' }
+  }
   if (product.lastStatus === 'error') return { label: '抓取异常', detail: product.lastError || '等待重试', tone: 'red', rail: 'border-l-red-500', badge: 'border-red-100 bg-red-50 text-red-700' }
   if (product.captureMode === 'local-only') return { label: '本地数据', detail: '等待导入新文件', tone: 'sky', rail: 'border-l-sky-500', badge: 'border-sky-100 bg-sky-50 text-sky-700' }
   if (!product.enabled) return { label: '未启用', detail: '手动抓取仍可使用', tone: 'slate', rail: 'border-l-slate-300', badge: 'border-slate-200 bg-slate-50 text-slate-600' }

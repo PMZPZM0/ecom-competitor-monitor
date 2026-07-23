@@ -47,18 +47,22 @@ test("browser capture rechecks access restrictions after interactive page action
   const selectionHelper = source.slice(selectionHelperAt, renderAt);
   const restrictionHelperAt = source.indexOf("const assertNoAccessRestriction = async", renderAt);
   const selectionInvocationAt = source.indexOf("captureRequestedSkuSelections({", restrictionHelperAt);
-  const finalCaptureAt = source.indexOf("const result = await cdp.send", selectionInvocationAt);
+  const finalCaptureAt = source.indexOf("const documentState = await readBrowserDocument", selectionInvocationAt);
   assert.ok(selectionHelperAt >= 0 && renderAt > selectionHelperAt);
   assert.match(selectionHelper, /await assertNoAccessRestriction\(\)/);
   assert.ok(restrictionHelperAt >= 0 && selectionInvocationAt > restrictionHelperAt);
+  assert.ok(finalCaptureAt > selectionInvocationAt);
   assert.match(source.slice(finalCaptureAt), /isTaobaoAccessRestrictedDocument/);
 });
 
-test("browser evidence hook runs before the temporary tab is closed", async () => {
+test("browser evidence hook runs while the persistent capture tab remains reusable", async () => {
   const source = await fs.readFile(new URL("./browserService.js", import.meta.url), "utf8");
   const hookAt = source.indexOf("await renderOptions.persistEvidenceBeforeClose(capturedPage)");
-  const closeAt = source.indexOf("if (tab?.id) await closeTab", hookAt);
-  assert.ok(hookAt >= 0 && closeAt > hookAt);
+  const finallyAt = source.indexOf("} finally {", hookAt);
+  const finallyBlock = source.slice(finallyAt, source.indexOf("\n  }\n}", finallyAt));
+  assert.ok(hookAt >= 0 && finallyAt > hookAt);
+  assert.doesNotMatch(finallyBlock, /closeTab|Target\.closeTarget/);
+  assert.match(finallyBlock, /minimizeBrowserForCapture/);
 });
 
 test("search cover is parsed only after sanitized browser evidence is saved and reloaded", async () => {
@@ -93,12 +97,24 @@ test("search cover is parsed only after sanitized browser evidence is saved and 
   assert.doesNotMatch(saved, /must-not-be-saved|cookie2/);
 });
 
-test("Tmall SSO bridge runs in the browser and its one-time response never enters evidence", async () => {
+test("price capture never performs an extra Taobao navigation and never persists one-time bridge URLs", async () => {
   const source = await fs.readFile(new URL("./browserService.js", import.meta.url), "utf8");
-  const policyAt = source.indexOf("if (shouldRefreshTmallSso(authSession");
-  const bridgeAt = source.indexOf("await refreshTmallSsoFromCapturedLogin(cdp, priceResponses, url)");
-  const captureAt = source.indexOf("const capturedPage =", bridgeAt);
-  assert.ok(policyAt >= 0 && bridgeAt > policyAt && captureAt > bridgeAt);
+  assert.match(source, /const tmallSsoResponses = new Map\(\)/);
+  assert.match(source, /tmallSsoResponses\.set\(requestId/);
+  const captureSource = source.slice(source.indexOf("export async function getRenderedHtml"));
+  const requestBridgeAt = captureSource.indexOf("requestTmallSilentLoginBridge(cdp)");
+  const bridgeAt = captureSource.indexOf("refreshTmallSsoFromCapturedLogin(cdp, tmallSsoResponses");
+  const firstRestrictionCheckAt = captureSource.indexOf("await assertNoAccessRestriction();", bridgeAt);
+  const selectionAt = captureSource.indexOf("captureRequestedSkuSelections({");
+  assert.ok(requestBridgeAt >= 0 && bridgeAt > requestBridgeAt && firstRestrictionCheckAt > bridgeAt && selectionAt > firstRestrictionCheckAt, "天猫同浏览器会话必须先由浏览器请求并同步，再校验最终页面并开始 SKU 交互");
+  assert.doesNotMatch(captureSource, /Page\.navigate", \{ url: "https:\/\/www\.taobao\.com\/" \}/);
+  assert.match(captureSource, /prepareSelectionsFromLocalEvidence/);
+  assert.doesNotMatch(source, /\bfetch\s*\(\s*[`'"]https?:\/\/(?:[^/]*\.)?(?:taobao|tmall)\.com/i);
+
+  const scraperSource = await fs.readFile(new URL("./tmallScraper.js", import.meta.url), "utf8");
+  const scrapeAt = scraperSource.indexOf("export async function scrapeTmallProduct");
+  const scrapeSource = scraperSource.slice(scrapeAt);
+  assert.doesNotMatch(scrapeSource, /fetchHtml\([^;]+preserveCache:\s*false/s);
 
   const evidence = buildBrowserCaptureEvidence({
     product: { url: "https://detail.tmall.com/item.htm?id=843315272699" },
@@ -121,19 +137,34 @@ test("Tmall SSO bridge runs in the browser and its one-time response never enter
   assert.doesNotMatch(JSON.stringify(evidence), /pass\.tmall\.com|token=secret/);
 });
 
-test("session checks are local cookie reads and authorization tabs close after sync", async () => {
+test("session checks are passive while completed authorization tabs stay alive and minimized", async () => {
   const browserSource = await fs.readFile(new URL("./browserService.js", import.meta.url), "utf8");
   const checkAt = browserSource.indexOf("export async function checkTaobaoSession");
   const closeAt = browserSource.indexOf("export async function closeAccountBrowser", checkAt);
   const checkSource = browserSource.slice(checkAt, closeAt);
+  assert.ok(checkAt >= 0 && closeAt > checkAt);
   assert.match(checkSource, /await ensureBrowser\("about:blank", context\)/);
   assert.match(checkSource, /await getTaobaoAuthState/);
-  assert.doesNotMatch(checkSource, /getRenderedHtml|Page\.navigate|createBackgroundTab/);
+  assert.match(checkSource, /openLoginTarget/);
+  assert.doesNotMatch(checkSource, /probeTaobaoIdentityPage|createBackgroundTab|Page\.navigate|getRenderedHtml|closeTab|\bfetch\s*\(/);
 
   const serverSource = await fs.readFile(new URL("../index.js", import.meta.url), "utf8");
-  assert.match(serverSource, /await closeAccountTab\(pending\.loginTargetId/);
+  const syncAt = serverSource.indexOf("async function syncPendingScan");
+  const checkSessionAt = serverSource.indexOf("async function checkAuthSession", syncAt);
+  const syncSource = serverSource.slice(syncAt, checkSessionAt);
+  assert.doesNotMatch(syncSource, /closeAccountTab\(pending\.loginTargetId/);
+  assert.match(syncSource, /await minimizeAccountBrowser\(\{ profileKey: pending\.profileKey, port: pending\.browserPort, browserEngine: pending\.browserEngine \}\)/);
+  assert.ok(
+    syncSource.indexOf("if (!authState.loggedIn || !authState.cookie)")
+      < syncSource.indexOf("if (loginTarget && isTaobaoLoginUrl(loginTarget.url))"),
+    "valid identity cookies must win over a stale login tab",
+  );
   assert.match(serverSource, /const eagerBrowserWarmup = process\.env\.ECOM_MONITOR_EAGER_BROWSER_WARMUP === "1"/);
   assert.doesNotMatch(serverSource, /ECOM_MONITOR_EAGER_BROWSER_WARMUP !== "0"/);
+  const checkEnd = serverSource.indexOf('app.post("/api/auth/sessions/check-all"', checkSessionAt);
+  const checkSessionSource = serverSource.slice(checkSessionAt, checkEnd);
+  assert.match(checkSessionSource, /const priceUsable = identityOnline && tmallPriceStatus === TMALL_PRICE_STATUS\.VALID/);
+  assert.match(checkSessionSource, /淘宝身份仍在线，但天猫商品查价会话异常/);
 });
 
 test("the price diagnostic script also saves and reloads browser evidence before parsing", async () => {
@@ -188,7 +219,7 @@ test("account browser capture saves loaded data, re-reads disk, and never fetche
     renderCalls += 1;
     assert.equal(options.localCapture, true);
     assert.equal(options.preserveCache, true);
-    return {
+    const preliminaryPage = {
       html,
       visibleText: "国补活动",
       finalUrl: url,
@@ -196,11 +227,22 @@ test("account browser capture saves loaded data, re-reads disk, and never fetche
       source: "browser",
       cookieHeader: "sid=browser-cookie-secret",
       authState: { loggedIn: true, cookie: "browser-cookie-secret" },
-      networkPayloads: renderCalls === 2 ? [payload] : [],
+      networkPayloads: [],
       buyerShowPayloads: [],
-      priceNetworkPayloads: renderCalls === 2 ? [payload] : [],
-      skuNetworkPayloads: renderCalls === 2 ? { [skuId]: [payload] } : {},
-      selectionResults: renderCalls === 2 ? [{
+      priceNetworkPayloads: [],
+      skuNetworkPayloads: {},
+      selectionResults: [],
+      buyerShowInteractions: [],
+    };
+    const selections = await options.prepareSelectionsFromLocalEvidence(preliminaryPage);
+    assert.deepEqual(selections, [{ skuId, valueIds: ["10"] }]);
+    return {
+      ...preliminaryPage,
+      networkPayloads: [payload],
+      buyerShowPayloads: [],
+      priceNetworkPayloads: [payload],
+      skuNetworkPayloads: { [skuId]: [payload] },
+      selectionResults: [{
         skuId,
         selected: true,
         responseReceivedAfterSelection: true,
@@ -208,8 +250,7 @@ test("account browser capture saves loaded data, re-reads disk, and never fetche
         responseSequenceStartExclusive: 0,
         responseSequenceEndInclusive: 1,
         reason: "response-received",
-      }] : [],
-      buyerShowInteractions: [],
+      }],
     };
   };
   const originalFetch = globalThis.fetch;
@@ -234,7 +275,7 @@ test("account browser capture saves loaded data, re-reads disk, and never fetche
       browserPort: 9333,
     }, { renderPage });
 
-    assert.equal(renderCalls, 2);
+    assert.equal(renderCalls, 1);
     assert.equal(nodeNetworkCalls, 0);
     assert.equal(snapshot.itemId, itemId);
     assert.equal(snapshot.skuPrices[0].skuId, skuId);
@@ -321,7 +362,7 @@ test("complete materials parse from reloaded browser evidence without requiring 
   }
 });
 
-test("one gated SKU is retried without discarding verified sibling prices", async () => {
+test("a gated SKU finishes in one pass without discarding verified sibling prices", async () => {
   const itemId = "668945261101";
   const skuIds = ["6206877831711", "6096276240242"];
   const url = `https://detail.tmall.com/item.htm?id=${itemId}`;
@@ -403,14 +444,15 @@ test("one gated SKU is retried without discarding verified sibling prices", asyn
     browserPort: 9337,
   }, { renderPage });
 
-  assert.equal(renderCalls, 3);
-  assert.equal(snapshot.resolutionStatus, "verified");
+  assert.equal(renderCalls, 2);
+  assert.equal(snapshot.resolutionStatus, "partial");
   assert.equal(snapshot.skuPrices.length, 2);
-  assert.deepEqual(snapshot.skuPrices.map((sku) => sku.normalPrice), [139, 159]);
+  assert.deepEqual(snapshot.skuPrices.map((sku) => sku.normalPrice), [139, null]);
   assert.equal(snapshot.skuPrices[0].priceResolution.endpoint, "mtop.taobao.pcdetail.data.adjust");
-  assert.equal(snapshot.skuPrices[1].priceResolution.source, "embedded-ssr");
+  assert.equal(snapshot.skuPrices[1].priceResolution.reason, "response-sku-mismatch");
   assert.equal(snapshot.skuPrices[0].priceCalculation.normal, "标价 199.00 - 平台活动立减 60.00 = 普通价 139.00");
-  assert.equal(snapshot.skuPrices[1].priceCalculation.normal, "标价 219.00 - 平台加补 60.00 = 普通价 159.00");
+  assert.equal(snapshot.skuPrices[1].priceCalculation.normal, "本次价格证据未通过验证");
+  assert.equal(Object.hasOwn(snapshot.rawSignals, "retriedSkuSelectionCount"), false);
   assert.equal(snapshot.localFirst.parsedFromDisk, true);
 });
 
@@ -584,7 +626,7 @@ test("browser evidence keeps identical responses from distinct sequence position
   assert.equal(evidence.page.selectionResults[0].responseSequenceEndInclusive, 2);
 });
 
-test("a persistent locally reloaded price-login gate stops after one controlled refresh", async () => {
+test("a persistent locally reloaded price-login gate stops after one initial and one SKU pass", async () => {
   const itemId = "843315272601";
   const url = `https://detail.tmall.com/item.htm?id=${itemId}`;
   const html = `<script>window.__DATA__=${JSON.stringify({
@@ -618,7 +660,7 @@ test("a persistent locally reloaded price-login gate stops after one controlled 
   assert.equal(renderCalls, 2);
 });
 
-test("a first-load price gate recovers within the same capture instead of requiring a second user click", async () => {
+test("a first-load price gate can recover from the single SKU pass without reopening the product page", async () => {
   const itemId = "843315272604";
   const skuId = "6274971436004";
   const url = `https://detail.tmall.com/item.htm?id=${itemId}`;
@@ -677,7 +719,7 @@ test("a first-load price gate recovers within the same capture instead of requir
     },
   });
 
-  assert.equal(renderCalls, 3);
+  assert.equal(renderCalls, 2);
   assert.equal(snapshot.skuPrices.length, 1);
   assert.equal(snapshot.skuPrices[0].normalPrice, 139);
   assert.equal(snapshot.skuPrices[0].resolutionStatus, "verified");

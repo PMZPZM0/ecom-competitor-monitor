@@ -28,6 +28,7 @@ const normalSession = {
   name: "普通测试账号",
   accountType: "normal",
   source: "taobao-browser",
+  browserEngine: "uc",
   enabled: true,
   active: true,
   loginStatus: "valid",

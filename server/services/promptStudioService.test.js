@@ -231,16 +231,17 @@ test("freeform prompt help returns the real model prompt without templates or hi
     idempotencyKey: "freeform-test",
     fetchImpl: async (url, init) => {
       request = { url, body: JSON.parse(init.body) };
-      return new Response(JSON.stringify({ choices: [{ message: { content: finalPrompt } }] }), { status: 200 });
+      return new Response(JSON.stringify({ output_text: finalPrompt }), { status: 200 });
     },
   });
 
   assert.deepEqual(result, { prompt: finalPrompt, model: "gpt-4.1-mini" });
-  assert.equal(request.url, `${MODEL_CHANNELS.stable.baseUrl}/chat/completions`);
-  assert.equal(request.body.messages[1].content.filter((item) => item.type === "image_url").length, 1);
-  assert.equal(request.body.messages[0].content, "根据用户需求自由发挥，写出你认为最好的生图提示词。");
-  assert.doesNotMatch(request.body.messages[0].content, /稳妥执行|商业增强|创意方案|产品事实|类目硬约束|主标题|副标题|卖点/);
-  assert.equal(request.body.messages[1].content[0].text, "用户需求：做一张有高级感的国庆海报");
+  assert.equal(request.url, `${MODEL_CHANNELS.stable.baseUrl}/responses`);
+  assert.equal(request.body.input[1].content.filter((item) => item.type === "input_image").length, 1);
+  assert.match(request.body.input[0].content[0].text, /根据用户需求自由发挥/);
+  assert.match(request.body.input[0].content[0].text, /不要标题、前言、Markdown 标记或解释/);
+  assert.doesNotMatch(request.body.input[0].content[0].text, /稳妥执行|商业增强|创意方案|产品事实|类目硬约束|主标题|副标题|卖点/);
+  assert.equal(request.body.input[1].content[0].text, "用户需求：做一张有高级感的国庆海报");
 });
 
 test("freeform prompt help fails visibly instead of substituting a local template", async () => {
@@ -264,13 +265,33 @@ test("freeform prompt help retries one transient 524 with the same idempotency k
       calls += 1;
       keys.push(init.headers["idempotency-key"]);
       if (calls === 1) return new Response("gateway timeout", { status: 524 });
-      return new Response(JSON.stringify({ choices: [{ message: { content: "自由创作的国庆海报提示词" } }] }), { status: 200 });
+      return new Response(JSON.stringify({ output_text: "自由创作的国庆海报提示词" }), { status: 200 });
     },
   });
 
   assert.equal(result.prompt, "自由创作的国庆海报提示词");
   assert.equal(calls, 2);
   assert.deepEqual(keys, ["freeform-524-retry", "freeform-524-retry"]);
+});
+
+test("freeform prompt help tolerates two transient 502 responses without changing the request id", async () => {
+  let calls = 0;
+  const keys = [];
+  const result = await writeFreeformImagePrompt(modelConfig(), { userRequest: "精修产品质感", creationMode: "product" }, {
+    env,
+    idempotencyKey: "freeform-502-retry",
+    sleep: async () => {},
+    fetchImpl: async (_url, init) => {
+      calls += 1;
+      keys.push(init.headers["idempotency-key"]);
+      if (calls < 3) return new Response("temporary gateway failure", { status: 502 });
+      return new Response(JSON.stringify({ output_text: "提升材质细节、商业布光与产品轮廓清晰度" }), { status: 200 });
+    },
+  });
+
+  assert.equal(result.prompt, "提升材质细节、商业布光与产品轮廓清晰度");
+  assert.equal(calls, 3);
+  assert.deepEqual(keys, ["freeform-502-retry", "freeform-502-retry", "freeform-502-retry"]);
 });
 
 test("quick prompt interpretation defaults parameters and locks the original user request", async () => {

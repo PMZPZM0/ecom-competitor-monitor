@@ -115,35 +115,31 @@ textarea {
 .monitor-surface-strong,
 .monitor-title-bar {
   box-shadow: 0 10px 28px rgb(15 23 42 / 0.045);
-  backdrop-filter: blur(8px) saturate(1.04);
-  -webkit-backdrop-filter: blur(8px) saturate(1.04);
 }
 
 .monitor-surface {
-  background-color: rgb(255 255 255 / 0.58);
-}
-
-.monitor-surface-strong {
   background-color: rgb(255 255 255 / 0.72);
 }
 
+.monitor-surface-strong {
+  background-color: rgb(255 255 255 / 0.86);
+}
+
 .monitor-title-bar {
-  background-color: rgb(255 255 255 / 0.56);
+  background-color: rgb(255 255 255 / 0.7);
 }
 
 .creative-surface,
 .creative-surface-strong {
-  backdrop-filter: blur(12px) saturate(1.04);
-  -webkit-backdrop-filter: blur(12px) saturate(1.04);
   box-shadow: 0 12px 32px rgb(15 23 42 / 0.055);
 }
 
 .creative-surface {
-  background-color: rgb(255 255 255 / 0.66);
+  background-color: rgb(255 255 255 / 0.76);
 }
 
 .creative-surface-strong {
-  background-color: rgb(255 255 255 / 0.82);
+  background-color: rgb(255 255 255 / 0.9);
 }
 
 .wallpaper-night-gold .creative-surface {
@@ -152,17 +148,15 @@ textarea {
 
 .app-sidebar-surface,
 .app-topbar-surface {
-  backdrop-filter: blur(10px) saturate(1.04);
-  -webkit-backdrop-filter: blur(10px) saturate(1.04);
 }
 
 .app-sidebar-surface {
-  background-color: rgb(255 255 255 / 0.58);
+  background-color: rgb(255 255 255 / 0.84);
   box-shadow: 8px 0 28px rgb(15 23 42 / 0.04);
 }
 
 .app-topbar-surface {
-  background-color: rgb(255 255 255 / 0.62);
+  background-color: rgb(255 255 255 / 0.88);
   box-shadow: 0 6px 22px rgb(15 23 42 / 0.035);
 }
 

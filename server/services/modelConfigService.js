@@ -539,7 +539,7 @@ export async function testPromptModel(config = {}, {
   const retryDelays = [400, 1_200];
   for (let attempt = 0; ; attempt += 1) {
     try {
-      data = await requestModelApiJson(`${resolved.baseUrl}/chat/completions`, {
+      data = await requestModelApiJson(`${resolved.baseUrl}/responses`, {
         apiKey: resolved.apiKey,
         fetchImpl,
         label: "提示词模型连接测试",
@@ -547,7 +547,7 @@ export async function testPromptModel(config = {}, {
         timeoutMs,
         body: {
           model: resolved.model,
-          messages: [{ role: "user", content: "只回复 OK" }],
+          input: [{ role: "user", content: [{ type: "input_text", text: "只回复 OK" }] }],
         },
       });
       break;

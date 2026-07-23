@@ -468,10 +468,10 @@ test("resolves a verified item-scoped new-customer gift for every eligible SKU",
     skuId: siblingSkuId,
     originalPrice: 609,
     normalPrice: 270,
-    priceTitle: "平台加补后",
+    priceTitle: "店铺优惠后",
     priceLayers: [
       { label: "优惠前", value: 609, kind: "original" },
-      { label: "平台加补后", value: 270, kind: "price" },
+      { label: "店铺优惠后", value: 270, kind: "price" },
     ],
   }, { itemId, skuId: siblingSkuId, accountType: "normal", capturedAt: "2026-07-20T07:45:50.160Z" });
   const siblingScoped = applyItemScopedNewCustomerGift(siblingBase, component, {
@@ -497,10 +497,10 @@ test("resolves a verified item-scoped new-customer gift for every eligible SKU",
     skuId: "below-threshold",
     originalPrice: 50,
     normalPrice: 25,
-    priceTitle: "平台加补后",
+    priceTitle: "店铺优惠后",
     priceLayers: [
       { label: "优惠前", value: 50, kind: "original" },
-      { label: "平台加补后", value: 25, kind: "price" },
+      { label: "店铺优惠后", value: 25, kind: "price" },
     ],
   }, { itemId, skuId: "below-threshold", accountType: "normal" });
   const belowThreshold = applyItemScopedNewCustomerGift(belowThresholdBase, component, {
@@ -876,34 +876,48 @@ const embeddedOptions = {
   capturedAt: "2026-07-15T00:00:00.000Z",
 };
 
-test("verifies Tmall Supermarket platform top-up SSR evidence to the cent", () => {
+test("never treats an embedded platform top-up result as normal price", () => {
   const resolution = resolveEmbeddedSkuPriceEvidence(embeddedSku(), embeddedOptions);
   const sku = applyPriceResolution(embeddedSku(), resolution);
-  assert.equal(resolution.status, "verified");
-  assert.equal(resolution.promotions[0].amountCents, 13769);
-  assert.equal(sku.originalPrice, 379);
-  assert.equal(sku.normalPrice, 241.31);
-  assert.equal(sku.priceCalculation.normal, "标价 379.00 - 平台加补 137.69 = 普通价 241.31");
-  assert.equal(sku.priceLayers.at(-1).source, "embedded-ssr");
-  assert.deepEqual(sku.priceLayers.map(({ label, value }) => ({ label, value })), [
-    { label: "优惠前", value: 379 },
-    { label: "普通价", value: 241.31 },
-  ]);
+  assert.equal(resolution.status, "unavailable");
+  assert.equal(resolution.reason, "supported-label-not-observed");
+  assert.equal(sku.normalPrice, null);
+  assert.equal(sku.originalPrice, null);
+  assert.deepEqual(sku.priceLayers, []);
 });
 
-test("keeps embedded platform top-up evidence as the public baseline for every account", () => {
-  for (const accountType of ["gift", "vip88"]) {
+test("platform top-up cannot become normal price for any account", () => {
+  for (const accountType of ["normal", "gift", "vip88"]) {
     const resolution = resolveEmbeddedSkuPriceEvidence(embeddedSku(), { ...embeddedOptions, accountType });
     const sku = applyPriceResolution(embeddedSku(), resolution);
+    assert.equal(resolution.status, "unavailable");
+    assert.equal(sku.normalPrice, null);
+    assert.equal(sku.resolutionStatus, "unavailable");
+  }
+});
+
+test("verifies an exact current-SKU store discount as the public baseline for every account", () => {
+  const storeDiscountSku = embeddedSku({
+    normalPrice: 449,
+    originalPrice: 809,
+    priceTitle: "店铺优惠后",
+    priceLayers: [
+      { label: "店铺优惠后", value: 449, kind: "price" },
+      { label: "优惠前", value: 809, kind: "original" },
+    ],
+  });
+  for (const accountType of ["normal", "gift", "vip88"]) {
+    const resolution = resolveEmbeddedSkuPriceEvidence(storeDiscountSku, { ...embeddedOptions, accountType });
+    const sku = applyPriceResolution(storeDiscountSku, resolution);
     assert.equal(resolution.status, "verified");
-    assert.equal(sku.normalPrice, 241.31);
-    assert.equal(sku.priceResolution.channels.normal.status, "verified");
+    assert.equal(sku.normalPrice, 449);
+    assert.equal(sku.priceCalculation.normal, "标价 809.00 - 店铺优惠 360.00 = 普通价 449.00");
     assert.equal(sku.priceResolution.channels.gift.status, "unavailable");
     assert.equal(sku.priceResolution.channels.vip88.status, "unavailable");
   }
 });
 
-test("rejects embedded SSR prices without the explicit platform top-up label", () => {
+test("rejects embedded SSR prices without an explicit public-price label", () => {
   const resolution = resolveEmbeddedSkuPriceEvidence(embeddedSku({ priceTitle: "到手价" }), embeddedOptions);
   assert.equal(resolution.matched, false);
 });
@@ -921,18 +935,35 @@ test("rejects an explicit list-only SKU because it is not current-price evidence
   assert.equal(resolution.reason, "supported-label-not-observed");
 });
 
-test("rejects invalid or internally inconsistent embedded SSR prices", () => {
-  assert.equal(resolveEmbeddedSkuPriceEvidence(embeddedSku({ normalPrice: 379 }), embeddedOptions).reason, "embedded-price-invalid");
-  assert.equal(resolveEmbeddedSkuPriceEvidence(embeddedSku({
+test("rejects invalid or internally inconsistent store-price SSR evidence", () => {
+  const storeSku = embeddedSku({
+    normalPrice: 449,
+    originalPrice: 809,
+    priceTitle: "店铺优惠后",
     priceLayers: [
-      { label: "平台加补后", value: 241.3, kind: "price" },
-      { label: "优惠前", value: 379, kind: "original" },
+      { label: "店铺优惠后", value: 449, kind: "price" },
+      { label: "优惠前", value: 809, kind: "original" },
     ],
-  }), embeddedOptions).reason, "embedded-price-layer-mismatch");
+  });
+  assert.equal(resolveEmbeddedSkuPriceEvidence({ ...storeSku, normalPrice: 809 }, embeddedOptions).reason, "embedded-price-invalid");
+  assert.equal(resolveEmbeddedSkuPriceEvidence({ ...storeSku,
+    priceLayers: [
+      { label: "店铺优惠后", value: 448.99, kind: "price" },
+      { label: "优惠前", value: 809, kind: "original" },
+    ],
+  }, embeddedOptions).reason, "embedded-price-layer-mismatch");
 });
 
 test("authoritative selection uses exact current-SKU SSR evidence when the price endpoint is absent", () => {
-  const embedded = resolveEmbeddedSkuPriceEvidence(embeddedSku(), embeddedOptions);
+  const embedded = resolveEmbeddedSkuPriceEvidence(embeddedSku({
+    normalPrice: 449,
+    originalPrice: 809,
+    priceTitle: "店铺优惠后",
+    priceLayers: [
+      { label: "店铺优惠后", value: 449, kind: "price" },
+      { label: "优惠前", value: 809, kind: "original" },
+    ],
+  }), embeddedOptions);
   const unavailable = { matched: false, status: "unavailable", reason: "supported-endpoint-not-observed" };
   const ambiguous = { matched: true, status: "ambiguous", reason: "formula-does-not-close" };
 
@@ -941,7 +972,15 @@ test("authoritative selection uses exact current-SKU SSR evidence when the price
 });
 
 test("authoritative selection falls back after a stale SKU transport response", () => {
-  const embedded = resolveEmbeddedSkuPriceEvidence(embeddedSku(), embeddedOptions);
+  const embedded = resolveEmbeddedSkuPriceEvidence(embeddedSku({
+    normalPrice: 449,
+    originalPrice: 809,
+    priceTitle: "店铺优惠后",
+    priceLayers: [
+      { label: "店铺优惠后", value: 449, kind: "price" },
+      { label: "优惠前", value: 809, kind: "original" },
+    ],
+  }), embeddedOptions);
   const staleResponse = { matched: true, status: "ambiguous", reason: "response-sku-mismatch" };
   assert.equal(selectAuthoritativePriceResolution(staleResponse, embedded).status, "verified");
   assert.equal(selectAuthoritativePriceResolution(staleResponse, embedded).source, "embedded-ssr");

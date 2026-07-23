@@ -25,6 +25,7 @@ test("raw data capture writes evidence without mutating products, snapshots, run
     accountType: "vip88",
     browserProfileKey: "raw-viewer-profile-secret",
     browserPort: 9444,
+    browserEngine: "uc",
     active: true,
     enabled: true,
     loginStatus: "valid",

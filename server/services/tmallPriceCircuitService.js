@@ -11,7 +11,6 @@ export const TMALL_PRICE_STATUS = Object.freeze({
 
 const DEFAULT_ACCOUNT_COOLDOWN_MS = 15 * 60 * 1000;
 const DEFAULT_DEVICE_COOLDOWN_MS = 5 * 60 * 1000;
-const LOCAL_DEVICE_KEY = "local-device";
 const ACCESS_RESTRICTION_REASON = "TAOBAO_ACCESS_RESTRICTED";
 
 const deviceCooldowns = new Map();
@@ -28,7 +27,7 @@ function timestamp(value) {
 }
 
 export function tmallPriceDeviceKey(session = {}) {
-  if (session.browserProfileKey || session.browserPort) return LOCAL_DEVICE_KEY;
+  if ((session.browserProfileKey || session.browserPort) && session.browserEngine) return `browser-engine:${String(session.browserEngine).toLowerCase()}`;
   if (session.id) return `session:${session.id}`;
   return "";
 }
@@ -86,7 +85,7 @@ export function createTmallPriceCooldownError(session = {}, now = Date.now()) {
   const restricted = tmallAccessRestrictionOpen(session, now);
   const error = new Error(remaining > 0
     ? restricted
-      ? `淘宝访问限制保护中，请等待 ${Math.ceil(remaining / 60_000)} 分钟后再检测；期间已阻止所有账号自动抓取。`
+      ? `当前浏览器环境处于淘宝访问限制保护中，请等待 ${Math.ceil(remaining / 60_000)} 分钟后再检测；期间已阻止该浏览器下的自动抓取。`
       : `天猫价格能力正在冷却，请等待 ${Math.ceil(remaining / 60_000)} 分钟后再试；淘宝登录状态未清除。`
     : "天猫价格能力暂不可用，请先通过真实商品抓取验证后再试。");
   error.code = "TMALL_PRICE_COOLDOWN";
@@ -132,7 +131,14 @@ export function markTmallPriceGate(session, {
 }
 
 export function markTmallPriceSuccess(session, now = Date.now()) {
-  activeDeviceCooldown(session, now);
+  const device = activeDeviceCooldown(session, now);
+  if (device.until > now && device.reason === ACCESS_RESTRICTION_REASON) {
+    session.tmallPriceStatus = TMALL_PRICE_STATUS.COOLDOWN;
+    session.tmallPriceCooldownUntil = new Date(device.until).toISOString();
+    session.tmallPriceDeviceCooldownUntil = new Date(device.until).toISOString();
+    session.tmallPriceFailureReason = ACCESS_RESTRICTION_REASON;
+    return session;
+  }
   session.tmallPriceStatus = TMALL_PRICE_STATUS.VALID;
   session.tmallPriceCheckedAt = new Date(now).toISOString();
   session.tmallPriceCooldownUntil = null;
@@ -140,6 +146,29 @@ export function markTmallPriceSuccess(session, now = Date.now()) {
   session.tmallPriceLastFailureAt = null;
   session.tmallPriceFailureReason = null;
   session.tmallPriceFailureCount = 0;
+  return session;
+}
+
+export function markTmallPricePartial(session, {
+  now = Date.now(),
+  verifiedSkuCount = 0,
+  totalSkuCount = 0,
+} = {}) {
+  const device = activeDeviceCooldown(session, now);
+  if (device.until > now && device.reason === ACCESS_RESTRICTION_REASON) {
+    session.tmallPriceStatus = TMALL_PRICE_STATUS.COOLDOWN;
+    session.tmallPriceCooldownUntil = new Date(device.until).toISOString();
+    session.tmallPriceDeviceCooldownUntil = new Date(device.until).toISOString();
+    session.tmallPriceFailureReason = ACCESS_RESTRICTION_REASON;
+    return session;
+  }
+  session.tmallPriceStatus = TMALL_PRICE_STATUS.DEGRADED;
+  session.tmallPriceCheckedAt = new Date(now).toISOString();
+  session.tmallPriceCooldownUntil = null;
+  session.tmallPriceDeviceCooldownUntil = null;
+  session.tmallPriceLastFailureAt = new Date(now).toISOString();
+  session.tmallPriceFailureReason = `PARTIAL_SKU_PRICE_EVIDENCE:${verifiedSkuCount}/${totalSkuCount}`;
+  session.tmallPriceFailureCount = Number(session.tmallPriceFailureCount || 0) + 1;
   return session;
 }
 

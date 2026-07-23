@@ -145,7 +145,6 @@ export function buildImageGenerationRequest(input = {}, imageModel = "gpt-image-
     quality,
     output_format: outputFormat,
     background,
-    n: count,
     ...((outputFormat === "jpeg" || outputFormat === "webp") ? { output_compression: compression } : {}),
   };
 }
@@ -466,22 +465,55 @@ async function transformGeneratedImage(image, input, { fetchImpl, signal, remote
     throw imageError("图片模型返回的图片超过 4000 万像素。", { code: "IMAGE_RESULT_PIXELS_EXCEEDED", status: 502 });
   }
   const target = resolveTargetImageSize(input);
-  const upscaled = target.width > native.width || target.height > native.height;
   const nativeRatio = native.width / native.height;
   const targetRatio = target.width / target.height;
-  const unchanged = native.width === target.width && native.height === target.height && Math.abs(nativeRatio - targetRatio) < 0.0001;
-  const preserveCanvas = input.editIntent === "outpaint";
-  const processing = upscaled ? "upscaled" : unchanged ? "native" : preserveCanvas ? "fitted" : "cropped";
+  const ratioChanged = Math.abs(nativeRatio - targetRatio) >= 0.0001;
+  const unchanged = native.width === target.width && native.height === target.height && !ratioChanged;
+  const scale = ratioChanged
+    ? Math.min(target.width / native.width, target.height / native.height)
+    : target.width / native.width;
+  const upscaled = scale > 1.0001;
+  const processing = unchanged ? "native" : upscaled ? "upscaled" : "fitted";
   const outputFormat = input.format || "png";
   const compression = input.compression ?? 90;
-  let pipeline = sharp(sourceBuffer, { limitInputPixels: MAX_INPUT_PIXELS, animated: false })
-    .rotate()
-    .resize(target.width, target.height, {
-      fit: preserveCanvas ? "contain" : "cover",
-      position: "centre",
-      background: outputFormat === "jpeg" ? "#ffffff" : { r: 255, g: 255, b: 255, alpha: input.background === "transparent" ? 0 : 1 },
-      kernel: sharp.kernel.lanczos3,
-    });
+  let pipeline;
+  if (ratioChanged) {
+    const foreground = await sharp(sourceBuffer, { limitInputPixels: MAX_INPUT_PIXELS, animated: false })
+      .rotate()
+      .resize({
+        width: target.width,
+        height: target.height,
+        fit: "inside",
+        withoutEnlargement: false,
+        kernel: sharp.kernel.lanczos3,
+      })
+      .png()
+      .toBuffer({ resolveWithObject: true });
+    const left = Math.floor((target.width - foreground.info.width) / 2);
+    const top = Math.floor((target.height - foreground.info.height) / 2);
+    const right = target.width - foreground.info.width - left;
+    const bottom = target.height - foreground.info.height - top;
+    if (input.background === "transparent" && outputFormat !== "jpeg") {
+      pipeline = sharp({
+        create: {
+          width: target.width,
+          height: target.height,
+          channels: 4,
+          background: { r: 255, g: 255, b: 255, alpha: 0 },
+        },
+      }).composite([{ input: foreground.data, left, top }]);
+    } else {
+      pipeline = sharp(foreground.data, { limitInputPixels: MAX_INPUT_PIXELS, animated: false })
+        .extend({ top, bottom, left, right, extendWith: "mirror" });
+    }
+  } else {
+    pipeline = sharp(sourceBuffer, { limitInputPixels: MAX_INPUT_PIXELS, animated: false })
+      .rotate()
+      .resize(target.width, target.height, {
+        fit: "fill",
+        kernel: sharp.kernel.lanczos3,
+      });
+  }
   if (outputFormat === "jpeg") {
     pipeline = pipeline.flatten({ background: "#ffffff" }).jpeg({ quality: compression, chromaSubsampling: "4:4:4", mozjpeg: true });
   } else if (outputFormat === "webp") {
@@ -497,6 +529,7 @@ async function transformGeneratedImage(image, input, { fetchImpl, signal, remote
   }
   return {
     buffer,
+    _validationBuffer: sourceBuffer,
     mimeType: mimeType(outputFormat),
     revisedPrompt: image.revisedPrompt,
     nativeSize: `${native.width}x${native.height}`,
@@ -588,7 +621,7 @@ async function validateAndRankMaskedEdits(prepared, images) {
   const accepted = [];
   let lastFailure = null;
   for (const image of images) {
-    const metrics = await maskedEditChangeMetrics(prepared.references[0].buffer, image.buffer, prepared.mask.buffer);
+    const metrics = await maskedEditChangeMetrics(prepared.references[0].buffer, image._validationBuffer || image.buffer, prepared.mask.buffer);
     if (metrics.editedPixels < 16) {
       lastFailure = imageError("框选区域太小，无法确认修改结果，请重新框选后再试。", {
         code: "IMAGE_EDIT_MASK_TOO_SMALL",
@@ -626,19 +659,27 @@ async function validateAndRankMaskedEdits(prepared, images) {
   return accepted;
 }
 
-async function assertReferenceEditChanged(prepared, images, input) {
-  if (!prepared.references[0] || !images.length) return;
+async function validateAndRankReferenceEdits(prepared, images, input) {
+  if (!prepared.references[0] || !images.length) return images;
   const target = resolveTargetImageSize(input);
+  const validationReference = prepared.validationReference || prepared.references[0];
+  const accepted = [];
   for (const image of images) {
-    const metrics = await referenceEditChangeMetrics(prepared.references[0].buffer, image.buffer, target);
-    if (metrics.changedRatio < 0.015 && metrics.meanDelta < 2.5) {
-      throw imageError("图片模型返回的结果与原图几乎相同，本次未标记为完成。请重试或把修改目标写得更具体。", {
-        code: "IMAGE_EDIT_NO_VISIBLE_CHANGE",
-        status: 422,
-        retryable: true,
-      });
-    }
+    const metrics = await referenceEditChangeMetrics(validationReference.buffer, image._validationBuffer || image.buffer, target);
+    if (metrics.changedRatio < 0.06 || metrics.meanDelta < 2) continue;
+    const score = Math.max(0, Math.min(100, Math.round(
+      metrics.changedRatio * 65 + Math.min(1, metrics.meanDelta / 32) * 35,
+    )));
+    accepted.push({ ...image, validation: { ...metrics, score, passed: true } });
   }
+  if (!accepted.length) {
+    throw imageError("图片模型返回的结果只包含裁切、压缩或轻微像素变化，没有完成有效修改，本次未标记为成功。请重试或把修改目标写得更具体。", {
+      code: "IMAGE_EDIT_NO_VISIBLE_CHANGE",
+      status: 422,
+      retryable: true,
+    });
+  }
+  return accepted.sort((left, right) => right.validation.score - left.validation.score);
 }
 
 function editFormData(body, references, mask) {
@@ -717,6 +758,68 @@ async function prepareOutpaintFiles(prepared, nativeSize, compositionMode) {
   return { references: [reference, ...prepared.references.slice(1)], mask, outpaintPrepared: true };
 }
 
+async function prepareReferenceCanvas(prepared, nativeSize) {
+  if (!prepared.references[0]) return prepared;
+  const [canvasWidth, canvasHeight] = String(nativeSize).split("x").map(Number);
+  if (!canvasWidth || !canvasHeight) throw imageError("参考图画布尺寸无效。", { code: "IMAGE_RESULT_SIZE_MISMATCH" });
+  const source = prepared.references[0];
+  if (source.width === canvasWidth && source.height === canvasHeight) return prepared;
+  const resized = await sharp(source.buffer, { limitInputPixels: MAX_INPUT_PIXELS, animated: false })
+    .rotate()
+    .resize({
+      width: canvasWidth,
+      height: canvasHeight,
+      fit: "inside",
+      withoutEnlargement: false,
+      kernel: sharp.kernel.lanczos3,
+    })
+    .png({ compressionLevel: 9, adaptiveFiltering: true })
+    .toBuffer({ resolveWithObject: true });
+  const left = Math.floor((canvasWidth - resized.info.width) / 2);
+  const top = Math.floor((canvasHeight - resized.info.height) / 2);
+  const canvas = await sharp({
+    create: {
+      width: canvasWidth,
+      height: canvasHeight,
+      channels: 4,
+      background: { r: 255, g: 255, b: 255, alpha: 0 },
+    },
+  }).composite([{ input: resized.data, left, top }]).png({ compressionLevel: 9, adaptiveFiltering: true }).toBuffer();
+  const reference = await validateReferenceFile({
+    buffer: canvas,
+    mimetype: "image/png",
+    originalname: "oriented-reference.png",
+  }, { index: 0 });
+  let mask = prepared.mask;
+  if (mask) {
+    const resizedMask = await sharp(mask.buffer, { limitInputPixels: MAX_INPUT_PIXELS, animated: false })
+      .rotate()
+      .resize(resized.info.width, resized.info.height, { fit: "fill", kernel: sharp.kernel.nearest })
+      .png()
+      .toBuffer();
+    const maskCanvas = await sharp({
+      create: {
+        width: canvasWidth,
+        height: canvasHeight,
+        channels: 4,
+        background: { r: 0, g: 0, b: 0, alpha: 0 },
+      },
+    }).composite([{ input: resizedMask, left, top }]).png().toBuffer();
+    mask = await validateReferenceFile({
+      buffer: maskCanvas,
+      mimetype: "image/png",
+      originalname: "oriented-mask.png",
+    }, { mask: true });
+  }
+  return {
+    ...prepared,
+    references: [reference, ...prepared.references.slice(1)],
+    mask,
+    validationReference: prepared.validationReference || source,
+    referenceCanvasPrepared: true,
+  };
+}
+
 async function createAutomaticProductMask(reference) {
   const sample = await sharp(reference.buffer, { limitInputPixels: MAX_INPUT_PIXELS, animated: false })
     .rotate()
@@ -761,8 +864,9 @@ async function createAutomaticProductMask(reference) {
   return { maskBuffer, confidence, subjectRatio };
 }
 
-async function prepareBackgroundFiles(prepared, compositionMode) {
-  if (!prepared.references[0] || prepared.mask || compositionMode === "smart") return prepared;
+async function prepareBackgroundFiles(prepared, compositionMode, nativeSize) {
+  if (!prepared.references[0] || prepared.mask) return prepared;
+  if (compositionMode === "smart") return prepareReferenceCanvas(prepared, nativeSize);
   const detected = await createAutomaticProductMask(prepared.references[0]);
   if (detected.confidence < 0.48) {
     throw imageError("自动主体保护置信度不足，本次未提交模型。请换一张主体边缘更清楚的原图，或在图片详情中使用“批注编辑”手动框选。", {
@@ -776,14 +880,19 @@ async function prepareBackgroundFiles(prepared, compositionMode) {
     mimetype: "image/png",
     originalname: "automatic-product-mask.png",
   }, { mask: true });
-  return { ...prepared, mask, productMaskConfidence: detected.confidence, productMaskSubjectRatio: detected.subjectRatio };
+  return prepareReferenceCanvas({
+    ...prepared,
+    mask,
+    productMaskConfidence: detected.confidence,
+    productMaskSubjectRatio: detected.subjectRatio,
+  }, nativeSize);
 }
 
 function generationWarnings(input, body, edit) {
   const output = resolveTargetImageSize(input);
   const warnings = [];
   if (body.size !== `${output.width}x${output.height}`) {
-    warnings.push(`模型按原生尺寸 ${body.size} 生成，已由本机处理为 ${output.width}x${output.height}。`);
+    warnings.push(`模型按原生尺寸 ${body.size} 生成，已由本机保留完整主体并连续扩展边缘至 ${output.width}x${output.height}，不会拉伸或裁切产品。`);
   }
   if ((input.resolution || "1k") !== "1k") warnings.push(`${String(input.resolution).toUpperCase()} 为本机高质量增强输出，并非模型原生分辨率。`);
   if (edit) warnings.push("本次使用参考图编辑接口，原图未被覆盖。");
@@ -821,42 +930,52 @@ export async function generateImages(config = {}, input = {}, {
   }
   const referenceMode = !editMode && edit ? (input.sourceImageId ? "source" : "reference") : undefined;
   const normalizedInput = { ...input, editMode, editIntent, compositionMode, referenceMode };
+  const requestedCount = normalizedInput.count ?? 1;
   const body = buildImageGenerationRequest(normalizedInput, resolved.imageModel);
   if (editIntent === "outpaint") prepared = await prepareOutpaintFiles(prepared, body.size, compositionMode);
-  else if (editIntent === "background") prepared = await prepareBackgroundFiles(prepared, compositionMode);
-  let data;
+  else if (editIntent === "background") prepared = await prepareBackgroundFiles(prepared, compositionMode, body.size);
+  else if (editIntent === "redraw") prepared = await prepareReferenceCanvas(prepared, body.size);
+  let responses;
   try {
-    data = await requestModelApiJson(edit ? imageEditEndpoint(resolved.baseUrl) : imageGenerationEndpoint(resolved.baseUrl), {
-      apiKey: resolved.apiKey,
-      body: edit ? editFormData(body, prepared.references, prepared.mask) : body,
-      fetchImpl,
-      label: edit ? "AI 参考图编辑" : "AI 生图",
-      signal,
-      timeoutMs,
-    });
+    responses = await Promise.all(Array.from({ length: requestedCount }, () => (
+      requestModelApiJson(edit ? imageEditEndpoint(resolved.baseUrl) : imageGenerationEndpoint(resolved.baseUrl), {
+        apiKey: resolved.apiKey,
+        body: edit ? editFormData(body, prepared.references, prepared.mask) : body,
+        fetchImpl,
+        label: edit ? "AI 参考图编辑" : "AI 生图",
+        signal,
+        timeoutMs,
+      })
+    )));
   } catch (error) {
     if (edit && [404, 405].includes(error?.status)) {
       throw imageError("当前兼容网关不支持参考图编辑接口，请更换支持 /images/edits 的图片模型服务。", { code: "IMAGE_EDIT_UNSUPPORTED", status: 422 });
     }
     throw error;
   }
-  const parsed = parseImageGenerationResponse(data, { format: body.output_format });
+  const parsed = responses.flatMap((data) => parseImageGenerationResponse(data, { format: body.output_format }));
   const images = [];
   for (const image of parsed) images.push(await transformGeneratedImage(image, normalizedInput, { fetchImpl, signal, remoteImageTimeoutMs }));
-  const validatedImages = prepared.mask ? await validateAndRankMaskedEdits(prepared, images) : images;
-  if (!prepared.mask && edit) await assertReferenceEditChanged(prepared, validatedImages, normalizedInput);
+  const validatedImages = prepared.mask
+    ? await validateAndRankMaskedEdits(prepared, images)
+    : edit
+      ? await validateAndRankReferenceEdits(prepared, images, normalizedInput)
+      : images;
   const composedImages = [];
-  for (const image of validatedImages) composedImages.push(await applyCopyLayer(image, normalizedInput));
+  for (const image of validatedImages) {
+    const { _validationBuffer, ...publicImage } = image;
+    composedImages.push(await applyCopyLayer(publicImage, normalizedInput));
+  }
   const output = resolveTargetImageSize(normalizedInput);
   return {
     images: composedImages,
     model: resolved.imageModel,
-    requestedCount: body.n,
+    requestedCount,
     generatedCount: composedImages.length,
     size: `${output.width}x${output.height}`,
     nativeRequestSize: body.size,
-    created: Number.isFinite(data.created) ? data.created : null,
-    usage: data.usage && typeof data.usage === "object" ? data.usage : null,
+    created: responses.map((data) => data.created).find(Number.isFinite) ?? null,
+    usage: responses.map((data) => data.usage).find((usage) => usage && typeof usage === "object") || null,
     warnings: generationWarnings(input, body, edit),
     appliedOptions: {
       mode: edit ? "edit" : "generate",
@@ -866,6 +985,7 @@ export async function generateImages(config = {}, input = {}, {
       compositionMode: compositionMode || null,
       candidateRankingApplied: Boolean(prepared.mask && images.length > 1),
       outpaintPrepared: Boolean(prepared.outpaintPrepared),
+      referenceCanvasPrepared: Boolean(prepared.referenceCanvasPrepared),
       productMaskConfidence: prepared.productMaskConfidence ?? null,
       ratio: input.ratio,
       resolution: input.resolution || "1k",

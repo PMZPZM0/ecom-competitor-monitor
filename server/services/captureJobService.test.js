@@ -183,7 +183,7 @@ test("clearFailedCaptureJobs removes failed, auth-required, and retrying jobs on
   await deleteCaptureJob(running.id);
 });
 
-test("clearStaleCaptureJobs removes only non-running jobs whose product scope is entirely gone", async () => {
+test("clearStaleCaptureJobs retains failed diagnostics when a temporary product card is gone", async () => {
   const existingProductIds = (await getCaptureJobs()).flatMap((job) => job.productIds || []);
   const validProductIds = [...new Set([...existingProductIds, "valid-product"])];
   const staleQueued = await createCaptureJob({ source: "stale-queued", productIds: ["deleted-product"] });
@@ -193,6 +193,8 @@ test("clearStaleCaptureJobs removes only non-running jobs whose product scope is
   await patchCaptureJob(staleAuth.id, { stage: "auth-required" });
   const staleCompleted = await createCaptureJob({ source: "stale-completed", productIds: ["deleted-product"] });
   await patchCaptureJob(staleCompleted.id, { stage: "completed" });
+  const staleFailed = await createCaptureJob({ source: "stale-failed", productIds: ["deleted-product"] });
+  await patchCaptureJob(staleFailed.id, { stage: "failed", error: "首次抓取失败" });
   const staleRunning = await createCaptureJob({ source: "stale-running", productIds: ["deleted-product"] });
   await patchCaptureJob(staleRunning.id, { stage: "opening" });
   const partialScope = await createCaptureJob({ source: "partial-scope", productIds: ["deleted-product", "valid-product"] });
@@ -202,11 +204,13 @@ test("clearStaleCaptureJobs removes only non-running jobs whose product scope is
   assert.deepEqual(new Set(removed.map((job) => job.id)), new Set([staleQueued.id, staleRetrying.id, staleAuth.id, staleCompleted.id]));
   const retainedIds = new Set((await getCaptureJobs()).map((job) => job.id));
   assert.equal(retainedIds.has(staleRunning.id), true);
+  assert.equal(retainedIds.has(staleFailed.id), true);
   assert.equal(retainedIds.has(partialScope.id), true);
   assert.equal(retainedIds.has(noScope.id), true);
 
   await patchCaptureJob(staleRunning.id, { stage: "failed" });
   await deleteCaptureJob(staleRunning.id);
+  await deleteCaptureJob(staleFailed.id);
   await deleteCaptureJob(partialScope.id);
   await deleteCaptureJob(noScope.id);
 });

@@ -25,11 +25,11 @@ const {
   duplicateCaptureProductIds,
   earliestProductSchedule,
   enqueueCaptureOperation,
+  explainPriceCaptureFailure,
   getCaptureQueueStatus,
   historicalAccountPriceSnapshot,
   historicalPrimaryImages,
   historicalProductMedia,
-  hasTrustedAccountBaseline,
   isExplicitLoginExpiryError,
   mergeAccountSnapshots,
   mergeCapturedMaterials,
@@ -56,6 +56,8 @@ const {
   setSkuMonitorPrice,
   sessionsForProduct,
   snapshotHasVerifiedNormalPrice,
+  snapshotHasCompleteVerifiedNormalPrices,
+  snapshotPriceCoverage,
   snapshotAllowsPriceAlerts,
   shouldRunCaptureRetry,
   withAccountCaptureLock,
@@ -206,6 +208,12 @@ test("a temporary product login redirect never enters automatic retries", async 
   assert.equal(job?.nextAttemptAt, null);
   assert.match(job?.message || "", /未自动重试/);
   await clearFinishedCaptureJobs();
+});
+
+test("platform access restrictions never enter automatic retries", () => {
+  assert.equal(captureFailureRequiresManualRetry("淘宝已限制当前账号访问，本次抓取已停止。"), true);
+  assert.equal(captureFailureRequiresManualRetry("访问行为存在异常，涉嫌不当获取使用平台商业信息，包括爬虫工具、违规浏览器插件。"), true);
+  assert.equal(captureFailureRequiresManualRetry("TAOBAO_ACCESS_RESTRICTED"), true);
 });
 
 test("transient capture retries use the fixed 1, 5, and 15 minute sequence", () => {
@@ -604,10 +612,11 @@ test("local search-image reparse updates only the exact product image channel", 
 test("local evidence reparse implementation cannot invoke a browser capture path", () => {
   const source = reparseProductLocalEvidence.toString();
   assert.doesNotMatch(source, /scrapeTmall|withProtectedBrowserCapture|fetch\s*\(/);
+  assert.doesNotMatch(source, /notifyBelowThreshold|prepareThresholdAlert|drainNotificationOutbox|syncPriceWorkbook/);
   assert.match(source, /readBrowserCaptureSource/);
 });
 
-test("a material access restriction does not block account fallback or buyer shows", async () => {
+test("a material access restriction stops fallback and buyer shows in the same browser environment", async () => {
   resetTmallPriceCircuitForTests();
   const productId = "cross-lane-restriction-product";
   const itemId = "880003";
@@ -626,8 +635,8 @@ test("a material access restriction does not block account fallback or buyer sho
     return db;
   });
   const sessions = [
-    { id: "restricted-material-a", source: "taobao-browser", accountType: "normal", browserProfileKey: "restricted-material-a", browserPort: 9241, loginStatus: "valid" },
-    { id: "restricted-material-b", source: "taobao-browser", accountType: "normal", browserProfileKey: "restricted-material-b", browserPort: 9242, loginStatus: "valid" },
+    { id: "restricted-material-a", source: "taobao-browser", accountType: "normal", browserProfileKey: "restricted-material-a", browserPort: 9241, browserEngine: "uc", loginStatus: "valid" },
+    { id: "restricted-material-b", source: "taobao-browser", accountType: "normal", browserProfileKey: "restricted-material-b", browserPort: 9242, browserEngine: "uc", loginStatus: "valid" },
   ];
   let materialCalls = 0;
   const materials = await runCaptureBatchOnce({
@@ -644,21 +653,21 @@ test("a material access restriction does not block account fallback or buyer sho
       throw error;
     },
   });
-  assert.equal(materialCalls, 2);
+  assert.equal(materialCalls, 1);
   assert.equal(materials.run.status, "failed");
 
   let buyerShowCalls = 0;
   const buyerShow = await runProductOnce(productId, {
     source: "cross-lane-restriction-buyer-show",
     captureKind: "buyer-show",
-    authSessions: [{ id: "restricted-buyer-c", source: "taobao-browser", accountType: "normal", browserProfileKey: "restricted-buyer-c", browserPort: 9243, loginStatus: "valid" }],
+    authSessions: [{ id: "restricted-buyer-c", source: "taobao-browser", accountType: "normal", browserProfileKey: "restricted-buyer-c", browserPort: 9243, browserEngine: "uc", loginStatus: "valid" }],
     scraper: async () => {
       buyerShowCalls += 1;
       return { capture: { status: "complete", items: [] }, items: [], interactions: [] };
     },
   });
-  assert.equal(buyerShowCalls, 1);
-  assert.equal(buyerShow.ok, true);
+  assert.equal(buyerShowCalls, 0);
+  assert.equal(buyerShow.ok, false);
   resetTmallPriceCircuitForTests();
   await clearFinishedCaptureJobs();
 });
@@ -705,6 +714,213 @@ function verifiedSnapshot(itemId, price = 99) {
     buyerShowCapture: { status: "skipped", items: [] },
   });
 }
+
+function browserPriceEvidence(itemId, skuCases, capturedSkuIds = skuCases.map(({ skuId }) => skuId)) {
+  const allSkuIds = skuCases.map(({ skuId }) => skuId);
+  const priceBySku = new Map(skuCases.map((item) => [item.skuId, item.price]));
+  const htmlFor = (selectedSkuId) => `<script>window.__DATA__=${JSON.stringify({
+    itemId,
+    skuBase: { props: [], skus: allSkuIds.map((skuId) => ({ skuId, propPath: "" })) },
+    skuCore: {
+      sku2info: Object.fromEntries(allSkuIds.map((skuId) => [skuId, {
+        price: { priceText: "199", priceTitle: "优惠前" },
+        ...(skuId === selectedSkuId ? { subPrice: { priceText: String(priceBySku.get(skuId)), priceTitle: "店铺优惠后" } } : {}),
+        quantity: 1,
+      }])),
+    },
+  })}</script>`;
+  return {
+    itemId,
+    accountType: "normal",
+    requestedUrl: `https://detail.tmall.com/item.htm?id=${itemId}`,
+    finalUrl: `https://detail.tmall.com/item.htm?id=${itemId}`,
+    page: {
+      html: htmlFor(capturedSkuIds.at(-1) || allSkuIds[0]),
+      visibleText: "本地价格重放证据",
+      finalUrl: `https://detail.tmall.com/item.htm?id=${itemId}`,
+      statusCode: 200,
+      source: "browser",
+      accessVerified: true,
+      networkPayloads: [],
+      selectionResults: [],
+      skuSnapshots: capturedSkuIds.map((skuId, index) => ({
+        skuId,
+        selected: true,
+        capturedAt: `2026-07-22T09:00:0${index}.000Z`,
+        html: htmlFor(skuId),
+        visibleText: `${skuId} 店铺优惠后 ${priceBySku.get(skuId)}`,
+        finalUrl: `https://detail.tmall.com/item.htm?id=${itemId}`,
+      })),
+    },
+  };
+}
+
+function partialPriceSnapshot({ productId, itemId, evidenceId, evidenceFile, skuCases }) {
+  const [first, second] = skuCases;
+  return completePriceSnapshot([
+    verifiedSku({ skuId: first.skuId, name: first.name, price: 99, normalPrice: 99, image: "https://img.alicdn.com/old-first.jpg", accountPrices: [
+      { sessionId: "price-replay-normal", accountName: "普通账号", accountType: "normal", capturedAt: "2026-07-22T08:00:00.000Z", price: 99, normalPrice: 99, resolutionStatus: "verified", priceResolution: { status: "verified", channels: { normal: { status: "verified", valueCents: 9900 } } } },
+      { sessionId: "price-replay-gift", accountName: "礼金账号", accountType: "gift", capturedAt: "2026-07-22T08:00:00.000Z", price: 91, normalPrice: 99, giftPrice: 91, resolutionStatus: "verified", priceResolution: { status: "verified", channels: { normal: { status: "verified", valueCents: 9900 }, gift: { status: "verified", valueCents: 9100 } } } },
+    ] }, ["normal"]),
+    {
+      skuId: second.skuId,
+      name: second.name,
+      price: null,
+      normalPrice: null,
+      image: "https://img.alicdn.com/old-second.jpg",
+      resolutionStatus: "unavailable",
+      priceResolution: {
+        status: "unavailable",
+        reason: "supported-endpoint-not-observed",
+        channels: { normal: { status: "unavailable", valueCents: null } },
+      },
+    },
+  ], {
+    id: `${productId}-snapshot`,
+    productId,
+    itemId,
+    title: "已有商品标题",
+    shopName: "已有店铺",
+    model: "已有型号",
+    price: 99,
+    priceRange: [99, 99],
+    capturedAt: "2026-07-22T08:00:00.000Z",
+    resolutionStatus: "partial",
+    browserEvidenceId: evidenceId,
+    browserEvidenceFile: evidenceFile,
+    mainImage800: "https://img.alicdn.com/old-main.jpg",
+    detailImages: ["https://img.alicdn.com/old-detail.jpg"],
+    buyerShows: [{ id: "saved-review", text: "保留的买家秀", images: [], videoUrls: [] }],
+    buyerShowCapture: { status: "complete", items: [{ id: "saved-review", text: "保留的买家秀", images: [], videoUrls: [] }] },
+    primaryAccountType: "normal",
+    primaryAccountSessionId: "price-replay-normal",
+    accountCaptures: [
+      { sessionId: "price-replay-normal", accountName: "普通账号", accountType: "normal", primary: true, capturedAt: "2026-07-22T08:00:00.000Z", price: 99, priceRange: [99, 99], resolutionStatus: "partial", skuCount: 2, verifiedSkuCount: 1 },
+      { sessionId: "price-replay-gift", accountName: "礼金账号", accountType: "gift", primary: false, capturedAt: "2026-07-22T08:00:00.000Z", price: 91, priceRange: [91, 91], resolutionStatus: "verified", skuCount: 2, verifiedSkuCount: 2 },
+    ],
+    rawSignals: {
+      observedSkuCount: 2,
+      outputSkuCount: 2,
+      verifiedPriceSkuCount: 1,
+      materialImageCount: 2,
+      buyerShowCount: 1,
+    },
+  });
+}
+
+test("local price reparse repairs a partial card only from its saved browser evidence", async () => {
+  const productId = "local-reparse-price-product";
+  const itemId = "880014";
+  const skuCases = [
+    { skuId: "62749714800141", name: "标准款", price: 139 },
+    { skuId: "62749714800142", name: "加大款", price: 169 },
+  ];
+  const savedEvidence = await saveBrowserCaptureSource(browserPriceEvidence(itemId, skuCases));
+  const partialSnapshot = partialPriceSnapshot({ productId, itemId, evidenceId: savedEvidence.captureId, evidenceFile: savedEvidence.sourceFile, skuCases });
+  const alertState = { normal: { [skuCases[0].skuId]: { normal: { below: false, lowestCents: 9900 } } } };
+  const notification = { id: "local-reparse-price-notification", productId, status: "sent", message: "existing" };
+  await updateDb((db) => {
+    db.products.push({
+      id: productId,
+      itemId,
+      url: `https://detail.tmall.com/item.htm?id=${itemId}`,
+      name: "已有商品标题",
+      shopName: "已有店铺",
+      model: "已有型号",
+      accountType: "normal",
+      enabled: true,
+      monitorIntervalMinutes: 45,
+      skuMonitorPrices: { [skuCases[0].skuId]: 120 },
+      skuMonitorRules: { [skuCases[0].skuId]: { normal: 120, gift: 90 } },
+      lastStatus: "error",
+      lastError: "2 个 SKU 中仅 1 个已验证",
+      lastSnapshot: structuredClone(partialSnapshot),
+    });
+    db.snapshots.push(structuredClone(partialSnapshot));
+    db.alertStates[productId] = structuredClone(alertState);
+    db.notificationLogs.push(notification);
+    db.feishu = { ...db.feishu, enabled: true, documentEnabled: true, documentId: "doc-local-replay" };
+    db.runs.push({ id: "local-reparse-price-run", source: "existing" });
+    return db;
+  });
+  const before = await readDb();
+  const originalFetch = globalThis.fetch;
+  let networkCalls = 0;
+  globalThis.fetch = async () => {
+    networkCalls += 1;
+    throw new Error("local price reparse must not access the network");
+  };
+  try {
+    const result = await reparseProductLocalEvidence(productId, "price");
+    const after = await readDb();
+    const afterProduct = after.products.find((item) => item.id === productId);
+    assert.equal(result.ok, true);
+    assert.equal(result.applied, true);
+    assert.equal(networkCalls, 0);
+    assert.deepEqual(result.coverage, { applicable: true, totalSkuCount: 2, verifiedSkuCount: 2, unresolvedSkuCount: 0, complete: true });
+    assert.match(result.message, /未打开浏览器、未触发提醒或飞书/);
+    assert.equal(afterProduct.lastStatus, "ok");
+    assert.equal(afterProduct.lastError, "");
+    assert.deepEqual(afterProduct.skuMonitorPrices, before.products.find((item) => item.id === productId).skuMonitorPrices);
+    assert.deepEqual(afterProduct.skuMonitorRules, before.products.find((item) => item.id === productId).skuMonitorRules);
+    assert.equal(afterProduct.monitorIntervalMinutes, 45);
+    assert.deepEqual(afterProduct.lastSnapshot.skuPrices.map((sku) => [sku.skuId, sku.normalPrice]), skuCases.map((sku) => [sku.skuId, sku.price]));
+    assert.equal(afterProduct.lastSnapshot.resolutionStatus, "verified");
+    assert.equal(afterProduct.lastSnapshot.mainImage800, partialSnapshot.mainImage800);
+    assert.deepEqual(afterProduct.lastSnapshot.detailImages, partialSnapshot.detailImages);
+    assert.deepEqual(afterProduct.lastSnapshot.buyerShows, partialSnapshot.buyerShows);
+    assert.equal(afterProduct.lastSnapshot.skuPrices[0].image, "https://img.alicdn.com/old-first.jpg");
+    assert.equal(afterProduct.lastSnapshot.skuPrices[0].accountPrices.find((view) => view.sessionId === "price-replay-normal").normalPrice, 139);
+    assert.equal(afterProduct.lastSnapshot.skuPrices[0].accountPrices.find((view) => view.sessionId === "price-replay-gift").giftPrice, 91);
+    assert.equal(afterProduct.lastSnapshot.accountCaptures.find((capture) => capture.sessionId === "price-replay-normal").resolutionStatus, "verified");
+    assert.equal(after.snapshots.filter((snapshot) => snapshot.productId === productId).length, 1);
+    assert.deepEqual(after.snapshots.find((snapshot) => snapshot.productId === productId).skuPrices.map((sku) => [sku.skuId, sku.normalPrice]), skuCases.map((sku) => [sku.skuId, sku.price]));
+    assert.deepEqual(after.alertStates[productId], before.alertStates[productId]);
+    assert.deepEqual(after.notificationLogs, before.notificationLogs);
+    assert.deepEqual(after.feishu, before.feishu);
+    assert.deepEqual(after.runs, before.runs);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("local price reparse keeps the current card untouched when saved evidence is still incomplete", async () => {
+  const productId = "local-reparse-price-incomplete-product";
+  const itemId = "880015";
+  const skuCases = [
+    { skuId: "62749714800151", name: "标准款", price: 139 },
+    { skuId: "62749714800152", name: "加大款", price: 169 },
+  ];
+  const savedEvidence = await saveBrowserCaptureSource(browserPriceEvidence(itemId, skuCases, [skuCases[0].skuId]));
+  const partialSnapshot = partialPriceSnapshot({ productId, itemId, evidenceId: savedEvidence.captureId, evidenceFile: savedEvidence.sourceFile, skuCases });
+  await updateDb((db) => {
+    db.products.push({
+      id: productId,
+      itemId,
+      url: `https://detail.tmall.com/item.htm?id=${itemId}`,
+      name: "不可覆盖的部分卡片",
+      accountType: "normal",
+      enabled: true,
+      skuMonitorRules: { [skuCases[0].skuId]: { normal: 120 } },
+      lastStatus: "error",
+      lastError: "旧的部分解析失败",
+      lastSnapshot: structuredClone(partialSnapshot),
+    });
+    db.snapshots.push(structuredClone(partialSnapshot));
+    db.alertStates[productId] = { normal: { [skuCases[0].skuId]: { normal: { below: false, lowestCents: 9900 } } } };
+    return db;
+  });
+  const before = await readDb();
+  const result = await reparseProductLocalEvidence(productId, "price");
+  const after = await readDb();
+  assert.equal(result.ok, false);
+  assert.equal(result.applied, false);
+  assert.equal(result.coverage.complete, false);
+  assert.match(result.message, /未覆盖现有卡片、监控价、历史快照或提醒/);
+  assert.deepEqual(after.products.find((item) => item.id === productId), before.products.find((item) => item.id === productId));
+  assert.deepEqual(after.snapshots.filter((snapshot) => snapshot.productId === productId), before.snapshots.filter((snapshot) => snapshot.productId === productId));
+  assert.deepEqual(after.alertStates[productId], before.alertStates[productId]);
+});
 
 test("deleted products and changed identities reject an in-flight capture before commit", async () => {
   const session = { id: "commit-session", name: "普通测试账号", accountType: "normal", source: "taobao-browser", active: true, enabled: true, loginStatus: "valid" };
@@ -1054,14 +1270,6 @@ test("daily capture selects only the requested account type while full view sele
   assert.deepEqual(sessionsForProduct(sessions, "gift").map((session) => session.id), ["g1"]);
   assert.deepEqual(sessionsForProduct(sessions, "vip88").map((session) => session.id), ["v1"]);
   assert.deepEqual(sessionsForProduct(sessions, "gift", 0, "all").map((session) => session.id), ["g1", "v1", "n1", "n2"]);
-  const normal = { session: sessions[0], snapshot: completePriceSnapshot([verifiedSku({ skuId: "sku-1", normalPrice: 179 }, ["normal"])]) };
-  const gift = { session: sessions[2], snapshot: completePriceSnapshot([verifiedSku({ skuId: "sku-1", normalPrice: 179, giftPrice: 126 }, ["normal", "gift"])]) };
-  const vipWithoutBenefit = { session: sessions[3], snapshot: completePriceSnapshot([verifiedSku({ skuId: "sku-1", normalPrice: 179 }, ["normal"])]) };
-  assert.equal(hasTrustedAccountBaseline([gift], "gift"), true);
-  assert.equal(hasTrustedAccountBaseline([normal, { session: sessions[2], snapshot: { accessMode: "authenticated", skuPrices: [{ skuId: "sku-1", normalPrice: 126 }] } }], "gift"), false);
-  assert.equal(hasTrustedAccountBaseline([normal, gift], "gift"), true);
-  assert.equal(hasTrustedAccountBaseline([normal], "vip88"), false);
-  assert.equal(hasTrustedAccountBaseline([normal, vipWithoutBenefit], "vip88"), true);
 });
 
 test("capture refuses anonymous fallback when no scanned account is available", async () => {
@@ -1082,11 +1290,27 @@ test("incomplete public price evidence keeps the scanned account online", async 
     healthStatus: "healthy",
   };
   const result = await captureProduct({ id: "p-public-shell", accountType: "normal" }, [session], {
-    scraper: async () => ({ accessMode: "authenticated", skuPrices: [{ skuId: "sku-1", normalPrice: 199, resolutionStatus: "legacy" }] }),
+    scraper: async () => ({
+      accessMode: "authenticated",
+      resolutionStatus: "unavailable",
+      capturedAt: "2026-07-22T08:00:00.000Z",
+      itemId: "1059717807069",
+      buyerShows: [],
+      buyerShowCapture: { status: "skipped", items: [] },
+      localFirst: { sourceSaved: true, sourceSanitized: true, parsedFromDisk: true },
+      rawSignals: { observedSkuCount: 1, outputSkuCount: 1, verifiedPriceSkuCount: 0 },
+      skuPrices: [{
+        skuId: "sku-1",
+        normalPrice: null,
+        resolutionStatus: "unavailable",
+        priceResolution: { status: "unavailable", channels: { normal: { status: "unavailable", valueCents: null } } },
+      }],
+    }),
   });
 
-  assert.equal(result.snapshot, null);
-  assert.match(result.product.lastError, /没有复制到当前 SKU 的完整价格响应/);
+  assert.equal(result.snapshot.skuPrices[0].normalPrice, null);
+  assert.equal(result.snapshot.skuPrices[0].resolutionStatus, "unavailable");
+  assert.match(result.product.lastError, /1 个 SKU 中仅 0 个具备当前可闭合价格证据/);
   assert.equal(session.loginStatus, "valid");
   assert.equal(session.healthStatus, "healthy");
 });
@@ -1149,11 +1373,11 @@ test("a Tmall price gate retries the next account on every capture", async () =>
   resetTmallPriceCircuitForTests();
 });
 
-test("an account access restriction affects only its current browser attempt", async () => {
+test("an account access restriction blocks later attempts in the same browser environment", async () => {
   resetTmallPriceCircuitForTests();
   const sessions = [
-    { id: "restricted-primary", name: "普通账号 A", accountType: "normal", source: "taobao-browser", browserProfileKey: "restricted-profile-a", browserPort: 9521, loginStatus: "valid" },
-    { id: "restricted-fallback", name: "普通账号 B", accountType: "normal", source: "taobao-browser", browserProfileKey: "restricted-profile-b", browserPort: 9522, loginStatus: "valid" },
+    { id: "restricted-primary", name: "普通账号 A", accountType: "normal", source: "taobao-browser", browserProfileKey: "restricted-profile-a", browserPort: 9521, browserEngine: "uc", loginStatus: "valid" },
+    { id: "restricted-fallback", name: "普通账号 B", accountType: "normal", source: "taobao-browser", browserProfileKey: "restricted-profile-b", browserPort: 9522, browserEngine: "uc", loginStatus: "valid" },
   ];
   let scraperCalls = 0;
   const restrictedScraper = async () => {
@@ -1169,10 +1393,10 @@ test("an account access restriction affects only its current browser attempt", a
 
   assert.equal(first.snapshot, null);
   assert.equal(second.snapshot, null);
-  assert.equal(scraperCalls, 4);
-  assert.equal(sessions[0].tmallPriceFailureReason, undefined);
-  assert.match(second.product.lastError, /淘宝限制了当前商品页访问/);
-  assert.equal(sessions[1].tmallPriceStatus, undefined);
+  assert.equal(scraperCalls, 1);
+  assert.equal(sessions[0].tmallPriceFailureReason, "TAOBAO_ACCESS_RESTRICTED");
+  assert.match(second.product.lastError, /淘宝访问限制保护中/);
+  assert.equal(sessions[1].tmallPriceStatus, "cooldown");
   resetTmallPriceCircuitForTests();
 });
 
@@ -1315,6 +1539,11 @@ test("a partial SKU round saves verified SKUs while keeping unresolved SKUs unav
 
   const second = await runProductOnce(productId, { source: "partial-after-complete", authSessions: [session], scraper: async () => incomplete });
   assert.ok(second.snapshot, second.product.lastError);
+  assert.equal(second.product.lastStatus, "error");
+  assert.match(second.product.lastError, /2 个 SKU 中仅 1 个/);
+  assert.equal(session.loginStatus, "valid");
+  assert.equal(session.tmallPriceStatus, "degraded");
+  assert.equal(session.tmallPriceFailureReason, "PARTIAL_SKU_PRICE_EVIDENCE:1/2");
   assert.equal(second.snapshot.resolutionStatus, "partial");
   assert.equal(second.snapshot.skuPrices.find((sku) => sku.skuId === `${itemId}-sku`).normalPrice, 89);
   assert.equal(second.snapshot.skuPrices.find((sku) => sku.skuId === `${itemId}-missing`).normalPrice, null);
@@ -1331,24 +1560,47 @@ test("only an explicit Taobao login redirect expires an account", () => {
   assert.equal(isExplicitLoginExpiryError("账号页面需要安全验证，本次抓取已停止，登录状态保留待复检。"), false);
 });
 
-test("a valid account retries one transient product login redirect in the same capture", async () => {
+test("a product login redirect never retries or mutates the session in the same capture", async () => {
   const session = { tmallPriceStatus: "valid" };
   const attempts = [];
-  const waits = [];
-  const result = await captureWithTransientLoginRetry(session, async (attempt) => {
+  await assert.rejects(captureWithTransientLoginRetry(session, async (attempt) => {
     attempts.push(attempt);
-    if (attempt === 0) throw new Error("账号登录已明确失效：商品页跳转到淘宝登录页。");
-    return "captured";
+    throw new Error("账号登录已明确失效：商品页跳转到淘宝登录页。");
   }, {
     confirmExpiry: async () => false,
-    wait: async (milliseconds) => waits.push(milliseconds),
-  });
+  }), /明确失效/);
 
-  assert.equal(result, "captured");
-  assert.deepEqual(attempts, [0, 1]);
-  assert.deepEqual(waits, [600]);
-  assert.equal(session.tmallPriceStatus, "degraded");
-  assert.equal(session.tmallPriceFailureReason, "PRODUCT_LOGIN_REDIRECT");
+  assert.deepEqual(attempts, [0]);
+  assert.equal(session.tmallPriceStatus, "valid");
+  assert.equal(session.tmallPriceFailureReason, undefined);
+});
+
+test("a browser capture login redirect does not open another identity probe or expire the account", async () => {
+  const session = {
+    browserProfileKey: "profile-88vip",
+    browserPort: 9338,
+    tmallPriceStatus: "valid",
+  };
+  const error = await captureWithTransientLoginRetry(session, async () => {
+    throw new Error("账号登录已明确失效：商品页跳转到淘宝登录页。");
+  }).catch((caught) => caught);
+
+  assert.equal(error.captureSessionExpiryChecked, true);
+  assert.equal(error.captureSessionExpired, false);
+  assert.equal(session.tmallPriceStatus, "valid");
+});
+
+test("a product login redirect reports Tmall session degradation without claiming identity expiry", () => {
+  const error = new Error("账号登录已明确失效：商品页跳转到淘宝登录页。");
+  error.captureSessionExpiryChecked = true;
+  error.captureSessionExpired = false;
+
+  const failure = explainPriceCaptureFailure(error);
+  assert.equal(failure.code, "CAPTURE_TMALL_SESSION_DEGRADED");
+  assert.equal(failure.stage, "capture");
+  assert.match(failure.message, /账号浏览器保持原样/);
+  assert.doesNotMatch(failure.message, /自动重试/);
+  assert.doesNotMatch(failure.message, /重新扫码/);
 });
 
 test("an explicitly expired account and unrelated failures are never retried", async () => {
@@ -1553,9 +1805,47 @@ test("run record permanently keeps each failed product reason", () => {
   });
 });
 
+test("run record reports exact partial SKU coverage instead of success", () => {
+  const snapshot = completePriceSnapshot([
+    verifiedSku({ skuId: "sku-1", normalPrice: 409 }, ["normal"]),
+    { skuId: "sku-2", normalPrice: null, resolutionStatus: "unavailable", priceResolution: { status: "unavailable", channels: {} } },
+    { skuId: "sku-3", normalPrice: null, resolutionStatus: "ambiguous", priceResolution: { status: "ambiguous", channels: {} } },
+  ], {
+    resolutionStatus: "partial",
+    rawSignals: {
+      observedSkuCount: 3,
+      outputSkuCount: 3,
+      timingsMs: { browserAcquisition: 37_400, localParse: 8 },
+    },
+  });
+  const run = buildRunRecord({
+    source: "manual-product",
+    scope: "p1",
+    startedAt: "2026-07-22T08:00:00.000Z",
+    results: [{ product: { id: "p1", accountType: "normal" }, snapshot }],
+  });
+
+  assert.equal(run.status, "partial");
+  assert.equal(run.success, 0);
+  assert.equal(run.partial, 1);
+  assert.equal(run.failed, 0);
+  assert.match(run.items[0].message, /3 个 SKU，1 个已验证，2 个缺少当前优惠证据/);
+  assert.match(run.items[0].message, /浏览器取证 37\.4 秒；本地解析 8 毫秒/);
+  assert.deepEqual(snapshotPriceCoverage(snapshot), {
+    applicable: true,
+    totalSkuCount: 3,
+    verifiedSkuCount: 1,
+    unresolvedSkuCount: 2,
+    complete: false,
+  });
+  assert.equal(snapshotHasCompleteVerifiedNormalPrices(snapshot), false);
+});
+
 test("verified-price guard accepts every account type only with normal SKU evidence", () => {
   for (const accountType of ["normal", "gift", "vip88"]) {
-    assert.equal(snapshotHasVerifiedNormalPrice(completePriceSnapshot([verifiedSku({ skuId: "sku-1", normalPrice: 139 }, ["normal"])], { accountType })), true);
+    const complete = completePriceSnapshot([verifiedSku({ skuId: "sku-1", normalPrice: 139 }, ["normal"])], { accountType });
+    assert.equal(snapshotHasVerifiedNormalPrice(complete), true);
+    assert.equal(snapshotHasCompleteVerifiedNormalPrices(complete), true);
     assert.equal(snapshotHasVerifiedNormalPrice({ ...completePriceSnapshot([verifiedSku({ skuId: "sku-partial", normalPrice: 139 }, ["normal"])], { accountType }), resolutionStatus: "partial" }), true);
     assert.equal(snapshotHasVerifiedNormalPrice({ accessMode: "authenticated", accountType, skuPrices: [{ skuId: "sku-1", resolutionStatus: "ambiguous" }] }), false);
     assert.equal(snapshotHasVerifiedNormalPrice({ ...completePriceSnapshot([verifiedSku({ skuId: "sku-1", normalPrice: 139 }, ["normal"])], { accountType }), accessMode: "anonymous" }), false);
@@ -1622,14 +1912,14 @@ test("account capture lock releases the browser after a failed capture", async (
   assert.equal(await withAccountCaptureLock(session, async () => "recovered"), "recovered");
 });
 
-test("different account profiles can capture in parallel", async () => {
+test("different account profiles capture serially on one device", async () => {
   resetTmallPriceCircuitForTests();
   const events = [];
   let releaseFirst;
   let firstStarted;
   const ready = new Promise((resolve) => { firstStarted = resolve; });
-  const firstSession = { id: "protected-a", source: "taobao-browser", browserProfileKey: "protected-a", browserPort: 9231 };
-  const secondSession = { id: "protected-b", source: "taobao-browser", browserProfileKey: "protected-b", browserPort: 9232 };
+  const firstSession = { id: "protected-a", source: "taobao-browser", browserProfileKey: "protected-a", browserPort: 9231, browserEngine: "uc" };
+  const secondSession = { id: "protected-b", source: "taobao-browser", browserProfileKey: "protected-b", browserPort: 9232, browserEngine: "uc" };
   const first = withProtectedBrowserCapture(firstSession, async () => {
     events.push("first-start");
     firstStarted();
@@ -1639,16 +1929,16 @@ test("different account profiles can capture in parallel", async () => {
   await ready;
   const second = withProtectedBrowserCapture(secondSession, async () => { events.push("second-start"); });
   await new Promise((resolve) => setImmediate(resolve));
-  assert.deepEqual(events, ["first-start", "second-start"]);
+  assert.deepEqual(events, ["first-start"]);
   releaseFirst();
   await Promise.all([first, second]);
-  assert.deepEqual(events, ["first-start", "second-start", "first-end"]);
+  assert.deepEqual(events, ["first-start", "first-end", "second-start"]);
   resetTmallPriceCircuitForTests();
 });
 
 test("a stale software price cooldown never blocks a capture", async () => {
   resetTmallPriceCircuitForTests();
-  const session = { id: "manual-retry", source: "taobao-browser", browserProfileKey: "manual-retry", browserPort: 9234 };
+  const session = { id: "manual-retry", source: "taobao-browser", browserProfileKey: "manual-retry", browserPort: 9234, browserEngine: "uc" };
   markTmallPriceGate(session, { now: Date.now(), accountCooldownMs: 60_000 });
   let calls = 0;
   const result = await withProtectedBrowserCapture(session, async () => {
@@ -1660,9 +1950,9 @@ test("a stale software price cooldown never blocks a capture", async () => {
   resetTmallPriceCircuitForTests();
 });
 
-test("a persisted access-restriction marker never blocks a new browser attempt", async () => {
+test("a persisted access-restriction marker blocks a new attempt in the same browser environment", async () => {
   resetTmallPriceCircuitForTests();
-  const session = { id: "restricted-retry", source: "taobao-browser", browserProfileKey: "restricted-retry", browserPort: 9235 };
+  const session = { id: "restricted-retry", source: "taobao-browser", browserProfileKey: "restricted-retry", browserPort: 9235, browserEngine: "uc" };
   markTmallPriceGate(session, {
     now: Date.now(),
     accountCooldownMs: 60_000,
@@ -1670,10 +1960,10 @@ test("a persisted access-restriction marker never blocks a new browser attempt",
     reason: "TAOBAO_ACCESS_RESTRICTED",
   });
   let calls = 0;
-  await withProtectedBrowserCapture(session, async () => {
+  await assert.rejects(withProtectedBrowserCapture(session, async () => {
     calls += 1;
-  });
-  assert.equal(calls, 1);
+  }), /淘宝访问限制保护中/);
+  assert.equal(calls, 0);
   resetTmallPriceCircuitForTests();
 });
 
@@ -1696,7 +1986,7 @@ test("an account access restriction fails only the current capture", async () =>
   });
 
   try {
-    const session = { id: "restricted-monitor", source: "taobao-browser", browserProfileKey: "restricted-monitor", browserPort: 9233 };
+    const session = { id: "restricted-monitor", source: "taobao-browser", browserProfileKey: "restricted-monitor", browserPort: 9233, browserEngine: "uc" };
     await assert.rejects(withProtectedBrowserCapture(session, async () => {
       const error = new Error("淘宝已限制当前账号访问，本次抓取已停止；全局自动监控保持原设置。");
       error.code = "TAOBAO_ACCESS_RESTRICTED";

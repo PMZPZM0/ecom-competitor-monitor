@@ -1,17 +1,16 @@
 import crypto from "node:crypto";
 
-export const PRICE_PARSER_VERSION = "evidence-v1.13";
+export const PRICE_PARSER_VERSION = "evidence-v2.0";
 
 const endpoint = "mtop.taobao.pcdetail.data.adjust";
 const embeddedEndpoint = "tmall-ssr-sku";
-const embeddedPlatformTopUpLabel = /^平台(?:加补|补贴)后(?:价)?$/;
+const embeddedPublicNormalLabel = /^店铺优惠后$/;
 export const PRICE_PROMOTION_INDEX = new Map([
   ["commonItemDiscount", { kind: "public", label: "商品优惠" }],
   ["spsd4plan", { kind: "public", label: "平台活动立减" }],
   ["spsd4cjmj", { kind: "public", label: "超级立减" }],
   ["spsd4price", { kind: "public", label: "平台立减" }],
   ["spsd4autopri", { kind: "public", label: "平台加补" }],
-  ["ssrPlatformTopUp", { kind: "public", label: "平台加补" }],
   ["spsd4bybt", { kind: "billion", label: "百亿补贴" }],
   ["spsd4bybtjb", { kind: "billion", label: "百亿补贴加补" }],
   ["spsd4hjmssjbt", { kind: "seckill", label: "淘宝秒杀补贴" }],
@@ -616,22 +615,17 @@ export function resolveEmbeddedSkuPriceEvidence(sku, options = {}) {
   const accountType = options.accountType || "normal";
   const sourceSkuId = String(sku?.skuId || "");
   const priceTitle = String(sku?.priceTitle || "").replace(/\s+/g, "");
-  if (!embeddedPlatformTopUpLabel.test(priceTitle)) {
+  if (!embeddedPublicNormalLabel.test(priceTitle)) {
     return { matched: false, status: "unavailable", reason: "supported-label-not-observed", evidence: [] };
   }
   if (!itemId || !skuId || sourceSkuId !== skuId) {
     return ambiguous("embedded-sku-mismatch", { expectedSkuId: skuId, responseSkuId: sourceSkuId });
   }
 
-  // "平台加补后" is a public platform price, not an account-exclusive
-  // benefit. An authenticated gift/VIP browser can therefore provide the
-  // same normal-price baseline; account-specific channels are still scoped
-  // by `exposedChannelKinds` when the resolution is applied.
-
   const listCents = yuanToCents(sku?.originalPrice);
   const displayedCents = yuanToCents(sku?.normalPrice ?? sku?.price);
   const normalLayerCents = yuanToCents((sku?.priceLayers || []).find((layer) => (
-    layer?.kind !== "discount" && embeddedPlatformTopUpLabel.test(String(layer?.label || "").replace(/\s+/g, ""))
+    layer?.kind !== "discount" && embeddedPublicNormalLabel.test(String(layer?.label || "").replace(/\s+/g, ""))
   ))?.value);
   const listLayerCents = yuanToCents((sku?.priceLayers || []).find((layer) => (
     layer?.kind === "original" || String(layer?.label || "").replace(/\s+/g, "") === "优惠前"
@@ -639,13 +633,13 @@ export function resolveEmbeddedSkuPriceEvidence(sku, options = {}) {
   if (!listCents || !displayedCents || listCents <= displayedCents) return ambiguous("embedded-price-invalid");
   if (normalLayerCents !== displayedCents || listLayerCents !== listCents) return ambiguous("embedded-price-layer-mismatch");
 
-  const topUpCents = listCents - displayedCents;
-  if (!Number.isSafeInteger(topUpCents) || topUpCents <= 0 || listCents - topUpCents !== displayedCents) {
+  const discountCents = listCents - displayedCents;
+  if (!Number.isSafeInteger(discountCents) || discountCents <= 0 || listCents - discountCents !== displayedCents) {
     return ambiguous("embedded-formula-does-not-close");
   }
 
   const capturedAt = options.capturedAt || new Date().toISOString();
-  const promotion = { code: "ssrPlatformTopUp", amountCents: topUpCents, kind: "public", label: "平台加补" };
+  const promotion = { code: "commonItemDiscount", amountCents: discountCents, kind: "public", label: "店铺优惠" };
   const formula = promotionFormula("标价", listCents, [promotion], "普通价", displayedCents);
   const baseEvidence = {
     itemId,

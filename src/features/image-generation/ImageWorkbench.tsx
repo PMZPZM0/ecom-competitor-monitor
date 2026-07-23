@@ -198,6 +198,9 @@ function promptHelpErrorMessage(error: unknown) {
   if ((error instanceof ApiError && error.status === 524) || /\b524\b|gateway timeout|请求超时|响应超时/i.test(message)) {
     return 'AI 帮写响应超时，原内容已保留。你可以直接生成，或稍后再次点击“AI 帮写”。'
   }
+  if (error instanceof ApiError && [502, 503, 504].includes(error.status)) {
+    return `提示词通道暂时不可用（${error.status}），原内容已保留。请稍后重试；如果持续失败，请到设置中心重新检测文字模型。`
+  }
   return message || 'AI 帮写失败，原内容已保留。你仍可直接生成。'
 }
 
@@ -359,11 +362,12 @@ export function ImageWorkbench({ config, active = true, onOpenModelSettings, onE
   }, [acceptJobs, jobReadGate])
 
   useEffect(() => {
+    if (!active) return
     void (async () => {
       await loadJobs(false)
       await loadLibrary()
     })()
-  }, [loadJobs, loadLibrary])
+  }, [active, loadJobs, loadLibrary])
 
   useEffect(() => {
     const draft: Draft = {
@@ -433,6 +437,7 @@ export function ImageWorkbench({ config, active = true, onOpenModelSettings, onE
   const hasActiveJobs = jobs.some((job) => job.status === 'queued' || job.status === 'running')
 
   useEffect(() => {
+    if (!active) return undefined
     const refresh = () => { if (document.visibilityState === 'visible') void loadJobs(true) }
     const timer = window.setInterval(refresh, hasActiveJobs ? 1800 : 30_000)
     window.addEventListener('focus', refresh)
@@ -442,7 +447,7 @@ export function ImageWorkbench({ config, active = true, onOpenModelSettings, onE
       window.removeEventListener('focus', refresh)
       document.removeEventListener('visibilitychange', refresh)
     }
-  }, [hasActiveJobs, loadJobs])
+  }, [active, hasActiveJobs, loadJobs])
 
   function currentRequest(): ImageGenerationRequest {
     const hasEditSource = Boolean(sourceImage || references.length)
@@ -1065,7 +1070,7 @@ export function ImageWorkbench({ config, active = true, onOpenModelSettings, onE
             </div>
           </div>
 
-          <ImageJobQueue jobs={jobs} loading={queueLoading} error={queueError} feedback={queueFeedback} clearing={queueClearing} busyJobId={queueBusyJobId} onRefresh={() => void loadJobs(false)} onClear={() => void clearJobs()} onRetry={(job) => void retryJob(job)} onCancel={(job) => void cancelJob(job)} onOpenImage={(image) => setSelectedImage(image)} />
+          <ImageJobQueue active={active} jobs={jobs} loading={queueLoading} error={queueError} feedback={queueFeedback} clearing={queueClearing} busyJobId={queueBusyJobId} onRefresh={() => void loadJobs(false)} onClear={() => void clearJobs()} onRetry={(job) => void retryJob(job)} onCancel={(job) => void cancelJob(job)} onOpenImage={(image) => setSelectedImage(image)} />
 
           <div className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-100 px-4 py-2.5">
             <div className="flex gap-1 rounded-md bg-slate-100 p-1" role="tablist" aria-label="图片资产视图"><button type="button" role="tab" aria-selected={libraryView === 'history'} onClick={() => setLibraryView('history')} className={`inline-flex h-8 items-center gap-1.5 rounded px-3 text-xs font-medium ${libraryView === 'history' ? 'bg-white text-slate-950 shadow-sm' : 'text-slate-500'}`}><Clock3 className="h-3.5 w-3.5" />生成历史</button><button type="button" role="tab" aria-selected={libraryView === 'favorites'} onClick={() => setLibraryView('favorites')} className={`inline-flex h-8 items-center gap-1.5 rounded px-3 text-xs font-medium ${libraryView === 'favorites' ? 'bg-white text-slate-950 shadow-sm' : 'text-slate-500'}`}><Heart className="h-3.5 w-3.5" />收藏相册</button></div>

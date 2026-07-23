@@ -345,6 +345,20 @@ export type Snapshot = {
     buyerShowCount?: number
     detailImageCount?: number
     accountCaptureCount?: number
+    observedSkuCount?: number
+    outputSkuCount?: number
+    verifiedPriceSkuCount?: number
+    timingsMs?: {
+      pageCapture?: number
+      promotionCapture?: number
+      browserAcquisition?: number
+      localEvidenceSave?: number
+      localEvidenceRead?: number
+      localEvidenceReload?: number
+      localParse?: number
+      buyerShow?: number
+      total?: number
+    }
     buyerShowEvidenceSourceSaved?: boolean
     buyerShowEvidenceParsedFromDisk?: boolean
   }
@@ -368,6 +382,7 @@ export type AuthSession = {
   accountType?: 'normal' | 'gift' | 'vip88'
   browserProfileKey?: string
   browserPort?: number
+  browserEngine?: BrowserEngineId
   active: boolean
   enabled?: boolean
   healthStatus?: 'healthy' | 'degraded'
@@ -385,7 +400,7 @@ export type AuthSession = {
   tmallPriceFailureCount?: number
   identityOnline?: boolean
   priceUsable?: boolean
-  availabilityStatus?: 'ready' | 'login-expired' | 'price-unavailable' | 'price-unverified'
+  availabilityStatus?: 'ready' | 'login-expired' | 'price-unavailable' | 'price-unverified' | 'access-restricted'
   availabilityReason?: string
   lastCheckedAt?: string | null
   createdAt: string
@@ -411,6 +426,20 @@ export type RunItem = {
   capturedAt: string
 }
 
+export type BrowserEngineId = 'uc' | '360' | 'qq' | 'sogou' | 'edge'
+
+export type BrowserEngineOption = {
+  id: BrowserEngineId
+  name: string
+  available: boolean
+  downloadUrl: string
+}
+
+export type BrowserEngineCatalog = {
+  defaultEngine: BrowserEngineId
+  engines: BrowserEngineOption[]
+}
+
 export type RunRecord = {
   id: string
   source: 'manual-all' | 'manual-batch' | 'manual-product' | 'single-product' | 'scheduled' | 'local-import'
@@ -420,6 +449,7 @@ export type RunRecord = {
   finishedAt: string
   total: number
   success: number
+  partial: number
   failed: number
   message: string
   items?: RunItem[]
@@ -722,9 +752,13 @@ export type ExcelSyncStatus = {
   exists: boolean
   size: number
   modifiedAt: string | null
+  indexPath: string
+  indexExists: boolean
+  indexSize: number
   lastSyncedAt: string | null
   lastError: string
   calculationMs: number | null
+  indexLookupMs: number | null
   workbookMs: number | null
 }
 
@@ -733,6 +767,9 @@ export type ExcelSyncResult = {
   currentRows: number
   historyRows: number
   promotionRows: number
+  indexRows: number
+  indexPath: string
+  indexLookupMs: number
   calculationMs: number
   workbookMs: number
   syncedAt: string

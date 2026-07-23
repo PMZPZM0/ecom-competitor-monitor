@@ -251,7 +251,7 @@ test("model test uses the image model endpoint without exposing its key", async 
   });
 });
 
-test("prompt model test calls the compatible Chat Completions endpoint and accepts real text", async () => {
+test("prompt model test calls the same Responses endpoint used by prompt generation", async () => {
   const config = updateModelConfig({ baseUrl: "https://models.example.com/v1" }, {
     model: "vendor/prompt-model",
     apiKey: "sk-prompt-model-secret",
@@ -262,15 +262,15 @@ test("prompt model test calls the compatible Chat Completions endpoint and accep
     now: () => "2026-07-17T00:00:00.000Z",
     fetchImpl: async (url, init) => {
       request = { url, init, body: JSON.parse(init.body) };
-      return new Response(JSON.stringify({ choices: [{ message: { content: "OK" } }] }), { status: 200 });
+      return new Response(JSON.stringify({ output_text: "OK" }), { status: 200 });
     },
   });
 
-  assert.equal(request.url, "https://models.example.com/v1/chat/completions");
+  assert.equal(request.url, "https://models.example.com/v1/responses");
   assert.equal(request.init.method, "POST");
   assert.equal(request.init.headers.authorization, "Bearer sk-prompt-model-secret");
   assert.equal(request.body.model, "vendor/prompt-model");
-  assert.deepEqual(request.body.messages, [{ role: "user", content: "只回复 OK" }]);
+  assert.deepEqual(request.body.input, [{ role: "user", content: [{ type: "input_text", text: "只回复 OK" }] }]);
   assert.deepEqual(result, {
     ok: true,
     status: "success",
@@ -294,7 +294,7 @@ test("prompt model test retries temporary 503 responses before reporting failure
     fetchImpl: async () => {
       calls += 1;
       if (calls < 3) return new Response("Service temporarily unavailable", { status: 503 });
-      return new Response(JSON.stringify({ choices: [{ message: { content: "OK" } }] }), { status: 200 });
+      return new Response(JSON.stringify({ output_text: "OK" }), { status: 200 });
     },
   });
   assert.equal(result.ok, true);
@@ -307,7 +307,7 @@ test("prompt model test rejects responses without text", async () => {
     model: "prompt-model",
     apiKey: "sk-prompt-invalid-response",
   }, { env });
-  for (const response of [{}, { choices: [] }, { choices: [{ message: { content: "" } }] }]) {
+  for (const response of [{}, { output: [] }, { output_text: "" }]) {
     await assert.rejects(
       testPromptModel(config, {
         env,

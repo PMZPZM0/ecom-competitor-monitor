@@ -5,10 +5,13 @@ import path from "node:path";
 import test from "node:test";
 import ExcelJS from "exceljs";
 import {
+  benchmarkPriceIndex,
   benchmarkFormulaEntries,
   buildExcelSyncDataset,
+  buildPriceIndexRows,
   calculateFormulaEntry,
   excelSyncPath,
+  priceIndexPath,
   syncPriceWorkbook,
 } from "./excelSyncService.js";
 
@@ -83,6 +86,14 @@ test("Excel formula dataset matches promotion codes by SKU and account", async (
   assert.equal(benchmark.verified, 1);
   assert.equal(benchmark.mismatched, 0);
   assert.ok(benchmark.elapsedMs >= 0);
+  const indexRows = buildPriceIndexRows(dataset.current);
+  assert.equal(indexRows.length, 9);
+  assert.equal(indexRows.find((row) => row.channel === "normal").value, 159);
+  assert.equal(indexRows.find((row) => row.channel === "government").status, "unavailable");
+  const indexBenchmark = benchmarkPriceIndex(dataset.current, indexRows, 100);
+  assert.equal(indexBenchmark.lookups, 900);
+  assert.equal(indexBenchmark.hits, 400);
+  assert.ok(indexBenchmark.elapsedMs < 100);
 });
 
 test("formula engine isolates all price channels across normal, gift, and vip88 accounts", () => {
@@ -145,13 +156,24 @@ test("Excel sync writes visible XLOOKUP and SUMIFS formulas atomically", async (
   const result = await syncPriceWorkbook(db);
   assert.equal(result.currentRows, 1);
   assert.equal(result.promotionRows, 3);
+  assert.equal(result.indexRows, 9);
   assert.equal(result.path, excelSyncPath(db));
+  assert.equal(result.indexPath, priceIndexPath(db));
+  assert.ok(result.indexLookupMs < 100);
+
+  const indexDocument = JSON.parse(await fs.readFile(result.indexPath, "utf8"));
+  assert.equal(indexDocument.keyFormat, "itemId|skuId|accountType|channel");
+  assert.equal(indexDocument.rows.length, 9);
+  assert.equal(indexDocument.rows.find((row) => row.channel === "normal").value, 159);
 
   const workbook = new ExcelJS.Workbook();
   await workbook.xlsx.readFile(result.path);
   assert.deepEqual(workbook.worksheets.map((sheet) => sheet.name), [
-    "当前价格", "价格历史", "原始优惠数据", "优惠码规则", "公式计算", "同步说明",
+    "价格索引", "当前价格", "价格历史", "原始优惠数据", "优惠码规则", "公式计算", "同步说明",
   ]);
+  assert.match(workbook.getWorksheet("当前价格").getCell("L2").formula, /^XLOOKUP\(/);
+  assert.equal(workbook.getWorksheet("当前价格").getCell("L2").result, 159);
+  assert.equal(workbook.getWorksheet("价格索引").getCell("I2").numFmt, "¥#,##0.00");
   assert.match(workbook.getWorksheet("原始优惠数据").getCell("I2").formula, /^XLOOKUP\(/);
   assert.match(workbook.getWorksheet("公式计算").getCell("I2").formula, /^SUMIFS\(/);
   assert.equal(workbook.getWorksheet("公式计算").getCell("Q2").result, 159);

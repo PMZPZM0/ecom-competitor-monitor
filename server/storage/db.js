@@ -233,6 +233,7 @@ export async function readDb() {
   delete monitor.captureProtectionByAccount;
   const authSessions = (parsed.authSessions || []).map((session) => {
     const normalized = { ...session };
+    if (normalized.source === "taobao-browser" && !normalized.browserEngine) normalized.browserEngine = "legacy-google";
     delete normalized.cooldownUntil;
     if (normalized.healthStatus === "cooldown") normalized.healthStatus = "degraded";
     normalized.tmallPriceStatus ||= "unknown";
