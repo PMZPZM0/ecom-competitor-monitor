@@ -59,6 +59,71 @@ test("UMP price logs reject a broken baseline instead of treating price3 as a cu
   assert.equal(resolution.reason, "ump-baseline-formula-does-not-close");
 });
 
+test("single-stage UMP verifies only the current normal price after exact baseline closure", () => {
+  const itemId = "1067004183223";
+  const skuId = "6282156907900";
+  const payload = {
+    url: "https://h5api.m.tmall.com/h5/mtop.taobao.pcdetail.data.adjust/1.0/",
+    body: JSON.stringify({ data: {
+      skuCore: { sku2info: { [skuId]: { price: { priceText: "705.88" } } } },
+      componentsVO: {
+        priceVO: { price: { priceText: "705.88", priceTitle: "新品抢购" } },
+        umpPriceLogVO: {
+          xobjectId: itemId,
+          sid: skuId,
+          map: `{${skuId}:{"price1":"705.88","price3":"1068.00","utcDNow":"9_36212"}}`,
+        },
+      },
+    } }),
+  };
+
+  const resolution = resolveSkuPriceEvidence([payload], {
+    itemId,
+    skuId,
+    accountType: "gift",
+    selectedSkuVerified: true,
+  });
+  const sku = applyPriceResolution({ skuId, priceLayers: [] }, resolution);
+
+  assert.equal(resolution.status, "verified");
+  assert.equal(resolution.source, "ump-price-log-single-stage");
+  assert.equal(sku.normalPrice, 705.88);
+  assert.equal(sku.originalPrice, null);
+  assert.equal(sku.giftPrice, null);
+  assert.equal(sku.surprisePrice, null);
+  assert.match(sku.priceCalculation.normal, /当前 SKU 可售价 705\.88/);
+});
+
+test("single-stage UMP rejects unselected SKUs and non-baseline promotions", () => {
+  const itemId = "1067004183223";
+  const skuId = "6282156907900";
+  const payload = {
+    url: "https://h5api.m.tmall.com/h5/mtop.taobao.pcdetail.data.adjust/1.0/",
+    body: JSON.stringify({ data: {
+      skuCore: { sku2info: { [skuId]: { price: { priceText: "705.88" } } } },
+      componentsVO: {
+        priceVO: { price: { priceText: "705.88" } },
+        umpPriceLogVO: {
+          xobjectId: itemId,
+          sid: skuId,
+          map: `{${skuId}:{"price1":"705.88","price3":"1068.00","utcDNow":"9_36212"}}`,
+        },
+      },
+    } }),
+  };
+
+  assert.equal(resolveUmpPriceLogPayload(payload, { itemId, skuId, accountType: "gift" }).reason, "sku-selection-unverified");
+
+  const promotionPayload = structuredClone(payload);
+  promotionPayload.body = promotionPayload.body.replace("9_36212", "9_36212^spsd4plan_100");
+  assert.equal(resolveUmpPriceLogPayload(promotionPayload, {
+    itemId,
+    skuId,
+    accountType: "gift",
+    selectedSkuVerified: true,
+  }).reason, "ump-single-stage-nonbaseline-promotion");
+});
+
 test("red-packet and UMP aliases converge on one gift formula without a false conflict", () => {
   const itemId = "1065142695897";
   const skuId = "6279248802676";

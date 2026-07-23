@@ -375,6 +375,7 @@ export function resolveUmpPriceLogPayload(payload, options = {}) {
 
   const itemId = String(options.itemId || "");
   const skuId = String(options.skuId || "");
+  const accountType = options.accountType || "normal";
   const responseItemId = String(ump.xobjectId || "");
   const responseSkuId = String(ump.sid || "");
   if (!itemId || !skuId || responseItemId !== itemId || responseSkuId !== skuId) {
@@ -387,9 +388,13 @@ export function resolveUmpPriceLogPayload(payload, options = {}) {
   const displayedCents = yuanToCents(priceLog.price2);
   const catalogCents = yuanToCents(priceLog.price3);
   const priceVO = parsed?.data?.componentsVO?.priceVO || {};
-  if (!listCents || !displayedCents || !catalogCents
-    || yuanToCents(priceVO?.price?.priceText) !== listCents
-    || yuanToCents(priceVO?.extraPrice?.priceText) !== displayedCents) {
+  const visibleCents = yuanToCents(priceVO?.price?.priceText);
+  const skuVisibleCents = yuanToCents(parsed?.data?.skuCore?.sku2info?.[skuId]?.price?.priceText);
+  const hasPrice2 = String(priceLog.price2 ?? "").trim().length > 0;
+  const hasExtraPrice = String(priceVO?.extraPrice?.priceText ?? "").trim().length > 0;
+  const hasFinalPriceLayer = hasPrice2 || hasExtraPrice;
+  if (!listCents || !catalogCents || visibleCents !== listCents
+    || (hasFinalPriceLayer && (!hasPrice2 || !hasExtraPrice || !displayedCents || yuanToCents(priceVO?.extraPrice?.priceText) !== displayedCents))) {
     return ambiguous("ump-visible-price-mismatch");
   }
 
@@ -419,6 +424,57 @@ export function resolveUmpPriceLogPayload(payload, options = {}) {
     .reduce((sum, item) => sum + item.amount, 0);
   if (catalogCents - baselineDiscountCents !== listCents) {
     return ambiguous("ump-baseline-formula-does-not-close", { catalogCents, baselineDiscountCents, listCents });
+  }
+
+  if (!hasFinalPriceLayer) {
+    if (!options.selectedSkuVerified) return ambiguous("sku-selection-unverified");
+    if (skuVisibleCents !== listCents) return ambiguous("ump-single-stage-current-price-mismatch");
+    if (promotions.some((item) => PRICE_PROMOTION_INDEX.get(item.promotionName)?.kind !== "ignored")) {
+      return ambiguous("ump-single-stage-nonbaseline-promotion");
+    }
+    const normalFormula = `当前 SKU 可售价 ${(listCents / 100).toFixed(2)} = 普通价 ${(listCents / 100).toFixed(2)}`;
+    const baseEvidence = {
+      itemId,
+      skuId,
+      accountType,
+      endpoint: "tmall-ump-price-log",
+      selectedSkuVerified: true,
+      capturedAt: options.capturedAt || new Date().toISOString(),
+      promotionCodes: promotions.map((item) => item.promotionName),
+    };
+    const evidence = [makeEvidence(baseEvidence, {
+      kind: "normal",
+      valueCents: listCents,
+      source: "api-explicit",
+      sourcePath: `$.data.skuCore.sku2info.${skuId}.price.priceText`,
+      formula: normalFormula,
+    })];
+    return {
+      matched: true,
+      status: "verified",
+      parserVersion: PRICE_PARSER_VERSION,
+      endpoint: "tmall-ump-price-log",
+      source: "ump-price-log-single-stage",
+      itemId,
+      skuId,
+      accountType,
+      channels: {
+        normal: resolvedChannel(listCents, normalFormula, evidence.map((item) => item.id)),
+        billion: unavailableChannel(),
+        seckill: unavailableChannel(),
+        government: unavailableChannel(),
+        surprise: unavailableChannel(),
+        gift: unavailableChannel(),
+        vip88: unavailableChannel(),
+        coin: unavailableChannel(),
+      },
+      evidence,
+      promotions: [],
+      campaignKind: null,
+      normalLabel: "普通价",
+      displayedCents: listCents,
+      evidenceHash: evidenceId(evidence.map(({ id }) => id)),
+    };
   }
 
   const data = encodeURIComponent(JSON.stringify({ itemId, skuId }));
