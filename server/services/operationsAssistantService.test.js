@@ -126,7 +126,7 @@ test("QwenPaw operations sync receives the Settings text model without putting i
 
   assert.deepEqual(plan.args, ["--base-url", "https://operations-model.example/v1", "--model", "operations-text-model"]);
   assert.equal(plan.environment.ECOM_QWENPAW_API_KEY, "operations-key");
-  assert.equal(plan.environment.QWENPAW_WORKING_DIR, "C:\\temp\\ecom-qwenpaw\\operations\\qwenpaw");
+  assert.equal(plan.environment.QWENPAW_WORKING_DIR, path.join("C:/temp/ecom-qwenpaw", "operations", "qwenpaw"));
   assert.equal(plan.environment.ECOM_QWENPAW_CONTEXT_URL, "http://127.0.0.1:4317/api/operations/agent-context");
   assert.equal(plan.environment.ECOM_QWENPAW_OPERATING_PRINCIPLES, "新品先验证转化，再逐步放量。");
   assert.equal(plan.environment.ECOM_QWENPAW_APP_URL, "http://127.0.0.1:4317");
