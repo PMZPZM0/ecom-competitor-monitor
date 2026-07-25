@@ -300,7 +300,7 @@ export function buildPriceCard({ type, product, price, threshold, skuName, trigg
   };
 }
 
-export async function sendFeishuNotification(config, details) {
+async function sendFeishuCard(config, card) {
   const webhookUrl = decrypt(config.webhookUrlEncrypted);
   if (!webhookUrl) throw new Error("请先填写飞书自定义机器人的 Webhook 地址。");
   let parsedUrl;
@@ -312,7 +312,7 @@ export async function sendFeishuNotification(config, details) {
   if (parsedUrl.protocol !== "https:" || !/(^|\.)feishu\.cn$/i.test(parsedUrl.hostname) || !/^\/open-apis\/bot\/v2\/hook\//.test(parsedUrl.pathname)) {
     throw new Error("请填写飞书自定义机器人 Webhook 地址。");
   }
-  const body = { msg_type: "interactive", card: buildPriceCard(details) };
+  const body = { msg_type: "interactive", card };
   const signingSecret = decrypt(config.signingSecretEncrypted);
   if (signingSecret) Object.assign(body, buildSignature(signingSecret));
 
@@ -324,7 +324,52 @@ export async function sendFeishuNotification(config, details) {
   });
   const result = await response.json().catch(() => ({}));
   if (!response.ok || result.code !== 0) throw new Error(result.msg || `飞书发送失败（HTTP ${response.status}）。`);
+  return result;
+}
+
+export async function sendFeishuNotification(config, details) {
+  const result = await sendFeishuCard(config, buildPriceCard(details));
   return { text: notificationText(details), result };
+}
+
+function operationsMoney(value) {
+  return Number.isFinite(value) ? `¥${Number(value).toFixed(2)}` : "--";
+}
+
+function operationsPercent(value) {
+  return Number.isFinite(value) ? `${(Number(value) * 100).toFixed(1)}%` : "--";
+}
+
+export function buildOperationsDailyCard(report) {
+  const totals = report?.totals || {};
+  const analysis = report?.analysis || {};
+  const actions = Array.isArray(analysis.actions) && analysis.actions.length
+    ? analysis.actions
+    : (report?.suggestions || []).slice(0, 5).map((item) => `${item.productName}：${item.action}${item.change ? ` ${item.change > 0 ? "+" : ""}${item.change}%` : ""}，${item.reason}`);
+  return {
+    schema: "2.0",
+    header: {
+      title: { tag: "plain_text", content: "运营经营日报" },
+      subtitle: { tag: "plain_text", content: report?.reportDate || new Date().toISOString().slice(0, 10) },
+      template: report?.freshness?.fresh ? "blue" : "orange",
+    },
+    body: {
+      direction: "vertical",
+      padding: "12px 12px 12px 12px",
+      elements: [
+        { tag: "markdown", content: `**数据状态** ${report?.freshness?.fresh ? "最新数据可用" : "数据已过期，未给出预算调整结论"}\n**消耗** ${operationsMoney(totals.spend)}　**成交** ${operationsMoney(totals.revenue)}　**ROI** ${Number.isFinite(totals.roi) ? Number(totals.roi).toFixed(2) : "--"}\n**费率** ${operationsPercent(totals.feeRate)}` },
+        { tag: "hr" },
+        { tag: "markdown", content: `**今日结论**\n${escapeMarkdown(analysis.summary || "已生成本地运营汇总。")}` },
+        ...(actions.length ? [{ tag: "markdown", content: `**优先行动**\n${actions.slice(0, 5).map((item, index) => `${index + 1}. ${escapeMarkdown(item)}`).join("\n")}` }] : []),
+        { tag: "markdown", content: `数据更新时间：${report?.freshness?.latestAt ? new Date(report.freshness.latestAt).toLocaleString("zh-CN", { hour12: false }) : "未导入"}` },
+      ],
+    },
+  };
+}
+
+export async function sendFeishuOperationsReport(config, report) {
+  const result = await sendFeishuCard(config, buildOperationsDailyCard(report));
+  return { result };
 }
 
 export function createNotificationLog({ productId = "", skuId = "", type, status, message, price = null, threshold = null, source = "" }) {

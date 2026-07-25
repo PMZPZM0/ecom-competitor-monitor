@@ -33,7 +33,72 @@ const PROMPT_RETRYABLE_STATUSES = new Set([502, 503, 504]);
 const FREEFORM_PROMPT_RETRYABLE_STATUSES = new Set([...PROMPT_RETRYABLE_STATUSES, 524]);
 const PROMPT_RETRY_MIN_DELAY_MS = 180;
 const PROMPT_RETRY_JITTER_MS = 220;
-export const QUICK_PROMPT_PIPELINE_VERSION = 2;
+export const QUICK_PROMPT_PIPELINE_VERSION = 4;
+
+const PREMIUM_APPLIANCE_PATTERN = /(家电|厨电|电器|压力锅|电压力锅|电饭煲|饭煲|破壁机|空气炸锅|蒸烤箱|烤箱|洗碗机|洗衣机|冰箱|洗地机|吸尘器|热水器|咖啡机|料理机|电磁炉|微波炉|豆浆机|锅具|厨具|厨房)/i;
+const PREMIUM_ECOMMERCE_PATTERN = /(电商|主图|商品图|产品图|详情图|海报|活动图|banner|旗舰店|质感|高级|电影|商业|参考图|生图|场景图|卖点|中文|文案|排版)/i;
+
+function combinedPromptSurface(input = {}) {
+  const facts = input.productFacts || {};
+  const style = input.style || {};
+  const copy = input.copy || {};
+  return [
+    input.userRequest,
+    facts.productType,
+    facts.appearance,
+    facts.colorsMaterials,
+    ...(Array.isArray(facts.components) ? facts.components : []),
+    facts.logo,
+    ...(Array.isArray(facts.existingText) ? facts.existingText : []),
+    ...(Array.isArray(facts.mustPreserve) ? facts.mustPreserve : []),
+    style.name,
+    style.description,
+    style.lighting,
+    style.composition,
+    style.palette,
+    style.camera,
+    copy.title,
+    copy.subtitle,
+    ...(Array.isArray(copy.sellingPoints) ? copy.sellingPoints : []),
+    copy.price,
+    copy.campaignInfo,
+    ...(Array.isArray(copy.additionalText) ? copy.additionalText : []),
+  ].filter(Boolean).join(" ");
+}
+
+function wantsPremiumApplianceDirection(input = {}) {
+  const surface = typeof input === "string" ? input : combinedPromptSurface(input);
+  return PREMIUM_APPLIANCE_PATTERN.test(surface) && PREMIUM_ECOMMERCE_PATTERN.test(surface);
+}
+
+const PREMIUM_APPLIANCE_FREEFORM_GUIDE = [
+  "当前对象是家电或厨电商品，按高端家电电影级商业主图来写：产品是英雄主体，使用真实材质、电影级棚拍布光、精致环境反射、克制留白和旗舰店广告的阅读动线。",
+  "突出金属、玻璃、塑料、屏幕、按键、边缘高光和接触阴影，画面应是完整广告大片，而不是把参考图简单贴进模板。",
+  "不要使用满屏小标签、廉价促销贴纸、过饱和红黄绿、伪金属大字、杂乱菜品堆砌或低端模板感。",
+].join("");
+
+function explicitCopyInstruction(userRequest) {
+  const copy = extractExplicitPosterCopy(userRequest);
+  if (!copy.hasCopy) {
+    return "用户没有明确提供要出现在画面里的文案。不要擅自添加标题、卖点、价格、活动口号、品牌或任何可读文字；由画面本身完成表达。";
+  }
+  const values = exactCopyEntries(copy).map(([, value]) => value);
+  return `用户明确指定了这些画面文字：${values.map((value) => `“${value}”`).join("、")}。这些文字必须逐字保留，不得改写、删减、补充或替换；仅在画面确实需要文字时要求字形清晰、可读、无乱码。`;
+}
+
+function freeformPromptDirectorInstruction(input, { hasReferenceImages = false } = {}) {
+  const requestedApplianceDirection = wantsPremiumApplianceDirection(input);
+  const referenceDirection = hasReferenceImages && !requestedApplianceDirection
+    ? "先识别参考图中的主体类别。仅当它确认为家电或厨电时，才采用高端家电电影级商业主图方向；其他类目完全按用户需求自行判断风格，不得套用家电审美。"
+    : "";
+  return [
+    "你是顶级商业视觉总监和生图提示词作者。根据用户需求自由发挥，写出你认为最好的、可直接用于生图的一段完整提示词。不要把需求机械改写成普通描述；自行作出镜头、布光、材质、构图、空间层次、色彩和审美判断。",
+    "用户原话和参考图是唯一事实来源。参考图存在时，先判断它是产品身份参考还是风格参考；涉及产品改图时必须保持用户未要求改变的主体、结构、Logo 与已有文字。不得虚构品牌、型号、价格、功能、功效或活动规则。",
+    explicitCopyInstruction(input.userRequest),
+    requestedApplianceDirection ? PREMIUM_APPLIANCE_FREEFORM_GUIDE : referenceDirection,
+    "只输出最终提示词正文，不要标题、前言、Markdown 标记或解释，也不要字段名、方案编号或模板化段落。",
+  ].filter(Boolean).join("");
+}
 
 const CATEGORY_RULES = Object.freeze({
   "white-background": "使用纯净白底，主体完整清晰、边缘自然，保留合理接触阴影；不得增加场景道具、促销贴纸或无关装饰。",
@@ -555,9 +620,17 @@ export async function writeFreeformImagePrompt(modelConfig = {}, input = {}, {
   const images = imageDataUrls(productImages, { label: "参考图" });
   validateImageTotal([images]);
   const resolved = resolveModelConfig(modelConfig, { env });
-  const content = [{ type: "input_text", text: `用户需求：${requestInput.userRequest}` }];
+  const content = [{
+    type: "input_text",
+    text: `用户需求：${requestInput.userRequest}\n画面参数：${JSON.stringify(requestInput.parameters)}`,
+  }];
   if (images.length) content.push(
-    { type: "input_text", text: "用户同时提供了参考图，请结合参考图理解需求。" },
+    {
+      type: "input_text",
+      text: requestInput.creationMode === "product"
+        ? "用户同时提供了产品参考图。除非用户明确要求修改，否则产品身份、结构、比例、颜色、Logo 和已有文字必须以参考图为准。"
+        : "用户同时提供了参考图。请结合它理解主体、风格和用户需求，不得把参考图中的未授权品牌、价格或文字编入新画面。",
+    },
     ...inputImages(images),
   );
   const data = await requestPromptModelApiJson(`${resolved.baseUrl}/responses`, {
@@ -572,7 +645,7 @@ export async function writeFreeformImagePrompt(modelConfig = {}, input = {}, {
         role: "system",
         content: [{
           type: "input_text",
-          text: "根据用户需求自由发挥，写出你认为最好的生图提示词。只输出最终可直接用于生图的提示词正文，不要标题、前言、Markdown 标记或解释。",
+          text: freeformPromptDirectorInstruction(requestInput, { hasReferenceImages: images.length > 0 }),
         }],
       }, { role: "user", content }],
     },
@@ -612,14 +685,22 @@ export async function interpretQuickPrompt(modelConfig = {}, input = {}, {
     : requestInput.creationMode === "free"
       ? "当前为自由生图模式：允许没有产品参考图；无参考图时只能根据用户原话构建画面，不得虚构用户未提供的品牌、型号、价格、活动、功效或准确文字。"
       : "当前未指定创作模式：有参考图时锁定产品事实，无参考图时只根据用户原话自由设计。";
-  const copyRequirement = "文案由你根据用户目标自由策划，不要套用固定口号、固定节日文案、固定配色或固定版式。海报、活动图和详情图在用户没有明确要求无字时，通常应主动提出一组与主题相符、简洁有记忆点的可编辑中文文案；文案的数量、层级、句式和摆放位置由你判断，不必凑齐任何字段。将最终要出现在画面里的每条文案逐条放入 copy 的文本字段，这些字段只是传输容器，不代表固定的标题层级。用户明确提供的文字必须逐字保留。只有用户明确说无字、不要文字、只要底图或交给后期排版时，才使用 reserved。";
+  const premiumDirection = wantsPremiumApplianceDirection(requestInput.userRequest)
+    ? "用户需求明显接近家电/厨电商品视觉：默认采用高端家电电影级商业主图方向，重视产品真实质感、镜头张力、旗舰店审美、中文大字排版和信息区秩序；避开廉价促销贴纸、堆满小标签、过饱和色块、塑料感光影和模板化口号。"
+    : images.length
+      ? "先从参考图判断主体类别。仅当主体确认为家电或厨电时采用高端家电电影级商业主图方向；其他类目完全按用户需求自行判断风格，不得套用家电视觉模板。"
+      : "";
+  const explicitCopy = extractExplicitPosterCopy(requestInput.userRequest);
+  const copyRequirement = explicitCopy.hasCopy
+    ? `用户明确提供了画面文字。copy 只能填写这些用户原文，并逐字保留：${exactCopyEntries(explicitCopy).map(([, value]) => `“${value}”`).join("、")}。不得补充、改写或替换任何文字；字段只是传输容器，不代表固定的标题层级。${premiumDirection}`
+    : `用户没有明确提供要出现在画面里的文案。copy 必须使用 none 且所有文字字段为空；不要自行策划标题、卖点、价格、活动口号或品牌文字，也不要套用固定口号、固定节日文案、固定配色或固定版式。只有用户明确说无字、不要文字、只要底图或交给后期排版时，才使用 reserved。${premiumDirection}`;
   const modelInput = {
     userRequest: requestInput.userRequest,
     parameters: requestInput.parameters,
   };
   const content = [{
     type: "input_text",
-    text: `把用户的一句话需求解释成完整、可执行的电商生图任务。${modeRequirement}${copyRequirement}围绕用户目标自由发挥，优先给出视觉效果最好的方案；不要复用历史模板或空泛的营销套话。用户明确提供的文案必须逐字保留。局部改图和换背景必须给出明确的目标、改动和保留区域。用户原始输入：${JSON.stringify(modelInput)}`,
+    text: `把用户的一句话需求解释成完整、可执行的电商生图任务。${modeRequirement}${copyRequirement}围绕用户目标自由发挥，优先给出视觉效果最好的方案；不要复用历史模板或空泛的营销套话。局部改图和换背景必须给出明确的目标、改动和保留区域。用户原始输入：${JSON.stringify(modelInput)}`,
   }];
   if (images.length) content.push(
     { type: "input_text", text: "以下均为同一产品的参考图，只用于识别和锁定产品身份、结构、颜色、Logo 及原有文字。" },
@@ -637,7 +718,7 @@ export async function interpretQuickPrompt(modelConfig = {}, input = {}, {
         role: "system",
         content: [{
           type: "input_text",
-          text: `你是电商视觉策划与生图需求分析师。用户只说需求，你负责选择最合适的任务类目，并补全产品事实、视觉风格、文字方案和修改边界。${copyRequirement}大胆设计构图、光影、材质、色彩、空间层次和版式，直接给出你认为效果最好的方案。不要输出模板说明、字段解释或后台规则。输出必须符合指定 JSON Schema。`,
+          text: `你是电商视觉策划与生图需求分析师。用户只说需求，你负责选择最合适的任务类目，并补全产品事实、视觉风格和修改边界。${copyRequirement}大胆设计构图、光影、材质、色彩、空间层次和版式，直接给出你认为效果最好的方案；只有主体确认为家电或厨电时，才按电影级旗舰店主视觉处理。不要输出模板说明、字段解释或后台规则。输出必须符合指定 JSON Schema。`,
         }],
       }, { role: "user", content }],
       text: { format: { type: "json_schema", name: "quick_prompt_interpretation", strict: true, schema: quickPromptJsonSchema } },
@@ -645,23 +726,20 @@ export async function interpretQuickPrompt(modelConfig = {}, input = {}, {
   }, { idempotencyKey, random, ...(sleep ? { sleep } : {}) });
   const interpreted = parseModelResult(data, quickPromptResultSchema, "快捷提示词理解模型");
   if (["campaign-poster", "detail-page"].includes(interpreted.category)) {
-    const explicitCopy = extractExplicitPosterCopy(requestInput.userRequest);
     if (explicitlyRequestsNoText(requestInput.userRequest)) {
       interpreted.copy = emptyCopy("reserved");
+    } else if (explicitCopy.hasCopy) {
+      interpreted.copy = {
+        mode: "exact",
+        title: explicitCopy.title,
+        subtitle: explicitCopy.subtitle,
+        sellingPoints: explicitCopy.sellingPoints,
+        price: explicitCopy.price,
+        campaignInfo: explicitCopy.campaignInfo,
+        additionalText: explicitCopy.additionalText,
+      };
     } else {
-      if (interpreted.copy.mode === "reserved") interpreted.copy = emptyCopy("none");
-      if (explicitCopy.hasCopy) {
-        interpreted.copy = {
-          ...interpreted.copy,
-          mode: "exact",
-          title: explicitCopy.title || interpreted.copy.title,
-          subtitle: explicitCopy.subtitle || interpreted.copy.subtitle,
-          sellingPoints: explicitCopy.sellingPoints.length ? explicitCopy.sellingPoints : interpreted.copy.sellingPoints,
-          price: explicitCopy.price || interpreted.copy.price,
-          campaignInfo: explicitCopy.campaignInfo || interpreted.copy.campaignInfo,
-          additionalText: explicitCopy.additionalText.length ? explicitCopy.additionalText : interpreted.copy.additionalText,
-        };
-      }
+      interpreted.copy = emptyCopy("none");
     }
   }
   if (["local-edit", "background-swap"].includes(interpreted.category) && !images.length) {
@@ -729,6 +807,17 @@ function localQuickStyle(userRequest, category) {
     "product-retouch": "产品精修视觉",
     "product-scene": "产品场景视觉",
   };
+  if (wantsPremiumApplianceDirection(userRequest)) {
+    return {
+      name: "高端家电电影级主图",
+      description: `围绕“${summary || "家电商品视觉"}”建立旗舰店级商业主图：产品作为英雄主体，画面有电影广告的空间层次、克制高级的中文排版、明确阅读动线和真实可触摸的材质质感。`,
+      lighting: "电影级棚拍主光、柔和轮廓光、可控高光和精细环境反射，突出金属、玻璃、塑料、屏幕与按键质感。",
+      composition: "英雄产品占据视觉中心，中文大字形成第一阅读焦点，次级信息区克制排列；保留高级留白，避免拥挤贴纸式促销。",
+      palette: "以高级中性色、深浅对比和少量品牌强调色建立质感；避免廉价红黄绿堆叠和过饱和渐变。",
+      camera: "广告大片式低机位或三分之二视角，适度景深，主体边缘清晰，前中后景有层次。",
+      forbidden: ["廉价促销贴纸", "满屏小标签", "塑料感光影", "杂乱菜品堆砌", "伪金属大字", "低端模板感"],
+    };
+  }
   return {
     name: labels[category] || "开放式创意方向",
     description: `围绕“${summary || "用户提出的主题"}”自由选择最能服务目标的视觉语言。先识别画面真正的主体和受众，再决定叙事、构图、空间层次与信息密度；不预设节日配色、固定版式或套话。`,
@@ -981,6 +1070,13 @@ function visibleCreativeText(value) {
 
 function creativeCorePrompts(input) {
   const summary = visibleCreativeText(input.userRequest).slice(0, 320) || "本次创作主题";
+  if (wantsPremiumApplianceDirection(input)) {
+    return {
+      safe: `围绕“${summary}”完成一张高端家电电影级商业主图。产品以英雄主体呈现，采用真实影棚布光、清晰轮廓、可信接触阴影和克制留白；中文信息保持少量、大字、清晰、好读，整体像旗舰店广告而不是普通促销模板。`,
+      commercial: `以“${summary}”为核心，打造旗舰店级高端家电广告大片：低机位或三分之二产品视角、电影级主光与轮廓光、金属/玻璃/塑料材质的细腻反射、富有层次的前中后景；中文标题与信息区形成高级阅读动线，少量强信息即可建立购买理由。`,
+      creative: `把“${summary}”发展成更有审美记忆点的高端家电 KV：可以使用暗场奢华棚拍、建筑感光影、蒸汽/食材/厨房空间的克制叙事或杂志广告式留白，让产品质感和中文排版共同成为主视觉，避开廉价贴纸、拥挤标签和普通电商模板。`,
+    };
+  }
   return {
     safe: `围绕“${summary}”完成一套清晰、可执行的视觉方案。优先让主体、用途和情绪一眼可懂，使用真实可观察的材质、光线和空间关系，保持画面克制、完整、易于落地。`,
     commercial: `以“${summary}”为核心，设计一套有商业质感和记忆点的视觉方案。通过有方向的布光、材质细节、视觉重心、留白与阅读节奏提升传播效果；色彩和版式由主题决定，不套用现成活动模板。`,
@@ -1063,7 +1159,7 @@ export async function generatePromptSet(modelConfig = {}, input = {}, {
   const resolved = resolveModelConfig(modelConfig, { env });
   const content = [{
     type: "input_text",
-    text: `基于以下已确认输入分别生成稳妥执行、商业增强、创意方案三套核心画面描述。每套 prompt 不得超过 ${corePromptLimit} 个字符，每套 negativePrompt 不得超过 ${MODEL_NEGATIVE_PROMPT_LIMIT} 个字符。产品事实和修改边界由服务端另行锁定；当 copy.mode 为 exact 时，文案原文也由服务端锁定，核心描述负责把文案自然融入最合适的视觉层级。当 copy.mode 不是 exact 而用户需求属于海报、活动图或详情图时，请在核心描述中自由策划真正要呈现的文字及其版式，不要让画面变成无字底图，除非用户明确要求无字。核心描述只负责真正影响画面效果的构图、主体关系、光影、色彩、空间层次、氛围、材质和版式；不要复述后台规则，不要使用固定节日口号或固定分区模板。负面提示词不得否定正向要求。只输出指定 JSON。\n${JSON.stringify(requestInput)}`,
+    text: `基于以下已确认输入分别生成稳妥执行、商业增强、创意方案三套核心画面描述。每套 prompt 不得超过 ${corePromptLimit} 个字符，每套 negativePrompt 不得超过 ${MODEL_NEGATIVE_PROMPT_LIMIT} 个字符。产品事实和修改边界由服务端另行锁定；当 copy.mode 为 exact 时，文案原文也由服务端锁定，核心描述负责把文案自然融入最合适的视觉层级。当 copy.mode 不是 exact 时，不得擅自添加标题、卖点、价格、活动口号、品牌或其他可读文字。核心描述只负责真正影响画面效果的构图、主体关系、光影、色彩、空间层次、氛围、材质和版式；不要复述后台规则，不要使用固定节日口号或固定分区模板。${wantsPremiumApplianceDirection(requestInput) ? "当前主题接近高端家电/厨电商品视觉，三套方案都要显著提升为电影级旗舰店主图：产品质感真实、光影有方向、信息区克制有序，避开廉价促销贴纸和低端模板感。" : ""}负面提示词不得否定正向要求。只输出指定 JSON。\n${JSON.stringify(requestInput)}`,
   }];
   if (productImageData.length) content.push(
     { type: "input_text", text: "以下是产品参考图：只用于保持产品身份、结构、颜色、Logo 和原有文字。" },
@@ -1085,7 +1181,7 @@ export async function generatePromptSet(modelConfig = {}, input = {}, {
         role: "system",
         content: [{
           type: "input_text",
-          text: "你是电商视觉提示词导演。只生成三套真正有差异、可直接执行的创意方案，不复述后台规则，不套用固定海报骨架、固定节日配色或固定营销套话。safe 注重清晰、稳定和可落地；commercial 注重材质、布光、视觉焦点和传播效率；creative 可以大胆探索叙事、隐喻、视角、空间关系和版式，但不能牺牲主体辨识度、文字可读性或事实准确性。需要文字时，写出与你当前主题真正相关的文字，不要为了填字段生成空泛口号。创意不能改动产品事实，也不能编造价格、品牌、功能、功效或活动规则。输出必须符合指定 JSON Schema。",
+          text: "你是电商视觉提示词导演。只生成三套真正有差异、可直接执行的创意方案，不复述后台规则，不套用固定海报骨架、固定节日配色或固定营销套话。safe 注重清晰、稳定和可落地；commercial 注重材质、布光、视觉焦点和传播效率；creative 可以大胆探索电影感叙事、隐喻、视角、空间关系、留白和版式，但不能牺牲主体辨识度、文字可读性或事实准确性。仅当产品事实或用户需求明确属于家电/厨电时，才采用旗舰店电影级质感：真实材质反射、产品英雄视角、广告级光影、克制留白和清晰信息动线；其他类目按用户主题自由确定风格。没有用户明确文案时，不得自行创建画面文字。创意不能改动产品事实，也不能编造价格、品牌、功能、功效或活动规则。输出必须符合指定 JSON Schema。",
         }],
       }, { role: "user", content }],
       text: { format: { type: "json_schema", name: "prompt_set", strict: true, schema: promptSetJsonSchema } },

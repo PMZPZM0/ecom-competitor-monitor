@@ -440,6 +440,101 @@ export type BrowserEngineCatalog = {
   engines: BrowserEngineOption[]
 }
 
+export type OperationsReportType = 'promotion' | 'market' | 'audience' | 'competitor'
+
+export type OperationsReport = {
+  id: string
+  type: OperationsReportType
+  storeName: string
+  reportDate: string
+  sourceName: string
+  fileName: string
+  kind: 'xlsx' | 'csv' | 'json' | 'screenshot'
+  columns: string[]
+  rows: Array<Record<string, unknown>>
+  screenshotPath: string
+  screenshotMimeType: string
+  importedAt: string
+}
+
+export type OperationsTarget = {
+  targetRoi: number
+  maxFeeRate: number
+  dailyBudgetCap: number
+}
+
+export type OperationsSuggestion = {
+  id: string
+  productKey: string
+  productName: string
+  productStage: 'new' | 'mature' | 'unknown'
+  action: '加预算' | '降预算' | '暂停观察' | '保持'
+  change: number
+  reason: string
+  target: OperationsTarget
+  spend: number
+  revenue: number
+  roi: number | null
+  feeRate: number | null
+  orders: number
+  feedback: { id: string, suggestionId: string, status: 'adopted' | 'skipped' | 'outcome', note: string, createdAt: string } | null
+}
+
+export type OperationsMetric = {
+  spend: number
+  revenue: number
+  orders: number
+  clicks: number
+  impressions: number
+  feeRate: number | null
+  roi: number | null
+  conversionRate: number | null
+}
+
+export type OperationsGroup = OperationsMetric & {
+  name: string
+  count: number
+  key?: string
+  productStage?: 'new' | 'mature' | 'unknown'
+  audienceSize?: number | null
+}
+
+export type OperationsAnalysis = {
+  id: string
+  source: string
+  mode: 'rule' | 'ai'
+  summary: string
+  insights: string[]
+  actions: string[]
+  createdAt: string
+}
+
+export type OperationsChatMessage = {
+  id: string
+  role: 'user' | 'assistant'
+  content: string
+  createdAt: string
+}
+
+export type OperationsWorkspace = {
+  reports: OperationsReport[]
+  profile: {
+    principles: string
+    dailyReport: { enabled: boolean, time: string, lastRunAt: string | null, lastSentAt: string | null, lastError: string }
+    targets: Record<string, OperationsTarget>
+  }
+  freshness: { latestAt: string | null, fresh: boolean }
+  totals: OperationsMetric
+  products: OperationsGroup[]
+  stores: OperationsGroup[]
+  categories: OperationsGroup[]
+  audiences: OperationsGroup[]
+  suggestions: OperationsSuggestion[]
+  analyses: OperationsAnalysis[]
+  chat: OperationsChatMessage[]
+  qwenPaw: { installed: boolean, version: string, message: string, skillReady: boolean, signature?: string }
+}
+
 export type RunRecord = {
   id: string
   source: 'manual-all' | 'manual-batch' | 'manual-product' | 'single-product' | 'scheduled' | 'local-import'

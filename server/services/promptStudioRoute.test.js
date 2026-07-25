@@ -11,6 +11,7 @@ process.env.MODEL_STABLE_API_KEY = "sk-prompt-route-test";
 process.env.MODEL_CONFIG_ENCRYPTION_KEY = "prompt-route-encryption-test";
 
 const { startServer, stopServer } = await import("../index.js");
+const { QUICK_PROMPT_PIPELINE_VERSION } = await import("./promptStudioService.js");
 
 const productFacts = {
   productType: "智能压力锅",
@@ -506,7 +507,7 @@ test("prompt studio routes persist profiles, presets, generated variants, and hi
     const migratedCacheDb = JSON.parse(await fs.readFile(dbPath, "utf8"));
     const migratedEntries = migratedCacheDb.promptStudio.quickRequests.filter((entry) => entry.id === quickProductNoHistoryInput.clientRequestId);
     assert.equal(migratedEntries.length, 1);
-    assert.equal(migratedEntries[0].pipelineVersion, 2);
+    assert.equal(migratedEntries[0].pipelineVersion, QUICK_PROMPT_PIPELINE_VERSION);
     assert.deepEqual(migratedEntries[0].response, persistedQuickRetry.body);
 
     const cachedQuickRetryForm = new FormData();

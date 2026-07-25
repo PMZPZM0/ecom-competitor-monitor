@@ -240,8 +240,43 @@ test("freeform prompt help returns the real model prompt without templates or hi
   assert.equal(request.body.input[1].content.filter((item) => item.type === "input_image").length, 1);
   assert.match(request.body.input[0].content[0].text, /根据用户需求自由发挥/);
   assert.match(request.body.input[0].content[0].text, /不要标题、前言、Markdown 标记或解释/);
-  assert.doesNotMatch(request.body.input[0].content[0].text, /稳妥执行|商业增强|创意方案|产品事实|类目硬约束|主标题|副标题|卖点/);
-  assert.equal(request.body.input[1].content[0].text, "用户需求：做一张有高级感的国庆海报");
+  assert.doesNotMatch(request.body.input[0].content[0].text, /稳妥执行|商业增强|创意方案|产品事实|类目硬约束/);
+  assert.match(request.body.input[1].content[0].text, /^用户需求：做一张有高级感的国庆海报/);
+  assert.match(request.body.input[1].content[0].text, /画面参数/);
+});
+
+test("freeform prompt help preserves only explicit copy and scopes appliance direction to appliances", async () => {
+  let nonApplianceRequest;
+  await writeFreeformImagePrompt(modelConfig(), {
+    userRequest: "为一双跑鞋制作运动海报",
+    creationMode: "free",
+  }, {
+    env,
+    fetchImpl: async (_url, init) => {
+      nonApplianceRequest = JSON.parse(init.body);
+      return new Response(JSON.stringify({ output_text: "跑鞋在城市跑道上形成有速度感的广告画面" }), { status: 200 });
+    },
+  });
+  const nonApplianceInstruction = nonApplianceRequest.input[0].content[0].text;
+  assert.match(nonApplianceInstruction, /不要擅自添加标题、卖点、价格/);
+  assert.doesNotMatch(nonApplianceInstruction, /当前对象是家电或厨电商品/);
+
+  let applianceRequest;
+  await writeFreeformImagePrompt(modelConfig(), {
+    userRequest: "为智能压力锅制作旗舰店主图，主标题写“鲜香到家”",
+    creationMode: "product",
+  }, {
+    env,
+    productImages: [{ mimetype: "image/png", buffer: Buffer.from("pressure-cooker") }],
+    fetchImpl: async (_url, init) => {
+      applianceRequest = JSON.parse(init.body);
+      return new Response(JSON.stringify({ output_text: "智能压力锅的旗舰店广告主图" }), { status: 200 });
+    },
+  });
+  const applianceInstruction = applianceRequest.input[0].content[0].text;
+  assert.match(applianceInstruction, /当前对象是家电或厨电商品/);
+  assert.match(applianceInstruction, /“鲜香到家”/);
+  assert.match(applianceInstruction, /不得改写、删减、补充或替换/);
 });
 
 test("freeform prompt help fails visibly instead of substituting a local template", async () => {
@@ -482,7 +517,7 @@ test("model interpretation does not replace an empty poster plan with a fixed co
   assert.doesNotMatch(request.input[0].content[0].text, /必须给出可编辑的中文主标题、副标题和 1 至 3 个短卖点/);
 });
 
-test("model poster copy stays creative without server templates or keyword filtering", async () => {
+test("model poster copy is ignored unless the user explicitly provides it", async () => {
   async function interpretCopy(userRequest, copy) {
     const modelResult = quickPromptResult("campaign-poster");
     modelResult.copy = copy;
@@ -493,7 +528,7 @@ test("model poster copy stays creative without server templates or keyword filte
     });
   }
 
-  const freeCopy = {
+  const inventedCopy = {
     mode: "exact",
     title: "围炉见新",
     subtitle: "让年味自然发生",
@@ -502,8 +537,16 @@ test("model poster copy stays creative without server templates or keyword filte
     campaignInfo: "",
     additionalText: [],
   };
-  const creative = await interpretCopy("做一张智能压力锅年货节海报", freeCopy);
-  assert.deepEqual(creative.input.copy, freeCopy);
+  const unrequested = await interpretCopy("做一张智能压力锅年货节海报", inventedCopy);
+  assert.deepEqual(unrequested.input.copy, {
+    mode: "none",
+    title: "",
+    subtitle: "",
+    sellingPoints: [],
+    price: "",
+    campaignInfo: "",
+    additionalText: [],
+  });
 
   const explicit = await interpretCopy("做一张海报，主标题写“夏日上新”", {
     mode: "exact",
@@ -515,8 +558,8 @@ test("model poster copy stays creative without server templates or keyword filte
     additionalText: [],
   });
   assert.equal(explicit.input.copy.title, "夏日上新");
-  assert.equal(explicit.input.copy.subtitle, "轻盈色彩，点亮日常");
-  assert.deepEqual(explicit.input.copy.sellingPoints, ["质感呈现"]);
+  assert.equal(explicit.input.copy.subtitle, "");
+  assert.deepEqual(explicit.input.copy.sellingPoints, []);
 });
 
 test("visible prompt plans contain creative direction and editable copy but no backend control language", async () => {
@@ -543,7 +586,7 @@ test("visible prompt plans contain creative direction and editable copy but no b
   }
 });
 
-test("model poster copy keeps non-factual atmosphere language", async () => {
+test("model poster copy cannot add a one-line slogan the user did not provide", async () => {
   const modelResult = quickPromptResult("campaign-poster");
   modelResult.copy = {
     mode: "exact",
@@ -562,11 +605,18 @@ test("model poster copy keeps non-factual atmosphere language", async () => {
     productImages: [{ mimetype: "image/png", buffer: Buffer.from("product") }],
     fetchImpl: async () => jsonResponse(modelResult),
   });
-  assert.deepEqual(interpreted.input.copy, modelResult.copy);
-  assert.doesNotMatch(interpreted.warnings.join(" "), /已改用中性文案/);
+  assert.deepEqual(interpreted.input.copy, {
+    mode: "none",
+    title: "",
+    subtitle: "",
+    sellingPoints: [],
+    price: "",
+    campaignInfo: "",
+    additionalText: [],
+  });
 });
 
-test("model poster copy may use a natural one-line structure without server augmentation", async () => {
+test("model poster copy is not retained merely because it is short", async () => {
   const modelResult = quickPromptResult("campaign-poster");
   modelResult.copy = {
     mode: "exact",
@@ -585,8 +635,15 @@ test("model poster copy may use a natural one-line structure without server augm
     productImages: [{ mimetype: "image/png", buffer: Buffer.from("product") }],
     fetchImpl: async () => jsonResponse(modelResult),
   });
-  assert.deepEqual(interpreted.input.copy, modelResult.copy);
-  assert.doesNotMatch(JSON.stringify(interpreted.input.copy), /新春焕新季|新年好物|品质好物|焕新日常/);
+  assert.deepEqual(interpreted.input.copy, {
+    mode: "none",
+    title: "",
+    subtitle: "",
+    sellingPoints: [],
+    price: "",
+    campaignInfo: "",
+    additionalText: [],
+  });
 });
 
 test("prompt generation retries one idempotent transient failure with jitter but does not retry 524", async () => {

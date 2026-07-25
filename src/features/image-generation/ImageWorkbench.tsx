@@ -8,7 +8,6 @@ import {
   Images,
   LoaderCircle,
   RefreshCw,
-  Settings2,
   ShieldCheck,
   Sparkles,
   Trash2,
@@ -971,8 +970,8 @@ export function ImageWorkbench({ config, active = true, onOpenModelSettings, onE
       <div className="creative-workspace grid min-w-0 grid-cols-1 items-start gap-5 xl:grid-cols-[minmax(370px,420px)_minmax(0,1fr)]">
         <form ref={formRef} onSubmit={generate} className="creative-surface min-w-0 rounded-md border border-white/70 shadow-sm xl:sticky xl:top-20 xl:flex xl:max-h-[calc(100vh-6rem)] xl:flex-col">
           <div className="flex shrink-0 flex-wrap items-center justify-between gap-3 border-b border-slate-200 px-4 py-3.5">
-            <div className="flex min-w-0 items-center gap-3"><span className="inline-flex h-9 w-9 shrink-0 items-center justify-center rounded-md bg-blue-600 text-white"><Sparkles className="h-4 w-4" /></span><div className="min-w-0"><h2 className="text-sm font-semibold text-slate-950">AI 创作台</h2><div className="mt-0.5 flex min-w-0 items-center gap-2 text-xs text-slate-500"><span>提示词可直接写或让 AI 帮写</span><button type="button" onClick={onOpenModelSettings} className={`max-w-48 truncate rounded px-1.5 py-0.5 font-medium ${connectionTone}`} title={`${channelLabel} · ${config.imageModel || '未选择生图模型'} · ${connectionLabel}`}>{channelLabel} · {config.imageModel || connectionLabel}</button></div></div></div>
-            <div className="flex items-center gap-1.5"><Button type="button" variant="ghost" size="sm" onClick={onOpenProfessionalPrompt}>专业提示词</Button><Button type="button" variant="secondary" size="sm" onClick={onOpenModelSettings} title="去设置中心配置 AI 模型"><Settings2 className="h-4 w-4" />设置中心</Button></div>
+            <div className="flex min-w-0 items-center gap-3"><span className="inline-flex h-9 w-9 shrink-0 items-center justify-center rounded-md bg-blue-600 text-white"><Sparkles className="h-4 w-4" /></span><div className="min-w-0"><h2 className="text-sm font-semibold text-slate-950">AI 创作台</h2><div className={`mt-0.5 truncate text-xs font-medium ${connectionTone}`}>{channelLabel} · {config.imageModel || connectionLabel}</div></div></div>
+            <div className="flex items-center gap-1.5"><Button type="button" variant="ghost" size="sm" onClick={onOpenProfessionalPrompt}>专业提示词</Button></div>
           </div>
 
           <div className="scrollbar-thin min-h-0 space-y-5 p-4 xl:flex-1 xl:overflow-y-auto">

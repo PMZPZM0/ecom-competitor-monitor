@@ -1,4 +1,4 @@
-import type { Analysis, AuthSession, BrowserEngineCatalog, BrowserEngineId, CaptureQueueStatus, ExcelSyncResult, ExcelSyncStatus, ImageGenerationJob, ImageGenerationRequest, ImageGenerationResponse, ImageLibraryItem, LarkCliStatus, LocalEvidenceStatus, LocalImportCommitResult, LocalImportPreview, ModelCatalog, ModelCatalogRequest, ModelConfigPatch, ModelConfigTestPayload, ModelConfigTestResult, MonitorChannel, Overview, PhotoshopOpenResult, PhotoshopSyncResult, Product, RawDataCaptureResult, RunRecord, Snapshot, UpdateInfo } from '../types/domain'
+import type { Analysis, AuthSession, BrowserEngineCatalog, BrowserEngineId, CaptureQueueStatus, ExcelSyncResult, ExcelSyncStatus, ImageGenerationJob, ImageGenerationRequest, ImageGenerationResponse, ImageLibraryItem, LarkCliStatus, LocalEvidenceStatus, LocalImportCommitResult, LocalImportPreview, ModelCatalog, ModelCatalogRequest, ModelConfigPatch, ModelConfigTestPayload, ModelConfigTestResult, MonitorChannel, OperationsAnalysis, OperationsChatMessage, OperationsReportType, OperationsTarget, OperationsWorkspace, Overview, PhotoshopOpenResult, PhotoshopSyncResult, Product, RawDataCaptureResult, RunRecord, Snapshot, UpdateInfo } from '../types/domain'
 import type { ProductRecognitionResult, PromptEnhancementResult, PromptGenerationRequest, PromptGenerationResult, PromptHistoryItem, PromptProductProfile, PromptReferenceFiles, PromptStudioWorkspace, PromptStylePreset, QuickPromptGenerationResult, QuickPromptRequest } from '../features/prompt-studio/types'
 
 const baseUrl = import.meta.env.VITE_API_BASE || ''
@@ -43,6 +43,29 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
 
 export const api = {
   overview: () => request<Overview>('/api/overview'),
+  operations: () => request<OperationsWorkspace>('/api/operations'),
+  uploadOperationsReport: (file: File, payload: { type: OperationsReportType, storeName?: string, reportDate?: string, sourceName?: string }) => {
+    const body = new FormData()
+    body.append('file', file, file.name)
+    body.append('type', payload.type)
+    body.append('storeName', payload.storeName || '')
+    body.append('reportDate', payload.reportDate || '')
+    body.append('sourceName', payload.sourceName || '')
+    return request<{ workspace: OperationsWorkspace }>('/api/operations/reports', { method: 'POST', body })
+  },
+  deleteOperationsReport: (id: string) => request<void>(`/api/operations/reports/${encodeURIComponent(id)}`, { method: 'DELETE' }),
+  updateOperationsProfile: (payload: { principles?: string, dailyReport?: { enabled?: boolean, time?: string } }) =>
+    request<OperationsWorkspace>('/api/operations/profile', { method: 'PATCH', body: JSON.stringify(payload) }),
+  updateOperationsTarget: (key: string, target: OperationsTarget) =>
+    request<OperationsWorkspace>(`/api/operations/targets/${encodeURIComponent(key)}`, { method: 'PUT', body: JSON.stringify(target) }),
+  updateOperationsSuggestionFeedback: (id: string, payload: { status: 'adopted' | 'skipped' | 'outcome', note?: string }) =>
+    request<OperationsWorkspace>(`/api/operations/suggestions/${encodeURIComponent(id)}/feedback`, { method: 'POST', body: JSON.stringify(payload) }),
+  analyzeOperations: () => request<{ analysis: OperationsAnalysis, workspace: OperationsWorkspace, sent: boolean, sendError: string }>('/api/operations/analyze', { method: 'POST' }),
+  chatOperations: (message: string) => request<{ message: OperationsChatMessage, workspace: OperationsWorkspace }>('/api/operations/chat', { method: 'POST', body: JSON.stringify({ message }) }),
+  runOperationsDailyReport: () => request<{ analysis: OperationsAnalysis, workspace: OperationsWorkspace, sent: boolean, sendError: string }>('/api/operations/daily-report/run', { method: 'POST' }),
+  qwenPawStatus: () => request<OperationsWorkspace['qwenPaw']>('/api/operations/qwenpaw'),
+  prepareQwenPawOperations: () => request<OperationsWorkspace['qwenPaw'] & { directory: string, skillPath: string }>('/api/operations/qwenpaw/prepare', { method: 'POST' }),
+  qwenPawConsole: () => request<{ consoleUrl: string, agentId: string, model: string }>('/api/operations/qwenpaw/console'),
   captureQueue: () => request<CaptureQueueStatus>('/api/capture-queue'),
   clearCaptureQueue: () => request<{ removed: number }>('/api/capture-queue/completed', { method: 'DELETE' }),
   clearFailedCaptureQueue: () => request<{ removed: number }>('/api/capture-queue/failed', { method: 'DELETE' }),
@@ -201,4 +224,5 @@ export const api = {
   },
   deleteAuthSession: (id: string) => request<void>(`/api/auth/sessions/${id}`, { method: 'DELETE' }),
   clearSnapshots: () => request<void>('/api/snapshots', { method: 'DELETE' }),
+  clearRunLogs: () => request<{ removed: number }>('/api/runs', { method: 'DELETE' }),
 }

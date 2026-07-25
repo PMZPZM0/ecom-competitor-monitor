@@ -1,4 +1,4 @@
-import { Activity, CheckCircle2, Clock, RotateCw, XCircle } from 'lucide-react'
+import { Activity, CheckCircle2, Clock, LoaderCircle, RotateCw, Trash2, XCircle } from 'lucide-react'
 import { Badge } from '../../components/ui/badge'
 import { Button } from '../../components/ui/button'
 import { Card, CardContent, CardHeader, CardTitle } from '../../components/ui/card'
@@ -25,17 +25,23 @@ const accountLabels = { normal: '普通账号', gift: '礼金账号', vip88: '88
 type Props = {
   runs: RunRecord[]
   busy?: boolean
+  clearing?: boolean
   onRetryFailed?: (run: RunRecord) => Promise<void>
+  onClear?: () => Promise<void>
 }
 
-export function RunLog({ runs, busy = false, onRetryFailed }: Props) {
+export function RunLog({ runs, busy = false, clearing = false, onRetryFailed, onClear }: Props) {
   return (
     <Card>
-      <CardHeader>
+      <CardHeader className="flex flex-row items-center justify-between gap-3">
         <CardTitle className="flex items-center gap-2">
           <Activity className="h-4 w-4 text-emerald-600" />
           运行日志
         </CardTitle>
+        {onClear && <Button type="button" variant="secondary" size="sm" disabled={clearing || runs.length === 0} onClick={() => void onClear()} title="只清空运行日志，不影响商品和价格数据">
+          {clearing ? <LoaderCircle className="h-4 w-4 animate-spin" /> : <Trash2 className="h-4 w-4" />}
+          {clearing ? '清空中' : '清空日志'}
+        </Button>}
       </CardHeader>
       <CardContent className="max-h-[320px] space-y-3 overflow-auto">
         {runs.map((run) => {

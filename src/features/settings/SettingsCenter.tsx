@@ -17,7 +17,7 @@ import {
 import { Button } from '../../components/ui/button'
 import type { UpdateInfo } from '../../types/domain'
 
-export type SettingsSection = 'accounts' | 'feishu' | 'models' | 'appearance' | 'updates'
+export type SettingsSection = 'accounts' | 'feishu' | 'appearance' | 'models' | 'updates'
 
 export type SettingsCenterProps = {
   open: boolean
@@ -26,8 +26,8 @@ export type SettingsCenterProps = {
   onClose: () => void
   accountContent: ReactNode
   feishuContent: ReactNode
-  modelContent: ReactNode
   appearanceContent: ReactNode
+  modelContent: ReactNode
   currentVersion: string
   updateInfo: UpdateInfo | null
   updateChecking: boolean
@@ -46,8 +46,8 @@ type SectionOption = {
 const sections: SectionOption[] = [
   { id: 'accounts', label: '账号授权', description: '淘宝账号与登录状态', icon: UserRound },
   { id: 'feishu', label: '飞书联动', description: '文档同步与价格提醒', icon: BellRing },
-  { id: 'models', label: 'AI 模型', description: '提示词与生图通道', icon: WandSparkles },
   { id: 'appearance', label: '外观', description: '应用壁纸与显示风格', icon: ImageIcon },
+  { id: 'models', label: 'AI 模型', description: '创作、运营分析与生图通道', icon: WandSparkles },
   { id: 'updates', label: '软件更新', description: '版本检查与安装包', icon: CloudDownload },
 ]
 
@@ -145,8 +145,8 @@ export function SettingsCenter({
   onClose,
   accountContent,
   feishuContent,
-  modelContent,
   appearanceContent,
+  modelContent,
   currentVersion,
   updateInfo,
   updateChecking,
@@ -229,8 +229,8 @@ export function SettingsCenter({
   function renderContent() {
     if (section === 'accounts') return accountContent
     if (section === 'feishu') return feishuContent
-    if (section === 'models') return modelContent
     if (section === 'appearance') return appearanceContent
+    if (section === 'models') return modelContent
     return (
       <UpdateSettings
         currentVersion={currentVersion}
@@ -270,7 +270,7 @@ export function SettingsCenter({
             <span className="inline-flex h-9 w-9 shrink-0 items-center justify-center rounded-md bg-blue-600 text-white"><Settings className="h-4 w-4" /></span>
             <div className="min-w-0">
               <h2 id={titleId} className="text-base font-semibold text-slate-950 sm:text-lg">设置中心</h2>
-              <p className="mt-0.5 truncate text-xs text-slate-500 sm:text-sm">账号、联动服务、AI 模型和版本维护集中在这里。</p>
+              <p className="mt-0.5 truncate text-xs text-slate-500 sm:text-sm">账号、AI 模型、联动服务、外观与版本维护集中在这里。</p>
             </div>
           </div>
           <button

@@ -68,6 +68,15 @@ test("database migration preserves user data and marks legacy snapshots", () => 
   assert.deepEqual(migration.data.pendingAuthScans, []);
   assert.deepEqual(migration.data.alertStates, {});
   assert.deepEqual(migration.data.notificationOutbox, []);
+  assert.deepEqual(migration.data.operations, {
+    reports: [],
+    targets: {},
+    feedback: [],
+    chat: [],
+    principles: "",
+    dailyReport: { enabled: false, time: "09:30", lastRunAt: null, lastSentAt: null, lastError: "" },
+    analyses: [],
+  });
   assert.deepEqual(migration.data.priceEngine, { mode: "shadow", shadowRoundsCompleted: 0, requiredShadowRounds: 10 });
   assert.deepEqual(migration.data.monitor.scheduleWindows, ["08:00", "11:00", "14:00", "17:00", "20:00", "23:00"]);
   assert.deepEqual(migration.data.products[0].skuMonitorRules, {});
@@ -147,7 +156,7 @@ test("database migration preserves only an absolute local evidence directory", (
   });
 });
 
-test("schema v8 adds durable queue and monitoring defaults without replacing existing values", () => {
+test("schema v9 adds durable queue, monitoring, and operations defaults without replacing existing values", () => {
   const captureJobs = [{ id: "job-1", status: "queued" }];
   const alertStates = { "p1:s1:lowest": { state: "below", lastPrice: 99.99 } };
   const migration = migrateDbDocument({

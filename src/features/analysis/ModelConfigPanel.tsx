@@ -459,18 +459,19 @@ export function ModelConfigPanel({ config, onSave, onDiscover, onTest, onClose, 
   const promptTestState = testStateFor('prompt')
   const imageTestState = testStateFor('image')
   const currentTestState = testTarget === 'prompt' ? promptTestState : imageTestState
-  const creationTestStates = [promptTestState, imageTestState]
-  const currentTestStatus = creationMode
-    ? creationTestStates.some((state) => state?.status === 'failed')
+  const dualTestMode = creationMode || purpose === 'all'
+  const dualTestStates = [promptTestState, imageTestState]
+  const currentTestStatus = dualTestMode
+    ? dualTestStates.some((state) => state?.status === 'failed')
       ? 'failed'
-      : creationTestStates.every((state) => state?.status === 'success')
+      : dualTestStates.every((state) => state?.status === 'success')
         ? 'success'
-        : creationTestStates.some((state) => state?.status === 'unverified')
+        : dualTestStates.some((state) => state?.status === 'unverified')
           ? 'unverified'
           : null
     : currentTestState?.status || null
-  const lastTestedAt = creationMode
-    ? creationTestStates.map((state) => state?.testedAt).filter((value): value is string => Boolean(value)).sort().at(-1) || null
+  const lastTestedAt = dualTestMode
+    ? dualTestStates.map((state) => state?.testedAt).filter((value): value is string => Boolean(value)).sort().at(-1) || null
     : currentTestState?.testedAt || null
   const keySourceLabel = apiKey.trim()
     ? '待保存'
@@ -511,7 +512,7 @@ export function ModelConfigPanel({ config, onSave, onDiscover, onTest, onClose, 
           <div className="mt-2 flex flex-wrap items-center gap-2 text-xs text-slate-500">
             <span className={`inline-flex items-center gap-1.5 rounded-md px-2 py-1 font-medium ${currentTestStatus === 'success' ? 'bg-emerald-50 text-emerald-700' : currentTestStatus === 'failed' ? 'bg-red-50 text-red-700' : currentTestStatus === 'unverified' ? 'bg-amber-50 text-amber-700' : hasEffectiveKey ? 'bg-blue-50 text-blue-700' : 'bg-amber-50 text-amber-700'}`}>
               <span className="h-1.5 w-1.5 rounded-full bg-current" />
-              {channelLabel} · {creationMode
+              {channelLabel} · {dualTestMode
                 ? currentTestStatus === 'success' ? '提示词与生图均已验证' : currentTestStatus === 'failed' ? '连接异常' : hasEffectiveKey ? '已配置，待分别验证' : '尚未连接'
                 : currentTestStatus === 'success' ? (testTarget === 'prompt' ? '提示词连接已验证' : '基础连接已验证') : currentTestStatus === 'failed' ? '上次验证失败' : currentTestStatus === 'unverified' ? '待实际验证' : hasEffectiveKey ? '已配置，尚未验证' : '尚未连接'}
             </span>
@@ -551,7 +552,7 @@ export function ModelConfigPanel({ config, onSave, onDiscover, onTest, onClose, 
                         {selected && (
                           <div className="grid gap-2 border-t border-blue-100 bg-white/80 p-3">
                             <ModelPicker key={`${channel}-image-fixed`} label="生图模型" value={imageModel} options={imageModelOptions} placeholder={DEFAULT_IMAGE_MODEL} onChange={(value) => updateCurrentModels({ imageModel: value })} disabled={saving || Boolean(testingTarget) || clearing} compact />
-                            <ModelPicker key={`${channel}-prompt-fixed`} label="提示词模型" value={model} options={promptModelOptions} placeholder={DEFAULT_PROMPT_MODEL} onChange={(value) => updateCurrentModels({ model: value })} disabled={saving || Boolean(testingTarget) || clearing} compact />
+                            <ModelPicker key={`${channel}-prompt-fixed`} label="提示词 / 运营助手模型" value={model} options={promptModelOptions} placeholder={DEFAULT_PROMPT_MODEL} onChange={(value) => updateCurrentModels({ model: value })} disabled={saving || Boolean(testingTarget) || clearing} compact />
                             {onDiscover && (
                               <div className="mt-1 border-t border-slate-100 pt-2">
                                 <div className="flex items-center justify-between gap-2 text-[11px] text-slate-500">
@@ -593,7 +594,7 @@ export function ModelConfigPanel({ config, onSave, onDiscover, onTest, onClose, 
                       </label>
                       <div className="grid min-w-0 gap-3 sm:grid-cols-2">
                         <ModelPicker key={`${channel}-image-custom`} label="图片模型" value={imageModel} options={imageModelOptions} placeholder={DEFAULT_IMAGE_MODEL} onChange={(value) => updateCurrentModels({ imageModel: value })} disabled={saving || Boolean(testingTarget) || clearing} />
-                        <ModelPicker key={`${channel}-prompt-custom`} label="提示词/分析模型" value={model} options={promptModelOptions} placeholder={DEFAULT_PROMPT_MODEL} onChange={(value) => updateCurrentModels({ model: value })} disabled={saving || Boolean(testingTarget) || clearing} />
+                        <ModelPicker key={`${channel}-prompt-custom`} label="提示词 / 运营助手模型" value={model} options={promptModelOptions} placeholder={DEFAULT_PROMPT_MODEL} onChange={(value) => updateCurrentModels({ model: value })} disabled={saving || Boolean(testingTarget) || clearing} />
                       </div>
                       {onDiscover && (
                         <div className="flex flex-wrap items-center justify-between gap-2 border-t border-slate-200 pt-3 text-xs text-slate-500">
@@ -626,8 +627,15 @@ export function ModelConfigPanel({ config, onSave, onDiscover, onTest, onClose, 
 
               <div className={`grid min-w-0 gap-3 ${purpose === 'prompt' ? '' : 'sm:grid-cols-2'}`}>
                 {purpose !== 'prompt' && <ModelPicker key={`${channel}-image`} label="图片模型" value={imageModel} options={imageModelOptions} placeholder={DEFAULT_IMAGE_MODEL} onChange={(value) => updateCurrentModels({ imageModel: value })} disabled={saving || Boolean(testingTarget) || clearing} helpText="AI 生图使用，独立于提示词模型。" />}
-                <ModelPicker key={`${channel}-prompt`} label="提示词/分析模型" value={model} options={promptModelOptions} placeholder={DEFAULT_PROMPT_MODEL} onChange={(value) => updateCurrentModels({ model: value })} disabled={saving || Boolean(testingTarget) || clearing} helpText="AI 提示词和 AI 数据分析使用。" />
+                <ModelPicker key={`${channel}-prompt`} label="提示词 / 运营助手模型" value={model} options={promptModelOptions} placeholder={DEFAULT_PROMPT_MODEL} onChange={(value) => updateCurrentModels({ model: value })} disabled={saving || Boolean(testingTarget) || clearing} helpText="AI 提示词、运营助手分析与 Agent 对话共用此模型。" />
               </div>
+              {onDiscover && (
+                <div className="flex flex-wrap items-center justify-between gap-2 border-t border-slate-200 pt-3 text-xs text-slate-500">
+                  <span>{catalogLoading === channel ? '正在读取可用模型…' : currentCatalog ? `已读取 ${currentCatalog.promptModels.length} 个文字模型、${currentCatalog.imageModels.length} 个图片模型` : catalogErrors[channel] || '从当前通道读取真实可用模型'}</span>
+                  <Button type="button" variant="secondary" size="sm" onClick={() => void discoverModels(channel)} disabled={catalogLoading === channel || saving || Boolean(testingTarget)}><RefreshCw className={`h-3.5 w-3.5 ${catalogLoading === channel ? 'animate-spin motion-reduce:animate-none' : ''}`} />刷新模型</Button>
+                  {catalogErrors[channel] && <span className="w-full text-amber-700">查询失败不会覆盖已保存模型，仍可手动填写。</span>}
+                </div>
+              )}
             </>
           )}
 
@@ -671,12 +679,12 @@ export function ModelConfigPanel({ config, onSave, onDiscover, onTest, onClose, 
               )}
               {currentChannelDirty && <span className="text-xs font-medium text-amber-700" role="status">当前通道有未保存修改，保存后才能切换通道。</span>}
             </div>
-            <div className={`grid gap-2 ${creationMode && onTest ? 'grid-cols-1 sm:grid-cols-3' : 'grid-cols-2 sm:flex sm:items-center sm:justify-end'}`}>
-              {onTest && creationMode ? (
+            <div className={`grid gap-2 ${dualTestMode && onTest ? 'grid-cols-1 sm:grid-cols-3' : 'grid-cols-2 sm:flex sm:items-center sm:justify-end'}`}>
+              {onTest && dualTestMode ? (
                 <>
-                  <Button type="button" variant="secondary" onClick={() => void testConnection('prompt')} disabled={saving || Boolean(testingTarget) || clearing} title="发送一条极短文本请求验证提示词模型，不会生成图片" className="w-full sm:w-auto">
+                  <Button type="button" variant="secondary" onClick={() => void testConnection('prompt')} disabled={saving || Boolean(testingTarget) || clearing} title="发送一条极短文字请求，验证文字模型、接口和密钥" className="w-full sm:w-auto">
                     {testingTarget === 'prompt' ? <LoaderCircle className="h-4 w-4 animate-spin motion-reduce:animate-none" /> : <PlugZap className="h-4 w-4" />}
-                    {testingTarget === 'prompt' ? '测试中' : '测试提示词'}
+                    {testingTarget === 'prompt' ? '文字测试中' : '测试文字'}
                   </Button>
                   <Button type="button" variant="secondary" onClick={() => void testConnection('image')} disabled={saving || Boolean(testingTarget) || clearing} title="验证当前通道、Key 和图片模型，不会生成图片" className="w-full sm:w-auto">
                     {testingTarget === 'image' ? <LoaderCircle className="h-4 w-4 animate-spin motion-reduce:animate-none" /> : <PlugZap className="h-4 w-4" />}
@@ -695,7 +703,7 @@ export function ModelConfigPanel({ config, onSave, onDiscover, onTest, onClose, 
               </Button>
             </div>
           </div>
-          {onTest && creationMode && <p className="-mt-2 text-right text-xs leading-5 text-slate-400">两项测试互相独立；只有提示词和生图都通过，才表示 AI 创作模型完整可用。</p>}
+          {onTest && dualTestMode && <p className="-mt-2 text-right text-xs leading-5 text-slate-400">文字与生图测试互相独立；均通过后，才表示当前通道完整可用。</p>}
           {onTest && !creationMode && testTarget === 'prompt' && <p className="-mt-2 text-right text-xs text-slate-400">提示词连接测试会发送一条极短文本请求，不会生成图片。</p>}
         </form>
       </CardContent>

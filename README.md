@@ -1,8 +1,6 @@
 # 电商竞品监控
 
-一款本地运行的淘宝/天猫竞品监控应用，可选择桌面 APP 或浏览器网页启动，支持商品与 SKU 采集、分账号价格核验、定时监控、素材/买家秀下载和飞书提醒。Windows、macOS Intel 与 macOS Apple Silicon 均提供安装包。
-
-> “AI 分析”当前仅保留菜单入口并标注“功能开发中”，不作为正式功能使用。
+一款本地运行的淘宝/天猫竞品监控与运营辅助应用，可选择桌面 APP 或浏览器网页启动，支持商品与 SKU 采集、分账号价格核验、定时监控、素材/买家秀下载、飞书提醒、AI 创作和运营数据分析。Windows、macOS Intel 与 macOS Apple Silicon 均提供安装包。
 
 ## 下载与说明
 
@@ -55,6 +53,7 @@
 - 分类管理：按店铺与型号归档，支持搜索、筛选、排序、批量抓取、批量下载和批量删除。
 - 飞书联动：内置官方 `@larksuite/cli`，支持扫码授权、主账号视角价格文档同步和群机器人低价提醒；机器人仅在首次跌破监控价、继续创下新低、或恢复后再次跌破时提醒，发送失败进入持久出站队列重试。
 - 运行反馈：抓取、监控、飞书同步和下载任务均显示进行中、完成或失败原因。
+- 运营 Agent：基于 [QwenPaw](https://github.com/agentscope-ai/QwenPaw) 的本地流式会话，连接本应用提供的运营数据与受控工具，可分析商品、店铺、类目、人群和推广报表，并结合每位运营维护的“运营思路”给出有依据的建议。首次使用会按需安装本地运行时，模型请求只使用用户自行配置的接口。
 - AI 创作：提示词与生图合并为一个主入口。商品生图需上传 1～3 张产品参考图，自由生图可不传参考图；用户只写一句需求，AI 会在后台整理提示词并自动加入可恢复的生图队列，支持一次生成 1/2/4 张、1K 标准与 2K/4K 本机增强输出。
 - 图片工作流：生成结果自动进入历史与收藏相册，支持下载、删除、参数复用、基于此图继续创作、非破坏式框选/点选批注和 Photoshop 往返编辑；需要逐项控制时可从 AI 创作进入“专业提示词”，同步回来后由用户确认再提交。
 - 模型配置：提供“稳定通道 / 高速通道”和高级设置中的自定义 OpenAI 兼容接口。每位同事在自己的本机安装中配置自己的 Key，各通道独立加密保存；默认使用 `gpt-image-2` 与 `gpt-5.5`，自定义通道可另填模型，并可分别测试提示词与生图连接。
@@ -102,6 +101,7 @@ server/
     larkCliService.js      # 飞书扫码授权与文档同步
     modelConfigService.js  # 模型地址、密钥与连接测试
     imageGenerationService.js # GPT Image 兼容生图请求
+    operationsAssistantService.js # QwenPaw 运营 Agent 本地运行时与业务适配
     updateService.js       # GitHub Release 与加速下载
   storage/                 # 本地数据读写
 src/
@@ -133,4 +133,4 @@ docs/                      # 使用说明和脱敏截图
 
 ## 开源许可
 
-本项目采用 [MIT License](LICENSE)。
+本项目采用 [MIT License](LICENSE)。运营 Agent 参考并按需集成 [agentscope-ai/QwenPaw](https://github.com/agentscope-ai/QwenPaw)，QwenPaw 由 The QwenPaw Authors 以 [Apache License 2.0](https://github.com/agentscope-ai/QwenPaw/blob/main/LICENSE) 发布；本项目与 QwenPaw 上游项目相互独立，详细归属见[第三方开源声明](THIRD_PARTY_NOTICES.md)。

@@ -16,7 +16,6 @@ import {
   ShieldCheck,
   SlidersHorizontal,
   Sparkles,
-  Settings2,
   Trash2,
   WandSparkles,
 } from 'lucide-react'
@@ -926,12 +925,9 @@ export function PromptWorkbench({
                 <span className="flex justify-between text-xs font-normal text-slate-400"><span>Ctrl/⌘ + Enter 生成</span><span>{quickUserRequest.length}/4000</span></span>
               </label>
 
-              <div className="grid gap-3 border-t border-slate-100 pt-4 sm:grid-cols-[minmax(0,1fr)_auto] sm:items-center">
-                <button type="button" onClick={onOpenModelSettings} className={`order-2 flex min-w-0 items-center gap-3 rounded-md border px-3 py-2.5 text-left transition sm:order-1 ${promptModelConfigured ? 'border-slate-200 hover:border-blue-200 hover:bg-blue-50/40' : 'border-amber-200 bg-amber-50 hover:bg-amber-100/70'}`}>
-                  <span className={`inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-md ${promptModelConfigured ? 'bg-blue-50 text-blue-700' : 'bg-white text-amber-700'}`}><Settings2 className="h-4 w-4" /></span>
-                  <span className="min-w-0 flex-1"><span className="block truncate text-sm font-medium text-slate-800">{channelLabel} · {config.model || '未选择模型'}</span><span className={`mt-0.5 block text-xs ${promptTestStatus === 'failed' || !promptModelConfigured ? 'text-amber-700' : 'text-slate-500'}`}>{promptModelStatus} · 去设置中心</span></span>
-                </button>
-                <Button type="button" onClick={() => void generateQuickPrompt()} disabled={quickGenerating || !quickUserRequest.trim()} className="order-1 h-12 min-w-44 px-5 text-sm shadow-sm sm:order-2">
+              <div className="flex flex-wrap items-center justify-between gap-3 border-t border-slate-100 pt-4">
+                <div className={`text-xs ${promptTestStatus === 'failed' || !promptModelConfigured ? 'text-amber-700' : 'text-slate-500'}`}>{channelLabel} · {config.model || '未选择模型'} · {promptModelStatus}</div>
+                <Button type="button" onClick={() => void generateQuickPrompt()} disabled={quickGenerating || !quickUserRequest.trim()} className="h-12 min-w-44 px-5 text-sm shadow-sm">
                   {quickGenerating ? <LoaderCircle className="h-4 w-4 animate-spin motion-reduce:animate-none" /> : <WandSparkles className="h-4 w-4" />}
                   {quickGenerating ? '正在整理提示词…' : '帮我写提示词'}
                 </Button>
@@ -1018,7 +1014,6 @@ export function PromptWorkbench({
       <div className="flex items-center justify-between gap-3 rounded-md border border-blue-100 bg-blue-50 px-4 py-3">
         <div><p className="text-sm font-semibold text-blue-950">{presentation === 'professional' ? '专业提示词' : '高级模式'}</p>{presentation !== 'professional' && <p className="mt-0.5 text-xs text-blue-700">用于需要逐项控制产品事实、风格、文案和修改边界的任务。</p>}</div>
         <div className="flex shrink-0 items-center gap-2">
-          <Button type="button" variant="secondary" onClick={onOpenModelSettings} className="h-9 shrink-0 px-2 sm:px-4" aria-label="去设置中心配置模型" title="去设置中心配置模型"><Settings2 className="h-4 w-4" /><span className="hidden sm:inline">设置中心</span></Button>
           {presentation === 'professional'
             ? <Button type="button" variant="secondary" onClick={onExitProfessional} className="h-9 shrink-0 px-2 sm:px-4" aria-label="返回 AI 创作" title="返回 AI 创作"><ArrowLeft className="h-4 w-4" /><span className="hidden sm:inline">返回 AI 创作</span></Button>
             : <Button type="button" variant="secondary" onClick={() => setMode('simple')} className="h-9 shrink-0 px-2 sm:px-4" aria-label="返回简单模式" title="返回简单模式"><ArrowLeft className="h-4 w-4" /><span className="hidden sm:inline">返回简单模式</span></Button>}

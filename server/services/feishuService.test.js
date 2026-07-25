@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { accountPriceContext, buildPriceCard, effectivePriceForSku, publicFeishuConfig, updateFeishuConfig } from "./feishuService.js";
+import { accountPriceContext, buildOperationsDailyCard, buildPriceCard, effectivePriceForSku, publicFeishuConfig, updateFeishuConfig } from "./feishuService.js";
 
 function verifiedSku(sku, channels) {
   return {
@@ -19,6 +19,20 @@ test("Feishu config removes legacy reminder cooldown fields", () => {
   assert.equal("cooldownMinutes" in updated, false);
   assert.equal("cooldownEnabled" in publicFeishuConfig(updated), false);
   assert.equal("cooldownMinutes" in publicFeishuConfig(updated), false);
+});
+
+test("operations daily card preserves local metrics and actionable evidence", () => {
+  const card = buildOperationsDailyCard({
+    reportDate: "2026-07-23",
+    freshness: { fresh: true, latestAt: "2026-07-23T08:00:00.000Z" },
+    totals: { spend: 120, revenue: 480, roi: 4, feeRate: 0.25 },
+    analysis: { summary: "成熟款 ROI 达标，优先加预算。", actions: ["成熟款：加预算 15%，ROI 4.00 高于目标。"] },
+  });
+  const serialized = JSON.stringify(card);
+  assert.match(serialized, /运营经营日报/);
+  assert.match(serialized, /¥120\.00/);
+  assert.match(serialized, /ROI\*\* 4\.00/);
+  assert.match(serialized, /成熟款：加预算 15%/);
 });
 
 test("buildPriceCard renders every SKU and highlights triggered SKUs", () => {

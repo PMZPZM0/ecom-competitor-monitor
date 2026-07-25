@@ -2,7 +2,7 @@
   "name": "tmall-competitor-monitor",
   "productName": "电商竞品监控",
   "private": true,
-  "version": "1.0.25",
+  "version": "1.0.26",
   "type": "module",
   "main": "electron/main.mjs",
   "scripts": {
@@ -15,7 +15,7 @@
     "dev:launcher": "concurrently \"npm:dev:web\" \"wait-on http://127.0.0.1:5173 && electron electron/main.mjs --dev --choose-launch-mode --reset-launch-mode\"",
     "build": "tsc -b && vite build",
     "lint": "oxlint",
-    "test": "node --test vite.config.test.mjs electron/*.test.mjs server/services/*.test.js server/storage/*.test.js server/utils/*.test.js src/features/products/productDisplayUtils.test.mjs",
+    "test": "node --test vite.config.test.mjs electron/*.test.mjs server/scripts/*.test.js server/services/*.test.js server/storage/*.test.js server/utils/*.test.js src/features/products/productDisplayUtils.test.mjs",
     "test:electron": "node --test electron/*.test.mjs",
     "preview": "vite preview",
     "screenshots:docs": "node scripts/capture-doc-screenshots.mjs",

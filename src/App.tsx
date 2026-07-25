@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { BookOpen, CircleAlert, CircleCheck, Database, Image as ImageIcon, LoaderCircle, PackageSearch, Search, Settings, Type, WandSparkles, X } from 'lucide-react'
+import { BarChart3, BookOpen, CircleAlert, CircleCheck, Database, Image as ImageIcon, LoaderCircle, MessageSquare, PackageSearch, Search, Settings, Type, WandSparkles, X } from 'lucide-react'
 import { api } from './lib/api'
 import { Button } from './components/ui/button'
 import { LocalImportDialog } from './features/products/LocalImportDialog'
@@ -15,13 +15,17 @@ import { ImageWorkbench, type ImageWorkbenchDraftTransfer } from './features/ima
 import { PromptWorkbench } from './features/prompt-studio/PromptWorkbench'
 import { SettingsCenter, type SettingsSection } from './features/settings/SettingsCenter'
 import { AppearanceSettings } from './features/settings/AppearanceSettings'
+import { OperationsAssistant } from './features/operations/OperationsAssistant'
+import { OperationsAgentChat } from './features/operations/OperationsAgentChat'
 import { loadCustomWallpaper } from './features/settings/customWallpaperStore'
 import { APP_WALLPAPER_STORAGE_KEY, CUSTOM_APP_WALLPAPER_ID, DEFAULT_APP_WALLPAPER_ID, resolveAppWallpaper, type AppWallpaperId } from './features/settings/wallpapers'
 import type { PromptHistoryItem, PromptProductProfile, PromptStylePreset, PromptSyncPayload } from './features/prompt-studio/types'
-import type { AuthSession, LocalImportCommitResult, ModelConfigPatch, ModelConfigTestPayload, ModelConfigTestResult, MonitorChannel, Overview, Product, ProductCaptureOptions, RunRecord, UpdateInfo } from './types/domain'
+import type { AuthSession, LocalImportCommitResult, ModelConfigPatch, ModelConfigTestPayload, ModelConfigTestResult, MonitorChannel, OperationsAnalysis, OperationsReportType, OperationsTarget, OperationsWorkspace, Overview, Product, ProductCaptureOptions, RunRecord, UpdateInfo } from './types/domain'
 
 const guidePage = { id: 'guide', label: '使用说明书', icon: BookOpen, title: '使用说明书', subtitle: '第一次使用请从这里开始，按顺序完成账号授权、商品抓取和自动监控。' } as const
 const primaryNavItems = [
+  { id: 'operations-agent', label: 'Agent 对话', icon: MessageSquare, title: 'Agent 对话', subtitle: '基于已导入的运营数据，获取可核对的经营分析与建议。' },
+  { id: 'operations', label: '运营数据', icon: BarChart3, title: '运营数据', subtitle: '导入经营数据，查看费率、单品与人群表现，并生成推广建议。' },
   { id: 'monitoring', label: '商品监控', icon: PackageSearch, title: '商品监控', subtitle: '添加、筛选和核对商品，并在任务中心管理监控计划与抓取进度。' },
   { id: 'image-workbench', label: 'AI 创作', icon: WandSparkles, title: 'AI 创作', subtitle: '输入需求，可先让 AI 帮写并修改确认，再提交到生图队列。' },
   { id: 'records', label: '数据记录', icon: Database, title: '数据记录', subtitle: '查看运行日志、价格历史、本地证据并重试失败商品。' },
@@ -32,6 +36,10 @@ type PageId = (typeof pageItems)[number]['id']
 type FontSize = 'small' | 'standard' | 'large'
 type AccountType = 'normal' | 'gift' | 'vip88'
 type AiCreationView = 'compose' | 'professional'
+
+function isOperationsPage(page: PageId) {
+  return page === 'operations' || page === 'operations-agent'
+}
 const UPDATE_NOTIFIED_VERSION_KEY = 'ecommerce-monitor-update-notified-version'
 const ACTIVE_PAGE_KEY = 'tmall-monitor-active-page'
 const AI_CREATION_VIEW_KEY = 'ecommerce-monitor-ai-creation-view'
@@ -63,6 +71,7 @@ function requireOnlineCapture(product: Product) {
 
 function App() {
   const [overview, setOverview] = useState<Overview | null>(null)
+  const [operations, setOperations] = useState<OperationsWorkspace | null>(null)
   const [activePage, setActivePage] = useState<PageId>(() => {
     const saved = window.localStorage.getItem(ACTIVE_PAGE_KEY)
     if (saved === 'prompt-studio') return 'image-workbench'
@@ -75,6 +84,7 @@ function App() {
     return window.localStorage.getItem(AI_CREATION_VIEW_KEY) === 'professional' ? 'professional' : 'compose'
   })
   const [busy, setBusy] = useState(false)
+  const [clearingRunLogs, setClearingRunLogs] = useState(false)
   const [busyProductId, setBusyProductId] = useState('')
   const [monitorToggleBusy, setMonitorToggleBusy] = useState(false)
   const [error, setError] = useState('')
@@ -93,6 +103,7 @@ function App() {
   const [localImportTarget, setLocalImportTarget] = useState<Product | null>(null)
   const [incomingImageDraft, setIncomingImageDraft] = useState<ImageWorkbenchDraftTransfer | null>(null)
   const [professionalPromptMounted, setProfessionalPromptMounted] = useState(aiCreationView === 'professional')
+  const [operationsMounted, setOperationsMounted] = useState(isOperationsPage(activePage))
   const updateCheckActive = useRef(false)
   const activePageRef = useRef<PageId>(activePage)
   const customWallpaperUrlRef = useRef('')
@@ -105,7 +116,9 @@ function App() {
   }, [])
 
   const refresh = useCallback(async () => {
-    setOverview(await api.overview())
+    const [nextOverview, nextOperations] = await Promise.all([api.overview(), api.operations()])
+    setOverview(nextOverview)
+    setOperations(nextOperations)
   }, [])
 
   useEffect(() => {
@@ -142,6 +155,10 @@ function App() {
     window.localStorage.setItem(AI_CREATION_VIEW_KEY, aiCreationView)
     if (aiCreationView === 'professional') setProfessionalPromptMounted(true)
   }, [aiCreationView])
+
+  useEffect(() => {
+    if (isOperationsPage(activePage)) setOperationsMounted(true)
+  }, [activePage])
 
   useEffect(() => {
     document.documentElement.dataset.fontSize = fontSize
@@ -461,12 +478,39 @@ function App() {
     await refresh()
   }
 
+  async function clearRunLogs() {
+    if (!window.confirm('确定清空全部运行日志？这不会删除商品、价格历史、本地证据或监控设置。')) return
+    setClearingRunLogs(true)
+    setError('')
+    setNotice('')
+    try {
+      const result = await api.clearRunLogs()
+      setNotice(result.removed ? `已清空 ${result.removed} 条运行日志。` : '运行日志已经是空的。')
+      await refresh()
+    } catch (err) {
+      setError(err instanceof Error ? err.message : '清空运行日志失败')
+    } finally {
+      setClearingRunLogs(false)
+    }
+  }
+
   async function saveModelConfig(payload: ModelConfigPatch) {
     setError('')
     setNotice('')
     await api.updateModelConfig(payload)
-    setNotice('模型配置已保存，生图与分析会分别使用对应模型。')
     await refresh()
+    if (operations?.qwenPaw.installed) {
+      try {
+        const runtime = await api.prepareQwenPawOperations()
+        setOperations((current) => current ? { ...current, qwenPaw: runtime } : current)
+        setNotice('模型配置已保存，运营 Agent 已自动更新并会重新连接。')
+        return
+      } catch (reason) {
+        setNotice(`模型配置已保存；运营 Agent 会在下次打开时更新。${reason instanceof Error ? ` ${reason.message}` : ''}`)
+        return
+      }
+    }
+    setNotice('模型配置已保存，AI 创作、运营助手分析和 Agent 对话会统一使用当前配置。')
   }
 
   function localImportCompleted(result: LocalImportCommitResult) {
@@ -525,12 +569,77 @@ function App() {
     }
   }
 
+  async function uploadOperationsReport(file: File, payload: { type: OperationsReportType, storeName?: string, reportDate?: string, sourceName?: string }) {
+    setError('')
+    setNotice('正在导入运营数据...')
+    const result = await api.uploadOperationsReport(file, payload)
+    setOperations(result.workspace)
+    setNotice('运营数据已导入并完成本地指标计算。')
+  }
+
+  async function deleteOperationsReport(id: string) {
+    setError('')
+    await api.deleteOperationsReport(id)
+    setOperations(await api.operations())
+    setNotice('运营数据已删除。')
+  }
+
+  async function updateOperationsProfile(payload: { principles?: string, dailyReport?: { enabled?: boolean, time?: string } }) {
+    setError('')
+    const next = await api.updateOperationsProfile(payload)
+    setOperations(next)
+    if (payload.principles !== undefined && next.qwenPaw.installed) {
+      try {
+        const runtime = await api.prepareQwenPawOperations()
+        setOperations((current) => current ? { ...current, qwenPaw: runtime } : current)
+        setNotice('运营思路已保存，Agent 会重新连接并按最新思路执行。')
+        return
+      } catch (reason) {
+        setNotice(`运营思路已保存；Agent 会在下次打开时同步。${reason instanceof Error ? ` ${reason.message}` : ''}`)
+        return
+      }
+    }
+    setNotice('运营助手设置已保存。')
+  }
+
+  async function updateOperationsTarget(key: string, target: OperationsTarget) {
+    setError('')
+    const next = await api.updateOperationsTarget(key, target)
+    setOperations(next)
+    setNotice('单品目标已保存。')
+  }
+
+  async function updateOperationsFeedback(id: string, status: 'adopted' | 'skipped' | 'outcome') {
+    setError('')
+    const next = await api.updateOperationsSuggestionFeedback(id, { status })
+    setOperations(next)
+    setNotice(status === 'adopted' ? '建议已标记为采纳。' : '建议已标记为跳过。')
+  }
+
+  async function analyzeOperations(): Promise<OperationsAnalysis> {
+    setError('')
+    setNotice('正在生成运营分析...')
+    const result = await api.analyzeOperations()
+    setOperations(result.workspace)
+    setNotice(result.analysis.mode === 'ai' ? '运营分析已完成。' : '模型未配置，已生成本地公式分析。')
+    return result.analysis
+  }
+
+  async function runOperationsDailyReport(): Promise<{ analysis: OperationsAnalysis, sent: boolean, sendError: string }> {
+    setError('')
+    setNotice('正在生成经营日报...')
+    const result = await api.runOperationsDailyReport()
+    setOperations(result.workspace)
+    setNotice(result.sent ? '经营日报已发送至飞书。' : result.sendError || '经营日报已生成。')
+    return result
+  }
+
   function openSettings(section: SettingsSection = 'accounts') {
     setSettingsSection(section)
     setSettingsOpen(true)
   }
 
-  if (!overview) {
+  if (!overview || !operations) {
     return <div className="flex min-h-screen items-center justify-center bg-[#f6f8fa] text-slate-500">正在加载本地监控工作台...</div>
   }
 
@@ -547,9 +656,18 @@ function App() {
     />
   )
 
-  const modelConfigPanel = <ModelConfigPanel purpose="creation" config={data.modelConfig} onSave={saveModelConfig} onDiscover={api.modelCatalog} onTest={testModelConfig} />
+  const modelConfigPanel = <ModelConfigPanel purpose="all" config={data.modelConfig} onSave={saveModelConfig} onDiscover={api.modelCatalog} onTest={testModelConfig} />
   const promptWorkbench = <PromptWorkbench presentation="professional" config={data.modelConfig} onLoadWorkspace={api.promptStudio} onAnalyzeProduct={api.analyzePromptProduct} onGenerate={api.generatePromptSet} onQuickGenerate={api.quickGeneratePrompt} onOpenModelSettings={() => openSettings('models')} onSaveProductProfile={savePromptProductProfile} onDeleteProductProfile={api.deletePromptProductProfile} onSaveStylePreset={savePromptStylePreset} onDeleteStylePreset={api.deletePromptStylePreset} onToggleLibraryFavorite={api.togglePromptLibraryFavorite} onToggleFavoriteHistory={togglePromptHistoryFavorite} onRenameHistory={renamePromptHistory} onDeleteHistory={api.deletePromptHistory} onSyncToImageWorkbench={syncPromptToImageWorkbench} onExitProfessional={() => setAiCreationView('compose')} />
   const imageWorkbench = <ImageWorkbench active={activePage === 'image-workbench' && aiCreationView === 'compose'} config={data.modelConfig} onOpenModelSettings={() => openSettings('models')} incomingDraft={incomingImageDraft} onEnhancePrompt={api.enhanceImagePrompt} onOpenProfessionalPrompt={() => { setProfessionalPromptMounted(true); setAiCreationView('professional') }} />
+  const operationsAssistant = <OperationsAssistant
+    workspace={operations}
+    onUpload={uploadOperationsReport}
+    onUpdateTarget={updateOperationsTarget}
+    onFeedback={updateOperationsFeedback}
+    onAnalyze={analyzeOperations}
+    onRunDailyReport={runOperationsDailyReport}
+  />
+  const operationsAgent = <OperationsAgentChat active={activePage === 'operations-agent'} workspace={operations} modelConfig={data.modelConfig} onOpenModelSettings={() => openSettings('models')} onUpdateProfile={updateOperationsProfile} onDeleteReport={deleteOperationsReport} />
 
   function renderPage() {
     if (activePage === 'monitoring') {
@@ -588,7 +706,7 @@ function App() {
     if (activePage === 'records') {
       return (
         <div className="space-y-5">
-          <RunLog runs={runs} busy={busy} onRetryFailed={retryFailedRun} />
+          <RunLog runs={runs} busy={busy} clearing={clearingRunLogs} onRetryFailed={retryFailedRun} onClear={clearRunLogs} />
           <DataRecords snapshots={data.snapshots} products={data.products} onClear={clearSnapshots} onEvidenceChanged={refresh} />
         </div>
       )
@@ -641,6 +759,7 @@ function App() {
               key={item.label}
               onClick={() => {
                 if (item.id === 'image-workbench') setAiCreationView('compose')
+                if (isOperationsPage(item.id)) setOperationsMounted(true)
                 setActivePage(item.id)
               }}
               aria-label={item.label}
@@ -678,7 +797,9 @@ function App() {
           {(notice || error) && <div className={`fixed bottom-5 left-1/2 z-[70] flex w-[min(640px,calc(100vw-2rem))] -translate-x-1/2 items-center gap-2 rounded-md border bg-white p-3 text-sm shadow-xl ${error ? 'border-red-200 text-red-700' : notice.startsWith('正在') ? 'border-blue-200 text-blue-800' : 'border-emerald-200 text-emerald-800'}`} role={error ? 'alert' : 'status'} aria-live="polite">{error ? <CircleAlert className="h-4 w-4 shrink-0" /> : notice.startsWith('正在') ? <LoaderCircle className="h-4 w-4 shrink-0 animate-spin" /> : <CircleCheck className="h-4 w-4 shrink-0" />}<span className="min-w-0 flex-1">{error || notice}</span><button type="button" className="inline-flex h-7 w-7 shrink-0 items-center justify-center rounded text-slate-400 hover:bg-slate-100 hover:text-slate-700" onClick={() => { setNotice(''); setError('') }} title="关闭提示" aria-label="关闭提示"><X className="h-4 w-4" /></button></div>}
           {professionalPromptMounted && <div className={activePage === 'image-workbench' && aiCreationView === 'professional' ? '' : 'hidden'}>{promptWorkbench}</div>}
           <div className={activePage === 'image-workbench' && aiCreationView === 'compose' ? '' : 'hidden'}>{imageWorkbench}</div>
-          {activePage !== 'image-workbench' && renderPage()}
+          {operationsMounted && <div className={activePage === 'operations' ? '' : 'hidden'}>{operationsAssistant}</div>}
+          {operationsMounted && <div className={activePage === 'operations-agent' ? '' : 'hidden'}>{operationsAgent}</div>}
+          {activePage !== 'image-workbench' && !isOperationsPage(activePage) && renderPage()}
         </div>
       </main>
       {authGuideAccountType && (
@@ -711,8 +832,8 @@ function App() {
         onClose={() => setSettingsOpen(false)}
         accountContent={authPanel}
         feishuContent={<div className="space-y-5"><FeishuAuthorization feishu={data.feishu} products={data.products} onSave={saveFeishuSettings} /><FeishuSettings feishu={data.feishu} logs={data.notificationLogs} products={data.products} onSave={saveFeishuSettings} onTest={testFeishu} /></div>}
-        modelContent={modelConfigPanel}
         appearanceContent={<AppearanceSettings wallpaperId={wallpaperId} customWallpaperUrl={customWallpaperUrl} onWallpaperChange={setWallpaperId} onCustomWallpaperSaved={setCustomWallpaperBlob} onCustomWallpaperDeleted={() => { setCustomWallpaperBlob(null); setWallpaperId((current) => current === CUSTOM_APP_WALLPAPER_ID ? DEFAULT_APP_WALLPAPER_ID : current) }} />}
+        modelContent={modelConfigPanel}
         currentVersion={data.runtime.version}
         updateInfo={updateInfo}
         updateChecking={updateChecking}

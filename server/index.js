@@ -2,7 +2,7 @@ import express from "express";
 import cors from "cors";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import fs from "node:fs";
 import { z } from "zod";
@@ -15,7 +15,7 @@ import { analyzeData } from "./services/analysisService.js";
 import { buildTaobaoOAuthUrl } from "./services/authService.js";
 import { clearFailedCaptureJobs, clearFinishedCaptureJobs, clearStaleCaptureQueueJobs, deleteCaptureQueueJob, getCaptureQueueStatus, recoverCaptureQueue, reparseProductLocalEvidence, rescheduleMonitor, resumeAuthRequiredCaptureJobs, resumeCaptureJob, runBuyerShowOnce, runCaptureBatchOnce, runProductOnce, runSearchMainImageOnce, scheduleProduct, sessionsForProduct, setSkuMonitorPrice, snapshotHasVerifiedNormalPrice, startScheduler, stopCaptureQueue, stopScheduler, withProtectedBrowserCapture } from "./services/monitorService.js";
 import { monitorChannelSupported } from "./services/monitorRuleService.js";
-import { createNotificationLog, effectivePriceForSku, publicFeishuConfig, sendFeishuNotification, updateFeishuConfig } from "./services/feishuService.js";
+import { createNotificationLog, effectivePriceForSku, publicFeishuConfig, sendFeishuNotification, sendFeishuOperationsReport, updateFeishuConfig } from "./services/feishuService.js";
 import { appendPriceDocument, cliStatus, createPriceDocument, readAuthQr, startCliLogin, startCliSetup } from "./services/larkCliService.js";
 import { browserRuntimeInfo, checkTaobaoSession, closeAccountBrowser, exportTaobaoBrowserCookies, findAvailableBrowserPort, getTaobaoAuthState, isTaobaoLoginUrl, keepAccountBrowserWarm, listBrowserEngines, minimizeAccountBrowser, openBrowserInstallPage, openProductInAccountBrowser, openTaobaoLogin, resetTmallSsoRefreshWindow, restoreTaobaoBrowserCookies } from "./services/browserService.js";
 import { AUTH_BUNDLE_MAX_BYTES, createAuthBundle, openAuthBundle } from "./services/authBundleService.js";
@@ -57,6 +57,26 @@ import {
 } from "./services/localImportService.js";
 import { isAllowedLocalRequest, localCorsOptions } from "./utils/localOrigin.js";
 import { cleanupEvidenceRetention } from "./services/evidenceRetentionService.js";
+import {
+  OPERATIONS_MAX_UPLOAD_BYTES,
+  OPERATIONS_REPORT_TYPES,
+  analyzeOperationsWorkspace,
+  askOperationsAgent,
+  buildOperationsWorkspace,
+  createOperationsReport,
+  isSupportedOperationsFile,
+  normalizeOperationsState,
+  operationsAgentContextText,
+  parseOperationsFile,
+  persistOperationsScreenshot,
+  prepareQwenPawOperationsSkill,
+  qwenPawAgentToolAccessToken,
+  qwenPawRuntimeStatus,
+  setQwenPawOperationsContextUrl,
+  startQwenPawOperationsConsole,
+  stopQwenPawOperationsConsole,
+} from "./services/operationsAssistantService.js";
+import { listAgentActions, recordAgentAction } from "./services/agentAuditService.js";
 import { resumeNotificationOutbox, startNotificationOutboxWorker, stopNotificationOutboxWorker } from "./services/notificationOutboxService.js";
 import {
   isTmallPriceGateError,
@@ -113,6 +133,7 @@ let imageGenerationActive = false;
 let staticMiddleware = null;
 let schedulerStarted = false;
 let evidenceCleanupTimer = null;
+let operationsDailyTimer = null;
 
 async function rememberPendingScan(pending) {
   pendingScans.set(pending.profileKey, pending);
@@ -181,6 +202,17 @@ const promptStudioUploadFields = imageUpload.fields([
   { name: "productImages", maxCount: 3 },
   { name: "styleImages", maxCount: 1 },
 ]);
+const operationsUpload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: OPERATIONS_MAX_UPLOAD_BYTES, files: 1, fields: 8, parts: 10 },
+  fileFilter: (_req, file, callback) => {
+    if (isSupportedOperationsFile(file)) return callback(null, true);
+    return callback(Object.assign(new Error("运营助手只支持 XLSX、CSV、JSON、PNG、JPG 或 WEBP。"), {
+      status: 400,
+      code: "OPERATIONS_UPLOAD_TYPE_INVALID",
+    }));
+  },
+});
 
 function parseImageGenerationUpload(req, res, next) {
   let parsing = true;
@@ -500,6 +532,273 @@ app.get("/api/overview", async (_req, res) => {
     captureQueue: await getCaptureQueueStatus(),
     runtime: runtimeInfo(),
   });
+});
+
+function operationsWorkspacePayload(db) {
+  return {
+    ...buildOperationsWorkspace(db.operations),
+    qwenPaw: qwenPawRuntimeStatus(dbRuntimeInfo().dataDir),
+  };
+}
+
+function operationsAnalysisRecord(analysis, source = "manual") {
+  return {
+    id: newId("ops_analysis"),
+    source,
+    ...analysis,
+    createdAt: analysis?.createdAt || new Date().toISOString(),
+  };
+}
+
+async function runOperationsAnalysis({ source = "manual", sendToFeishu = false } = {}) {
+  const db = await readDb();
+  const workspace = buildOperationsWorkspace(db.operations);
+  const analysis = await analyzeOperationsWorkspace(db.modelConfig, workspace, {
+    principles: db.operations?.principles || "",
+    reports: db.operations?.reports || [],
+  });
+  const record = operationsAnalysisRecord(analysis, source);
+  let sent = false;
+  let sendError = "";
+  if (sendToFeishu && workspace.freshness.fresh) {
+    if (!db.feishu?.enabled || !publicFeishuConfig(db.feishu).webhookConfigured) {
+      sendError = "飞书机器人未配置或未启用，日报已保存在本地。";
+    } else {
+      try {
+        await sendFeishuOperationsReport(db.feishu, { ...workspace, analysis, reportDate: new Date().toISOString().slice(0, 10) });
+        sent = true;
+      } catch (error) {
+        sendError = error.message || "飞书日报发送失败。";
+      }
+    }
+  }
+  await updateDb((current) => {
+    const state = normalizeOperationsState(current.operations);
+    current.operations = normalizeOperationsState({
+      ...state,
+      analyses: [...state.analyses, record],
+      dailyReport: {
+        ...state.dailyReport,
+        lastRunAt: new Date().toISOString(),
+        lastSentAt: sent ? new Date().toISOString() : state.dailyReport.lastSentAt,
+        lastError: sendError,
+      },
+    });
+    return current;
+  });
+  return { analysis: record, workspace, sent, sendError };
+}
+
+function stopOperationsDailyReport() {
+  if (operationsDailyTimer) clearTimeout(operationsDailyTimer);
+  operationsDailyTimer = null;
+}
+
+function nextOperationsReportTime(time = "09:30") {
+  const [hours, minutes] = String(time).split(":").map(Number);
+  const next = new Date();
+  next.setHours(Number.isInteger(hours) ? hours : 9, Number.isInteger(minutes) ? minutes : 30, 0, 0);
+  if (next.getTime() <= Date.now() + 1_000) next.setDate(next.getDate() + 1);
+  return next;
+}
+
+async function scheduleOperationsDailyReport() {
+  stopOperationsDailyReport();
+  const db = await readDb();
+  const dailyReport = normalizeOperationsState(db.operations).dailyReport;
+  if (!dailyReport.enabled) return null;
+  const nextRun = nextOperationsReportTime(dailyReport.time);
+  operationsDailyTimer = setTimeout(async () => {
+    try {
+      await runOperationsAnalysis({ source: "scheduled", sendToFeishu: true });
+    } catch (error) {
+      console.error("[operations-daily-report]", error);
+      await updateDb((current) => {
+        const state = normalizeOperationsState(current.operations);
+        current.operations = normalizeOperationsState({
+          ...state,
+          dailyReport: { ...state.dailyReport, lastRunAt: new Date().toISOString(), lastError: error.message || "日报生成失败。" },
+        });
+        return current;
+      });
+    } finally {
+      void scheduleOperationsDailyReport();
+    }
+  }, Math.max(1_000, nextRun.getTime() - Date.now()));
+  operationsDailyTimer.unref?.();
+  return nextRun.toISOString();
+}
+
+app.get("/api/operations", async (_req, res) => {
+  res.json(operationsWorkspacePayload(await readDb()));
+});
+
+app.get("/api/operations/agent-context", async (_req, res) => {
+  const db = await readDb();
+  const workspace = buildOperationsWorkspace(db.operations);
+  res.type("text").send(operationsAgentContextText(workspace));
+});
+
+function requireAgentToolAccess(req) {
+  const supplied = String(req.get("x-ecom-agent-token") || "");
+  if (!supplied || supplied !== qwenPawAgentToolAccessToken()) {
+    throw Object.assign(new Error("本机 Agent 工具未授权。"), { status: 403 });
+  }
+}
+
+app.get("/api/agent-tools/audit", async (req, res) => {
+  requireAgentToolAccess(req);
+  const limit = Math.min(200, Math.max(1, Number(req.query.limit) || 50));
+  res.json(await listAgentActions(dbRuntimeInfo().dataDir, limit));
+});
+
+app.post("/api/agent-tools/audit", async (req, res) => {
+  requireAgentToolAccess(req);
+  const input = z.object({
+    action: z.string().trim().min(1).max(120),
+    status: z.enum(["succeeded", "failed"]),
+    target: z.string().trim().max(240).optional().default(""),
+    summary: z.string().trim().max(800).optional().default(""),
+    details: z.unknown().optional(),
+  }).strict().parse(req.body || {});
+  res.status(201).json(await recordAgentAction(dbRuntimeInfo().dataDir, input));
+});
+
+app.post("/api/operations/reports/preview", parseOperationsUpload, async (req, res) => {
+  if (!req.file) throw Object.assign(new Error("请选择要检查的报表或截图。"), { status: 400 });
+  const parsed = await parseOperationsFile(req.file);
+  res.json({
+    fileName: req.file.originalname,
+    kind: parsed.kind,
+    columns: parsed.columns,
+    sampleRows: parsed.rows.slice(0, 12),
+  });
+});
+
+app.post("/api/operations/reports", parseOperationsUpload, async (req, res) => {
+  if (!req.file) throw Object.assign(new Error("请选择要导入的报表或截图。"), { status: 400 });
+  const input = z.object({
+    type: z.enum(OPERATIONS_REPORT_TYPES),
+    storeName: z.string().trim().max(80).optional().default(""),
+    reportDate: z.string().trim().max(40).optional().default(""),
+    sourceName: z.string().trim().max(80).optional().default(""),
+  }).strict().parse(req.body);
+  const parsed = await parseOperationsFile(req.file);
+  const report = createOperationsReport(input, parsed, { file: req.file });
+  if (parsed.kind === "screenshot") {
+    report.screenshotPath = await persistOperationsScreenshot(req.file, { dataDir: dbRuntimeInfo().dataDir, reportId: report.id });
+  }
+  await updateDb((db) => {
+    const state = normalizeOperationsState(db.operations);
+    db.operations = normalizeOperationsState({ ...state, reports: [...state.reports, report] });
+    return db;
+  });
+  res.status(201).json({ report, workspace: operationsWorkspacePayload(await readDb()) });
+});
+
+app.delete("/api/operations/reports/:id", async (req, res) => {
+  let removed = null;
+  await updateDb((db) => {
+    const state = normalizeOperationsState(db.operations);
+    removed = state.reports.find((report) => report.id === req.params.id) || null;
+    db.operations = normalizeOperationsState({ ...state, reports: state.reports.filter((report) => report.id !== req.params.id) });
+    return db;
+  });
+  if (!removed) return res.status(404).json({ message: "运营数据不存在或已删除。" });
+  if (removed.screenshotPath) await fs.promises.rm(removed.screenshotPath, { force: true }).catch(() => undefined);
+  res.status(204).end();
+});
+
+app.patch("/api/operations/profile", async (req, res) => {
+  const patch = z.object({
+    principles: z.string().trim().max(4_000).optional(),
+    dailyReport: z.object({
+      enabled: z.boolean().optional(),
+      time: z.string().regex(/^\d{2}:\d{2}$/).optional(),
+    }).strict().optional(),
+  }).strict().parse(req.body);
+  await updateDb((db) => {
+    const state = normalizeOperationsState(db.operations);
+    db.operations = normalizeOperationsState({
+      ...state,
+      ...(patch.principles !== undefined ? { principles: patch.principles } : {}),
+      ...(patch.dailyReport ? { dailyReport: { ...state.dailyReport, ...patch.dailyReport } } : {}),
+    });
+    return db;
+  });
+  await scheduleOperationsDailyReport();
+  res.json(operationsWorkspacePayload(await readDb()));
+});
+
+app.put("/api/operations/targets/:key", async (req, res) => {
+  const target = z.object({
+    targetRoi: z.coerce.number().positive().max(100),
+    maxFeeRate: z.coerce.number().positive().max(1),
+    dailyBudgetCap: z.coerce.number().min(0).max(10_000_000),
+  }).strict().parse(req.body);
+  const key = String(req.params.key || "").trim().slice(0, 160);
+  if (!key) return res.status(400).json({ message: "缺少单品标识。" });
+  await updateDb((db) => {
+    const state = normalizeOperationsState(db.operations);
+    db.operations = normalizeOperationsState({ ...state, targets: { ...state.targets, [key]: target } });
+    return db;
+  });
+  res.json(operationsWorkspacePayload(await readDb()));
+});
+
+app.post("/api/operations/suggestions/:id/feedback", async (req, res) => {
+  const input = z.object({ status: z.enum(["adopted", "skipped", "outcome"]), note: z.string().trim().max(600).optional().default("") }).strict().parse(req.body);
+  await updateDb((db) => {
+    const state = normalizeOperationsState(db.operations);
+    const feedback = { id: newId("ops_feedback"), suggestionId: req.params.id, ...input, createdAt: new Date().toISOString() };
+    db.operations = normalizeOperationsState({ ...state, feedback: [...state.feedback.filter((item) => item.suggestionId !== req.params.id), feedback] });
+    return db;
+  });
+  res.json(operationsWorkspacePayload(await readDb()));
+});
+
+app.post("/api/operations/analyze", async (_req, res) => {
+  res.json(await runOperationsAnalysis({ source: "manual" }));
+});
+
+app.post("/api/operations/chat", async (req, res) => {
+  const input = z.object({ message: z.string().trim().min(1).max(2_000) }).strict().parse(req.body);
+  const db = await readDb();
+  const state = normalizeOperationsState(db.operations);
+  const workspace = buildOperationsWorkspace(state);
+  const content = await askOperationsAgent(db.modelConfig, workspace, input.message, {
+    principles: state.principles,
+    reports: state.reports,
+    history: state.chat,
+  });
+  const userMessage = { id: newId("ops_chat"), role: "user", content: input.message, createdAt: new Date().toISOString() };
+  const assistantMessage = { id: newId("ops_chat"), role: "assistant", content, createdAt: new Date().toISOString() };
+  await updateDb((current) => {
+    const latest = normalizeOperationsState(current.operations);
+    current.operations = normalizeOperationsState({ ...latest, chat: [...latest.chat, userMessage, assistantMessage] });
+    return current;
+  });
+  res.json({ message: assistantMessage, workspace: operationsWorkspacePayload(await readDb()) });
+});
+
+app.post("/api/operations/daily-report/run", async (_req, res) => {
+  res.json(await runOperationsAnalysis({ source: "manual-daily", sendToFeishu: true }));
+});
+
+app.get("/api/operations/qwenpaw", async (_req, res) => {
+  res.json(qwenPawRuntimeStatus(dbRuntimeInfo().dataDir));
+});
+
+app.post("/api/operations/qwenpaw/prepare", async (_req, res) => {
+  const db = await readDb();
+  const prepared = await prepareQwenPawOperationsSkill(dbRuntimeInfo().dataDir, db.modelConfig, db.operations?.principles || "");
+  res.json(prepared);
+});
+
+app.get("/api/operations/qwenpaw/console", async (_req, res) => {
+  const db = await readDb();
+  const runtime = await startQwenPawOperationsConsole(dbRuntimeInfo().dataDir, db.modelConfig, db.operations?.principles || "");
+  res.json(runtime);
 });
 
 app.get("/api/local-evidence", async (_req, res) => {
@@ -858,14 +1157,68 @@ app.post("/api/excel-sync/run", async (_req, res) => {
   res.json(await syncPriceWorkbook());
 });
 
+async function openWorkbookWithSystemApplication(filePath) {
+  if (process.versions.electron) {
+    const { shell } = await import("electron");
+    const error = await shell.openPath(filePath);
+    if (error) throw localImportError("OPEN_EXCEL_SYNC_FAILED", error, 500);
+    return { launcher: "electron" };
+  }
+
+  if (process.platform === "win32") {
+    const script = [
+      '$ErrorActionPreference = "Stop"',
+      '$filePath = [Environment]::GetEnvironmentVariable("ECOM_MONITOR_OPEN_FILE")',
+      'if ([string]::IsNullOrWhiteSpace($filePath)) { throw "缺少工作簿路径。" }',
+      '$opened = Start-Process -FilePath $filePath -PassThru -ErrorAction Stop',
+      'if ($null -eq $opened) { throw "系统未返回表格程序进程。" }',
+      '$opened.Id',
+    ].join("; ");
+    const launchPid = await new Promise((resolve, reject) => {
+      const child = spawn("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", script], {
+        env: { ...process.env, ECOM_MONITOR_OPEN_FILE: filePath },
+        stdio: ["ignore", "pipe", "pipe"],
+        windowsHide: true,
+      });
+      let output = "";
+      let errors = "";
+      child.stdout.on("data", (chunk) => { output += chunk; });
+      child.stderr.on("data", (chunk) => { errors += chunk; });
+      child.once("error", reject);
+      child.once("close", (code) => {
+        if (code !== 0) return reject(new Error(errors.trim() || `系统表格程序启动失败（退出码 ${code}）。`));
+        const pid = Number.parseInt(output.trim(), 10);
+        if (!Number.isInteger(pid) || pid <= 0) return reject(new Error("系统没有返回表格程序进程。"));
+        resolve(pid);
+      });
+    });
+    return { launcher: "windows-file-association", launchPid };
+  }
+
+  const command = process.platform === "darwin"
+    ? { executable: "open", args: [filePath] }
+    : { executable: "xdg-open", args: [filePath] };
+  await new Promise((resolve, reject) => {
+    const child = spawn(command.executable, command.args, { detached: true, stdio: "ignore" });
+    child.once("error", reject);
+    child.once("spawn", () => {
+      child.unref();
+      resolve();
+    });
+  });
+  return { launcher: "system-file-association" };
+}
+
 app.post("/api/excel-sync/open", async (_req, res) => {
-  if (!process.versions.electron) return res.status(501).json({ message: "网页版无法直接打开本机 Excel 文件，请按页面显示的路径打开。" });
   const status = await getExcelSyncStatus();
   if (!status.exists) await syncPriceWorkbook();
-  const { shell } = await import("electron");
-  const error = await shell.openPath(status.path);
-  if (error) throw localImportError("OPEN_EXCEL_SYNC_FAILED", error, 500);
-  res.json({ ok: true, path: status.path });
+  let launch;
+  try {
+    launch = await openWorkbookWithSystemApplication(status.path);
+  } catch (error) {
+    throw localImportError("OPEN_EXCEL_SYNC_FAILED", `无法调用本机表格程序：${error.message || String(error)}`, 500);
+  }
+  res.json({ ok: true, path: status.path, ...launch });
 });
 
 app.post("/api/products/batch", async (req, res) => {
@@ -940,6 +1293,16 @@ function removeProductRecords(selectedIds, db) {
   db.notificationOutbox = (db.notificationOutbox || []).filter((job) => !ids.has(job.payload?.product?.id));
   for (const productId of ids) delete db.alertStates?.[productId];
   return deleted;
+}
+
+function parseOperationsUpload(req, res, next) {
+  operationsUpload.single("file")(req, res, (error) => {
+    if (error && !(error instanceof multer.MulterError) && !error.status) {
+      error.status = 400;
+      error.code = "OPERATIONS_UPLOAD_INVALID";
+    }
+    next(error);
+  });
 }
 
 async function removePersistedProducts(selectedIds) {
@@ -2613,6 +2976,16 @@ app.delete("/api/snapshots", async (_req, res) => {
   res.status(204).end();
 });
 
+app.delete("/api/runs", async (_req, res) => {
+  let removed = 0;
+  await updateDb((db) => {
+    removed = db.runs.length;
+    db.runs = [];
+    return db;
+  });
+  res.json({ removed });
+});
+
 app.use((req, res, next) => {
   if (!staticMiddleware) return next();
   return staticMiddleware(req, res, (error) => {
@@ -2622,12 +2995,19 @@ app.use((req, res, next) => {
   });
 });
 
-app.use((err, _req, res, _next) => {
+app.use((err, req, res, _next) => {
   if (err instanceof z.ZodError) {
     res.status(400).json({ message: err.issues.map((issue) => issue.message).join("；") });
     return;
   }
   if (err instanceof multer.MulterError) {
+    if (String(req.path || "").startsWith("/api/operations/")) {
+      const message = err.code === "LIMIT_FILE_SIZE"
+        ? "运营报表或截图不能超过 16 MB。"
+        : "运营数据上传内容过多或格式无效。";
+      res.status(413).json({ message, error: { code: `OPERATIONS_UPLOAD_${err.code}`, message } });
+      return;
+    }
     const message = err.code === "LIMIT_FILE_SIZE"
       ? "每张参考图或蒙版不能超过 8 MB。"
       : err.code === "LIMIT_FILE_COUNT" || err.code === "LIMIT_UNEXPECTED_FILE"
@@ -2661,11 +3041,13 @@ export async function startServer({ host = "127.0.0.1", port = Number(process.en
     await startImageJobQueue();
     startNotificationOutboxWorker();
     startEvidenceCleanup();
+    await scheduleOperationsDailyReport();
   } catch (error) {
     if (server?.listening) await new Promise((resolve) => server.close(() => resolve()));
     await stopImageJobQueue().catch((stopError) => console.error("[image-job-stop]", stopError));
     await stopNotificationOutboxWorker();
     stopEvidenceCleanup();
+    stopOperationsDailyReport();
     stopCaptureQueue();
     stopScheduler();
     schedulerStarted = false;
@@ -2673,6 +3055,7 @@ export async function startServer({ host = "127.0.0.1", port = Number(process.en
   }
   const address = server.address();
   const actualPort = typeof address === "object" && address ? address.port : port;
+  setQwenPawOperationsContextUrl(`http://127.0.0.1:${actualPort}/api/operations/agent-context`);
   console.log(`电商竞品监控服务已启动：http://${host}:${actualPort}`);
   console.log("[runtime]", runtimeInfo());
   const eagerBrowserWarmup = process.env.ECOM_MONITOR_EAGER_BROWSER_WARMUP === "1";
@@ -2706,6 +3089,8 @@ export async function stopServer(server) {
   stopScheduler();
   await stopNotificationOutboxWorker();
   stopEvidenceCleanup();
+  stopOperationsDailyReport();
+  await stopQwenPawOperationsConsole();
   schedulerStarted = false;
   const closeServer = server?.listening
     ? new Promise((resolve, reject) => server.close((error) => error ? reject(error) : resolve()))
@@ -2722,7 +3107,7 @@ export async function stopServer(server) {
 
 const entryPath = process.argv[1] ? path.resolve(process.argv[1]) : "";
 if (entryPath === fileURLToPath(import.meta.url)) {
-  startServer().catch((error) => {
+  startServer({ staticDir: process.env.ECOM_MONITOR_STATIC_DIR || "" }).catch((error) => {
     console.error("[startup]", error);
     process.exitCode = 1;
   });

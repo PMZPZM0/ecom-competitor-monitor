@@ -2,12 +2,13 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { secureStoredModelConfig } from "../services/modelConfigService.js";
+import { normalizeOperationsState } from "../services/operationsAssistantService.js";
 import { normalizePromptStudioState } from "../services/promptStudioService.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const dataDir = path.resolve(process.env.ECOM_MONITOR_DATA_DIR || path.resolve(__dirname, "../data"));
 const dbPath = path.join(dataDir, "db.json");
-export const DB_SCHEMA_VERSION = 8;
+export const DB_SCHEMA_VERSION = 9;
 
 const RENAME_RETRY_DELAYS_MS = [10, 25, 50, 100, 200];
 const RETRYABLE_RENAME_CODES = new Set(["EPERM", "EBUSY"]);
@@ -51,6 +52,7 @@ const initialData = {
     lastDocumentSyncAt: null,
   },
   notificationLogs: [],
+  operations: normalizeOperationsState(),
   promptStudio: normalizePromptStudioState(),
   modelConfig: {
     channel: "stable",
@@ -152,6 +154,7 @@ export function migrateDbDocument(parsed) {
     monitor: normalizeMonitor(parsed.monitor),
     modelConfig: normalizeStoredModelConfig(parsed.modelConfig),
     localEvidence: normalizeStoredLocalEvidence(parsed.localEvidence),
+    operations: normalizeOperationsState(parsed.operations),
     promptStudio: normalizePromptStudioState(parsed.promptStudio),
     feishu,
   };
@@ -262,6 +265,7 @@ export async function readDb() {
     monitor,
     modelConfig: normalizeStoredModelConfig(parsed.modelConfig),
     localEvidence: normalizeStoredLocalEvidence(parsed.localEvidence),
+    operations: normalizeOperationsState(parsed.operations),
     promptStudio: normalizePromptStudioState(parsed.promptStudio),
     feishu: { ...initialData.feishu, ...(parsed.feishu || {}) },
     runs: parsed.runs || [],

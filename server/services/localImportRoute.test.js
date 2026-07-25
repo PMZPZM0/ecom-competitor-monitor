@@ -293,6 +293,35 @@ test("local evidence reparse route accepts price and rejects unknown replay kind
   }
 });
 
+test("clearing run logs preserves products and price snapshots", async () => {
+  const server = await startServer({ port: 0 });
+  const address = server.address();
+  const baseUrl = `http://127.0.0.1:${address.port}`;
+  try {
+    await updateDb((db) => {
+      db.runs = [
+        { id: "clear-run-1", source: "manual-product", status: "success", finishedAt: "2026-07-24T00:00:00.000Z", total: 1, success: 1, failed: 0, message: "完成" },
+        { id: "clear-run-2", source: "manual-batch", status: "failed", finishedAt: "2026-07-24T00:01:00.000Z", total: 2, success: 0, failed: 2, message: "失败" },
+      ];
+      db.products.push({ id: "clear-run-product", itemId: "843315272690", url: "https://detail.tmall.com/item.htm?id=843315272690", name: "保留商品", accountType: "normal" });
+      db.snapshots.push({ id: "clear-run-snapshot", productId: "clear-run-product", itemId: "843315272690", skuPrices: [] });
+      return db;
+    });
+
+    const cleared = await jsonRequest(`${baseUrl}/api/runs`, { method: "DELETE" });
+    assert.equal(cleared.status, 200);
+    assert.equal(cleared.body.removed, 2);
+
+    const overview = await jsonRequest(`${baseUrl}/api/overview`);
+    assert.equal(overview.status, 200);
+    assert.equal(overview.body.runs.length, 0);
+    assert.equal(overview.body.products.some((item) => item.id === "clear-run-product"), true);
+    assert.equal(overview.body.snapshots.some((item) => item.id === "clear-run-snapshot"), true);
+  } finally {
+    await stopServer(server);
+  }
+});
+
 test.after(async () => {
   await fs.rm(dataDir, { recursive: true, force: true });
 });
