@@ -1,0 +1,10 @@
+{
+  "id": "ecommerce-qr-delivery",
+  "name": "Ecommerce Login QR Delivery",
+  "version": "1.0.0",
+  "type": "general",
+  "description": "Delivers short-lived local Taobao login QR images through QwenPaw's bound Feishu channel.",
+  "author": "Ecommerce Competitor Monitor",
+  "entry": { "backend": "plugin.py" },
+  "qwenpaw_version": { "min": "1.1.5" }
+}

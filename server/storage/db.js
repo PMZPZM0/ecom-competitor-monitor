@@ -8,7 +8,7 @@ import { normalizePromptStudioState } from "../services/promptStudioService.js";
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const dataDir = path.resolve(process.env.ECOM_MONITOR_DATA_DIR || path.resolve(__dirname, "../data"));
 const dbPath = path.join(dataDir, "db.json");
-export const DB_SCHEMA_VERSION = 9;
+export const DB_SCHEMA_VERSION = 10;
 
 const RENAME_RETRY_DELAYS_MS = [10, 25, 50, 100, 200];
 const RETRYABLE_RENAME_CODES = new Set(["EPERM", "EBUSY"]);
@@ -39,6 +39,7 @@ const initialData = {
   captureJobs: [],
   pendingAuthScans: [],
   alertStates: {},
+  qwenPawAlertStates: {},
   priceEngine: { ...DEFAULT_PRICE_ENGINE },
   notificationOutbox: [],
   feishu: {
@@ -148,6 +149,9 @@ export function migrateDbDocument(parsed) {
     pendingAuthScans: Array.isArray(parsed.pendingAuthScans) ? parsed.pendingAuthScans : [],
     alertStates: parsed.alertStates && typeof parsed.alertStates === "object" && !Array.isArray(parsed.alertStates)
       ? parsed.alertStates
+      : {},
+    qwenPawAlertStates: parsed.qwenPawAlertStates && typeof parsed.qwenPawAlertStates === "object" && !Array.isArray(parsed.qwenPawAlertStates)
+      ? parsed.qwenPawAlertStates
       : {},
     priceEngine: normalizePriceEngine(parsed.priceEngine),
     notificationOutbox: Array.isArray(parsed.notificationOutbox) ? parsed.notificationOutbox : [],

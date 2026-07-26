@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
-import { BarChart3, Check, CircleAlert, Clock3, FileSpreadsheet, LoaderCircle, Send, Sparkles, Target, Upload, UsersRound } from 'lucide-react'
+import { BarChart3, Check, CircleAlert, ClipboardPaste, Clock3, FileSpreadsheet, LoaderCircle, Send, Sparkles, Target, Upload, UsersRound, X } from 'lucide-react'
 import { Button } from '../../components/ui/button'
 import { Card, CardContent, CardHeader, CardTitle } from '../../components/ui/card'
 import type { OperationsAnalysis, OperationsReportType, OperationsTarget, OperationsWorkspace } from '../../types/domain'
@@ -23,6 +23,18 @@ const reportTypeLabels: Record<OperationsReportType, string> = {
 }
 
 const defaultTarget: OperationsTarget = { targetRoi: 2, maxFeeRate: 0.3, dailyBudgetCap: 0 }
+
+function pastedDataFile(value: string) {
+  const source = value.trim()
+  if (!source) return null
+  if (source.startsWith('[') || source.startsWith('{')) {
+    return new File([source], '粘贴运营数据.json', { type: 'application/json' })
+  }
+  const csv = source.includes('\t')
+    ? source.split(/\r?\n/).filter((line) => line.trim()).map((line) => line.split('\t').map((cell) => `"${cell.replace(/"/g, '""')}"`).join(',')).join('\n')
+    : source
+  return new File([csv], '粘贴运营数据.csv', { type: 'text/csv' })
+}
 
 function money(value: number | null | undefined) {
   return Number.isFinite(value) ? `¥${Number(value).toFixed(2)}` : '--'
@@ -71,6 +83,8 @@ export function OperationsAssistant({
   const [reportDate, setReportDate] = useState(() => new Date().toISOString().slice(0, 10))
   const [sourceName, setSourceName] = useState('')
   const [selectedFile, setSelectedFile] = useState<File | null>(null)
+  const [pasteOpen, setPasteOpen] = useState(false)
+  const [pastedData, setPastedData] = useState('')
   const [analysis, setAnalysis] = useState<OperationsAnalysis | null>(workspace.analyses[0] || null)
   const [busy, setBusy] = useState('')
   const [error, setError] = useState('')
@@ -99,6 +113,19 @@ export function OperationsAssistant({
       await onUpload(selectedFile, { type: reportType, storeName, reportDate, sourceName })
       setSelectedFile(null)
       if (fileInput.current) fileInput.current.value = ''
+    })
+  }
+
+  async function uploadPastedData() {
+    const file = pastedDataFile(pastedData)
+    if (!file) {
+      setError('请先粘贴 Excel/WPS 表格或 JSON 数据。')
+      return
+    }
+    await run('paste', async () => {
+      await onUpload(file, { type: reportType, storeName, reportDate, sourceName })
+      setPastedData('')
+      setPasteOpen(false)
     })
   }
 
@@ -146,7 +173,7 @@ export function OperationsAssistant({
         <Card>
           <CardHeader className="flex flex-row flex-wrap items-center justify-between gap-3">
             <div><CardTitle>导入运营数据</CardTitle><p className="mt-1 text-xs text-slate-500">XLSX、CSV、JSON 或截图</p></div>
-            <div className="flex items-center gap-2 text-xs text-slate-500"><FileSpreadsheet className="h-4 w-4" />本地保存</div>
+            <div className="flex items-center gap-2"><span className="inline-flex items-center gap-2 text-xs text-slate-500"><FileSpreadsheet className="h-4 w-4" />本地保存</span><Button type="button" size="sm" variant="secondary" onClick={() => setPasteOpen((value) => !value)}><ClipboardPaste className="h-4 w-4" />粘贴数据</Button></div>
           </CardHeader>
           <CardContent className="grid gap-3 lg:grid-cols-[150px_150px_150px_150px_minmax(0,1fr)_auto] lg:items-end">
             <label className="space-y-1 text-xs font-medium text-slate-600"><span>数据类型</span><select value={reportType} onChange={(event) => setReportType(event.target.value as OperationsReportType)} className="h-10 w-full rounded-md border border-slate-200 bg-white px-3 text-sm text-slate-800 outline-none focus:border-blue-500">{Object.entries(reportTypeLabels).map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select></label>
@@ -156,6 +183,11 @@ export function OperationsAssistant({
             <label className="space-y-1 text-xs font-medium text-slate-600"><span>文件</span><button type="button" onClick={() => fileInput.current?.click()} className="flex h-10 w-full items-center gap-2 rounded-md border border-dashed border-slate-300 bg-slate-50 px-3 text-left text-sm text-slate-600 hover:border-blue-300 hover:bg-blue-50"><Upload className="h-4 w-4 shrink-0" /><span className="truncate">{selectedFile?.name || '选择报表或截图'}</span></button><input ref={fileInput} type="file" accept=".xlsx,.csv,.json,.png,.jpg,.jpeg,.webp" className="hidden" onChange={(event) => setSelectedFile(event.target.files?.[0] || null)} /></label>
             <Button type="button" onClick={() => void upload()} disabled={busy === 'upload'}>{busy === 'upload' ? <LoaderCircle className="h-4 w-4 animate-spin" /> : <Upload className="h-4 w-4" />}导入</Button>
           </CardContent>
+          {pasteOpen && <div className="border-t border-slate-100 bg-slate-50/70 p-4">
+            <div className="mb-2 flex items-center justify-between gap-3"><div><div className="text-sm font-medium text-slate-800">粘贴表格数据</div><div className="mt-0.5 text-xs text-slate-500">从 Excel/WPS 复制包含表头的数据区域，点击下方输入框后直接粘贴；也支持 JSON。</div></div><Button type="button" size="sm" variant="ghost" className="h-8 w-8 p-0" title="关闭粘贴区" aria-label="关闭粘贴区" onClick={() => setPasteOpen(false)}><X className="h-4 w-4" /></Button></div>
+            <textarea autoFocus value={pastedData} onChange={(event) => setPastedData(event.target.value)} rows={7} placeholder={'商品名称\t消耗\t成交金额\t订单数\n示例商品\t100\t500\t8'} className="w-full resize-y rounded-md border border-slate-200 bg-white p-3 font-mono text-xs leading-5 text-slate-800 outline-none focus:border-blue-500" />
+            <div className="mt-3 flex justify-end"><Button type="button" onClick={() => void uploadPastedData()} disabled={busy === 'paste' || !pastedData.trim()}>{busy === 'paste' ? <LoaderCircle className="h-4 w-4 animate-spin" /> : <Upload className="h-4 w-4" />}导入粘贴数据</Button></div>
+          </div>}
         </Card>
 
         {analysis && <Card>

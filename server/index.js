@@ -17,7 +17,7 @@ import { clearFailedCaptureJobs, clearFinishedCaptureJobs, clearStaleCaptureQueu
 import { monitorChannelSupported } from "./services/monitorRuleService.js";
 import { createNotificationLog, effectivePriceForSku, publicFeishuConfig, sendFeishuNotification, sendFeishuOperationsReport, updateFeishuConfig } from "./services/feishuService.js";
 import { appendPriceDocument, cliStatus, createPriceDocument, readAuthQr, startCliLogin, startCliSetup } from "./services/larkCliService.js";
-import { browserRuntimeInfo, checkTaobaoSession, closeAccountBrowser, exportTaobaoBrowserCookies, findAvailableBrowserPort, getTaobaoAuthState, isTaobaoLoginUrl, keepAccountBrowserWarm, listBrowserEngines, minimizeAccountBrowser, openBrowserInstallPage, openProductInAccountBrowser, openTaobaoLogin, resetTmallSsoRefreshWindow, restoreTaobaoBrowserCookies } from "./services/browserService.js";
+import { browserRuntimeInfo, captureTaobaoLoginQr, checkTaobaoSession, closeAccountBrowser, exportTaobaoBrowserCookies, findAvailableBrowserPort, getTaobaoAuthState, isTaobaoLoginUrl, keepAccountBrowserWarm, listBrowserEngines, minimizeAccountBrowser, openBrowserInstallPage, openProductInAccountBrowser, openTaobaoLogin, resetTmallSsoRefreshWindow, restoreTaobaoBrowserCookies } from "./services/browserService.js";
 import { AUTH_BUNDLE_MAX_BYTES, createAuthBundle, openAuthBundle } from "./services/authBundleService.js";
 import { scrapeTmallProduct, SCRAPER_VERSION } from "./services/tmallScraper.js";
 import { normalizeProductUrl } from "./utils/productUrl.js";
@@ -76,8 +76,15 @@ import {
   startQwenPawOperationsConsole,
   stopQwenPawOperationsConsole,
 } from "./services/operationsAssistantService.js";
+import {
+  normalizeQwenPawInstallDirectory,
+  qwenPawInstallTaskStatus,
+  qwenPawRuntimeStatus as qwenPawDetailedRuntimeStatus,
+  startQwenPawInstall,
+} from "./services/qwenPawRuntimeService.js";
+import { listQwenPawFeishuTargets, normalizeQwenPawAlerts, normalizeQwenPawFeishuTargets, saveQwenPawLoginQr, sendQwenPawFeishuText } from "./services/qwenPawFeishuService.js";
 import { listAgentActions, recordAgentAction } from "./services/agentAuditService.js";
-import { resumeNotificationOutbox, startNotificationOutboxWorker, stopNotificationOutboxWorker } from "./services/notificationOutboxService.js";
+import { configureQwenPawLoginQrProvider, drainNotificationOutbox, enqueueQwenPawLoginExpiryNotifications, resumeNotificationOutbox, startNotificationOutboxWorker, stopNotificationOutboxWorker } from "./services/notificationOutboxService.js";
 import {
   isTmallPriceGateError,
   TMALL_PRICE_STATUS,
@@ -124,6 +131,7 @@ function runtimeInfo() {
 
 export const app = express();
 const pendingScans = new Map();
+const qwenPawLoginQrTasks = new Map();
 const pendingQuickPromptRequests = new Map();
 const pendingBrowserPorts = new Set();
 const QUICK_PROMPT_STAGE_TIMEOUT_MS = 25_000;
@@ -133,6 +141,7 @@ let imageGenerationActive = false;
 let staticMiddleware = null;
 let schedulerStarted = false;
 let evidenceCleanupTimer = null;
+let pendingAuthSyncTimer = null;
 let operationsDailyTimer = null;
 
 async function rememberPendingScan(pending) {
@@ -537,9 +546,86 @@ app.get("/api/overview", async (_req, res) => {
 function operationsWorkspacePayload(db) {
   return {
     ...buildOperationsWorkspace(db.operations),
-    qwenPaw: qwenPawRuntimeStatus(dbRuntimeInfo().dataDir),
+    qwenPaw: qwenPawRuntimeStatus(db.operations?.qwenPawInstallDirectory),
   };
 }
+
+async function syncPendingAuthorizations() {
+  const db = await readDb();
+  const pending = Array.isArray(db.pendingAuthScans) ? db.pendingAuthScans : [];
+  for (const item of pending) {
+    try {
+      await syncPendingScan(item.profileKey);
+    } catch (error) {
+      console.error("[pending-auth-sync]", error?.message || error);
+    }
+  }
+}
+
+function startPendingAuthorizationSync() {
+  if (pendingAuthSyncTimer) return;
+  pendingAuthSyncTimer = setInterval(() => void syncPendingAuthorizations(), 5_000);
+  pendingAuthSyncTimer.unref?.();
+}
+
+function stopPendingAuthorizationSync() {
+  if (pendingAuthSyncTimer) clearInterval(pendingAuthSyncTimer);
+  pendingAuthSyncTimer = null;
+}
+
+async function createQwenPawLoginQr(sessionSummary) {
+  const sessionId = String(sessionSummary?.id || "");
+  if (!sessionId) return "";
+  if (qwenPawLoginQrTasks.has(sessionId)) return qwenPawLoginQrTasks.get(sessionId);
+  const task = (async () => {
+    const db = await readDb();
+    const session = db.authSessions.find((item) => item.id === sessionId);
+    if (!session || session.loginStatus !== "expired" || session.source !== "taobao-browser" || !session.browserProfileKey || !session.browserPort) return "";
+    const existing = pendingScans.get(session.browserProfileKey)
+      || (Array.isArray(db.pendingAuthScans) ? db.pendingAuthScans.find((item) => item.sessionId === session.id) : null);
+    let pending = existing;
+    if (!pending) {
+      const browserEngine = session.browserEngine || listBrowserEngines().defaultEngine;
+      const login = await openTaobaoLogin({
+        profileKey: session.browserProfileKey,
+        port: session.browserPort,
+        browserEngine,
+        restoreWindow: false,
+      });
+      pending = {
+        sessionId: session.id,
+        name: session.name,
+        accountType: session.accountType || "normal",
+        browserEngine,
+        profileKey: session.browserProfileKey,
+        browserPort: session.browserPort,
+        loginTargetId: login.targetId,
+        createdAt: Date.now(),
+      };
+      await rememberPendingScan(pending);
+    }
+    let lastError = "";
+    for (let attempt = 0; attempt < 12; attempt += 1) {
+      try {
+        const image = await captureTaobaoLoginQr({
+          profileKey: pending.profileKey,
+          port: pending.browserPort,
+          browserEngine: pending.browserEngine,
+          targetId: pending.loginTargetId,
+        });
+        return saveQwenPawLoginQr(session.id, image);
+      } catch (error) {
+        lastError = error?.message || String(error);
+        await new Promise((resolve) => setTimeout(resolve, 1_000));
+      }
+    }
+    throw new Error(lastError || "淘宝登录二维码未就绪。");
+  })().finally(() => qwenPawLoginQrTasks.delete(sessionId));
+  qwenPawLoginQrTasks.set(sessionId, task);
+  return task;
+}
+
+configureQwenPawLoginQrProvider(createQwenPawLoginQr);
 
 function operationsAnalysisRecord(analysis, source = "manual") {
   return {
@@ -786,18 +872,86 @@ app.post("/api/operations/daily-report/run", async (_req, res) => {
 });
 
 app.get("/api/operations/qwenpaw", async (_req, res) => {
-  res.json(qwenPawRuntimeStatus(dbRuntimeInfo().dataDir));
+  const db = await readDb();
+  res.json(await qwenPawDetailedRuntimeStatus(db.operations?.qwenPawInstallDirectory, { checkLatest: true }));
+});
+
+app.get("/api/operations/qwenpaw/feishu-targets", async (_req, res) => {
+  const db = await readDb();
+  try {
+    const targets = await listQwenPawFeishuTargets(db.operations?.qwenPawInstallDirectory);
+    res.json({ configured: true, targets, message: targets.length ? "已读取 QwenPaw 绑定飞书中的可用会话。" : "QwenPaw 已启动，但尚未发现飞书私聊或群聊。先在 QwenPaw 飞书中与 Agent 对话一次。" });
+  } catch (error) {
+    res.json({ configured: false, targets: [], message: error instanceof Error ? error.message : "无法读取 QwenPaw 飞书会话。" });
+  }
+});
+
+app.patch("/api/operations/qwenpaw/alerts", async (req, res) => {
+  const payload = z.object({
+    belowThresholdTargets: z.array(z.object({ channel: z.literal("feishu"), userId: z.string().trim().min(1).max(500), sessionId: z.string().trim().min(1).max(500) })).max(40),
+    loginExpiredTargets: z.array(z.object({ channel: z.literal("feishu"), userId: z.string().trim().min(1).max(500), sessionId: z.string().trim().min(1).max(500) })).max(40),
+  }).strict().parse(req.body);
+  let saved;
+  await updateDb((db) => {
+    const operations = normalizeOperationsState(db.operations);
+    saved = normalizeQwenPawAlerts({
+      belowThresholdTargets: normalizeQwenPawFeishuTargets(payload.belowThresholdTargets),
+      loginExpiredTargets: normalizeQwenPawFeishuTargets(payload.loginExpiredTargets),
+    });
+    db.operations = normalizeOperationsState({ ...operations, qwenPawAlerts: saved });
+    return db;
+  });
+  res.json(saved);
+});
+
+app.post("/api/operations/qwenpaw/feishu-test", async (req, res) => {
+  const target = z.object({ channel: z.literal("feishu"), userId: z.string().trim().min(1).max(500), sessionId: z.string().trim().min(1).max(500) }).parse(req.body);
+  const db = await readDb();
+  await sendQwenPawFeishuText(db.operations?.qwenPawInstallDirectory, target, "【QwenPaw 通知测试】此消息通过 QwenPaw 自己绑定的飞书主动发送。\n通知通道已可用。");
+  res.json({ ok: true });
+});
+
+app.patch("/api/operations/qwenpaw/install-directory", async (req, res) => {
+  const input = z.object({ directory: z.string().trim().max(2_048) }).strict().parse(req.body);
+  if (!path.isAbsolute(input.directory)) return res.status(400).json({ message: "请填写本机绝对路径，例如 D:\\电商监控数据\\QwenPaw。" });
+  if (["resolving", "downloading", "verifying", "installing"].includes(qwenPawInstallTaskStatus().state)) {
+    return res.status(409).json({ message: "QwenPaw 正在安装，完成后才能修改安装路径。" });
+  }
+  const directory = normalizeQwenPawInstallDirectory(input.directory);
+  await stopQwenPawOperationsConsole();
+  await updateDb((db) => {
+    const state = normalizeOperationsState(db.operations);
+    db.operations = normalizeOperationsState({ ...state, qwenPawInstallDirectory: directory });
+    return db;
+  });
+  res.json(await qwenPawDetailedRuntimeStatus(directory, { checkLatest: true }));
+});
+
+app.post("/api/operations/qwenpaw/select-directory", async (_req, res) => {
+  if (!process.versions.electron) return res.status(501).json({ message: "网页版请直接填写本机绝对路径。" });
+  const { dialog } = await import("electron");
+  const result = await dialog.showOpenDialog({ properties: ["openDirectory", "createDirectory"] });
+  res.json({ directory: result.canceled ? null : result.filePaths[0] || null });
+});
+
+app.get("/api/operations/qwenpaw/install-task", (_req, res) => {
+  res.json(qwenPawInstallTaskStatus());
+});
+
+app.post("/api/operations/qwenpaw/install", async (_req, res) => {
+  const db = await readDb();
+  res.status(202).json(startQwenPawInstall(db.operations?.qwenPawInstallDirectory));
 });
 
 app.post("/api/operations/qwenpaw/prepare", async (_req, res) => {
   const db = await readDb();
-  const prepared = await prepareQwenPawOperationsSkill(dbRuntimeInfo().dataDir, db.modelConfig, db.operations?.principles || "");
+  const prepared = await prepareQwenPawOperationsSkill(db.operations?.qwenPawInstallDirectory, db.modelConfig, db.operations?.principles || "");
   res.json(prepared);
 });
 
 app.get("/api/operations/qwenpaw/console", async (_req, res) => {
   const db = await readDb();
-  const runtime = await startQwenPawOperationsConsole(dbRuntimeInfo().dataDir, db.modelConfig, db.operations?.principles || "");
+  const runtime = await startQwenPawOperationsConsole(db.operations?.qwenPawInstallDirectory, db.modelConfig, db.operations?.principles || "");
   res.json(runtime);
 });
 
@@ -2490,6 +2644,7 @@ async function syncPendingScan(profileKey) {
       db.authSessions.unshift(session);
     }
     db.pendingAuthScans = (Array.isArray(db.pendingAuthScans) ? db.pendingAuthScans : []).filter((item) => item.profileKey !== profileKey);
+    enqueueQwenPawLoginExpiryNotifications(db, { source: "reauthorized" });
     return db;
   });
   pendingScans.delete(profileKey);
@@ -2506,6 +2661,7 @@ async function syncPendingScan(profileKey) {
     }).catch(() => undefined);
   }
   await resumeAuthRequiredCaptureJobs();
+  void drainNotificationOutbox().catch((error) => console.error("[notification-outbox]", error));
   return { status: "synced", session };
 }
 
@@ -2565,8 +2721,10 @@ async function checkAuthSession(session) {
       };
       return updated;
     });
+    enqueueQwenPawLoginExpiryNotifications(db, { source: "auth-check" });
     return db;
   });
+  void drainNotificationOutbox().catch((error) => console.error("[notification-outbox]", error));
   const message = accessRestricted
     ? `登录状态未清除，但当前浏览器环境被淘宝限制；应用采集已暂停至 ${new Date(restrictionUntil).toLocaleString("zh-CN", { hour12: false })}。`
     : status === "expired"
@@ -3041,12 +3199,14 @@ export async function startServer({ host = "127.0.0.1", port = Number(process.en
     await startImageJobQueue();
     startNotificationOutboxWorker();
     startEvidenceCleanup();
+    startPendingAuthorizationSync();
     await scheduleOperationsDailyReport();
   } catch (error) {
     if (server?.listening) await new Promise((resolve) => server.close(() => resolve()));
     await stopImageJobQueue().catch((stopError) => console.error("[image-job-stop]", stopError));
     await stopNotificationOutboxWorker();
     stopEvidenceCleanup();
+    stopPendingAuthorizationSync();
     stopOperationsDailyReport();
     stopCaptureQueue();
     stopScheduler();
@@ -3089,6 +3249,7 @@ export async function stopServer(server) {
   stopScheduler();
   await stopNotificationOutboxWorker();
   stopEvidenceCleanup();
+  stopPendingAuthorizationSync();
   stopOperationsDailyReport();
   await stopQwenPawOperationsConsole();
   schedulerStarted = false;

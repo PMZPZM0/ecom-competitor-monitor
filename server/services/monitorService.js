@@ -1,4 +1,5 @@
 import { newId, readDb, updateDb } from "../storage/db.js";
+import { checkTaobaoSession } from "./browserService.js";
 import { itemIdFromProductUrl } from "../utils/productUrl.js";
 import { parseSearchMainImageEvidence, parseTmallBuyerShowEvidence, parseTmallMaterialsEvidence, scrapeTaobaoSearchMainImage, scrapeTmallBuyerShows, scrapeTmallMaterials, scrapeTmallProduct } from "./tmallScraper.js";
 import { createNotificationLog, sendFeishuNotification } from "./feishuService.js";
@@ -17,7 +18,7 @@ import {
 } from "./captureJobService.js";
 import { evaluateSkuMonitorRules } from "./monitorRuleService.js";
 import { recordPriceEngineShadowRound } from "./priceEngineShadowService.js";
-import { drainNotificationOutbox, enqueuePostCommitNotifications } from "./notificationOutboxService.js";
+import { drainNotificationOutbox, enqueuePostCommitNotifications, enqueueQwenPawLoginExpiryNotifications } from "./notificationOutboxService.js";
 import { applySkuVerificationHistory, updateSkuLifecycle } from "./skuStateService.js";
 import { syncPriceWorkbook } from "./excelSyncService.js";
 import {
@@ -198,12 +199,26 @@ export function isExplicitLoginExpiryError(message = "") {
 
 async function confirmSessionExpiry(session, message) {
   if (!isExplicitLoginExpiryError(message)) return false;
-  // A capture-tab redirect proves only that this Tmall request lost price
-  // access. Never open another Taobao page from the capture failure path:
-  // that creates more login traffic and can destabilize the persistent session.
-  // Users can run the explicit account check when they want an identity probe.
-  if (session?.browserProfileKey && session?.browserPort) return false;
-  return true;
+  if (!session?.browserProfileKey || !session?.browserPort || !session?.browserEngine) {
+    // Non-browser test/import sessions have no persistent identity to probe;
+    // preserve their explicit login-expiry result. Real browser sessions only
+    // expire after the passive check below confirms it.
+    return session?.source !== "taobao-browser" && !session?.tmallPriceStatus;
+  }
+  try {
+    // This is a passive CDP check against the existing authorized browser.
+    // It neither opens a product page nor rebuilds the browser session.
+    const state = await checkTaobaoSession({
+      profileKey: session.browserProfileKey,
+      port: session.browserPort,
+      browserEngine: session.browserEngine,
+    });
+    return state.status === "expired" || state.loggedIn === false;
+  } catch {
+    // A failed probe is not evidence of logout. Preserve the session and let
+    // the ordinary retry path handle a transient browser failure.
+    return false;
+  }
 }
 
 export async function captureWithTransientLoginRetry(session, capture, {
@@ -872,14 +887,17 @@ export function snapshotPriceCoverage(snapshot) {
   const observedSkuCount = Number(snapshot?.rawSignals?.observedSkuCount);
   const applicable = Array.isArray(snapshot?.skuPrices) || Number.isSafeInteger(observedSkuCount);
   const totalSkuCount = Math.max(skus.length, Number.isSafeInteger(observedSkuCount) ? observedSkuCount : 0);
+  const outOfStockSkuCount = skus.filter((sku) => sku?.availabilityStatus === "out-of-stock").length;
+  const priceRequiredSkuCount = Math.max(0, totalSkuCount - outOfStockSkuCount);
   const verifiedSkuCount = skus.filter((sku) => verifiedChannel(sku, "normal")).length;
   return {
     applicable,
     totalSkuCount,
+    ...(outOfStockSkuCount ? { outOfStockSkuCount, priceRequiredSkuCount } : {}),
     verifiedSkuCount,
-    unresolvedSkuCount: Math.max(0, totalSkuCount - verifiedSkuCount),
-    complete: totalSkuCount > 0
-      && verifiedSkuCount === totalSkuCount
+    unresolvedSkuCount: Math.max(0, priceRequiredSkuCount - verifiedSkuCount),
+    complete: priceRequiredSkuCount > 0
+      && verifiedSkuCount === priceRequiredSkuCount
       && snapshot?.resolutionStatus === "verified",
   };
 }
@@ -1346,7 +1364,12 @@ function prepareThresholdAlert(current, product, snapshot, source) {
     source,
     accountType,
     snapshotCapturedAt: snapshot.capturedAt,
-    pending: current.feishu.enabled ? pending : [],
+    // QwenPaw native Feishu is an independent delivery channel. Keep the
+    // verified-price state machine shared, while letting either channel opt in.
+    pending: current.feishu.enabled || Array.isArray(current.operations?.qwenPawAlerts?.belowThresholdTargets)
+      && current.operations.qwenPawAlerts.belowThresholdTargets.length > 0
+      ? pending
+      : [],
     previousStates,
     stateChanged: true,
   };
@@ -1663,6 +1686,7 @@ async function runMonitorUnlocked({ source = "manual", productIds = null, includ
       }
     }
     recordPriceShadowRun(current, "price", results);
+    enqueueQwenPawLoginExpiryNotifications(current, { source });
     enqueuePostCommitNotifications(current, { alertPlans, documentPlans, source });
     runRecord = buildRunRecord({
       source,
@@ -1972,6 +1996,7 @@ async function runProductUnlocked(productId, { source = "single-product", scrape
       }
     }
     recordPriceShadowRun(current, "price", [result]);
+    enqueueQwenPawLoginExpiryNotifications(current, { source });
     enqueuePostCommitNotifications(current, { alertPlans, documentPlans, source });
     runRecord = buildRunRecord({ source, scope: productId, startedAt, results: [result] });
     current.monitor.lastRunAt = new Date().toISOString();

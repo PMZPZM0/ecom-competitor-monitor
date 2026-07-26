@@ -1787,6 +1787,7 @@ function compactSelectionResult(selection) {
     responseReceivedAfterSelection: selection?.responseReceivedAfterSelection === true,
     clicked: Array.isArray(selection?.clicked) ? selection.clicked.map(String) : [],
     reason: String(selection?.reason || ""),
+    ...(selection?.outOfStock === true ? { outOfStock: true } : {}),
     ...(validWindow ? {
       captureRunId,
       responseSequenceStartExclusive: start,
@@ -2453,10 +2454,17 @@ export function resolveLocalSkuPriceRows(page, { itemId, accountType = "normal",
     });
     observations.set(skuId, observation);
     resolutions.set(skuId, scopedResolution);
-    skuPrices.push({
+    const outOfStock = selection?.outOfStock === true;
+    const resolvedSku = {
       ...applyPriceResolution(skuWithObservedPriceLayers(baseSku, observation.observedSku), scopedResolution),
       accountType,
-    });
+    };
+    skuPrices.push(outOfStock ? {
+      ...resolvedSku,
+      availabilityStatus: "out-of-stock",
+      priceTitle: "当前无货",
+      priceCalculation: Object.fromEntries(Object.keys(resolvedSku.priceCalculation || {}).map((channel) => [channel, "当前 SKU 无货，未生成价格"])),
+    } : resolvedSku);
   }
   return {
     structuredSku: { ...structuredSku, skuPrices },
@@ -2587,7 +2595,9 @@ export async function scrapeTmallProduct(product, authSession, { renderPage = ge
   const mainImages = media.mainImages;
   const skuPrices = structuredSku.skuPrices;
   const observedSkuCount = skuPrices.length;
-  const verifiedSkuCount = skuPrices.filter((sku) => sku.resolutionStatus === "verified").length;
+  const outOfStockSkuCount = skuPrices.filter((sku) => sku.availabilityStatus === "out-of-stock").length;
+  const availableSkuPrices = skuPrices.filter((sku) => sku.availabilityStatus !== "out-of-stock");
+  const verifiedSkuCount = availableSkuPrices.filter((sku) => sku.resolutionStatus === "verified").length;
   const verifiedPrices = skuPrices
     .filter((sku) => sku.resolutionStatus === "verified")
     .map((sku) => Number(sku.normalPrice))
@@ -2600,9 +2610,9 @@ export async function scrapeTmallProduct(product, authSession, { renderPage = ge
 
   return applyMediaCapturePreference({
     parserVersion: PRICE_PARSER_VERSION,
-    resolutionStatus: skuPrices.length && skuPrices.every((sku) => sku.resolutionStatus === "verified")
+    resolutionStatus: availableSkuPrices.length && availableSkuPrices.every((sku) => sku.resolutionStatus === "verified")
       ? "verified"
-      : skuPrices.some((sku) => sku.resolutionStatus === "verified") ? "partial" : "unavailable",
+      : availableSkuPrices.some((sku) => sku.resolutionStatus === "verified") ? "partial" : "unavailable",
     capturedAt: startedAt,
     statusCode: page.statusCode,
     finalUrl: page.finalUrl,
@@ -2649,6 +2659,7 @@ export async function scrapeTmallProduct(product, authSession, { renderPage = ge
       unresolvedSkuSelectionCount: Math.max(0, promotionCaptureSkus.length - new Set((page.skuSnapshots || []).filter((item) => item.selected).map((item) => String(item.skuId))).size),
       promotionCaptureError: mobilePromotionCapture.captureError || "",
       observedSkuCount,
+      outOfStockSkuCount,
       outputSkuCount: skuPrices.length,
       verifiedPriceSkuCount: verifiedSkuCount,
       timingsMs: {

@@ -1,6 +1,4 @@
 import assert from "node:assert/strict";
-import fs from "node:fs/promises";
-import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import {
@@ -9,9 +7,11 @@ import {
   buildOperationsWorkspace,
   createOperationsReport,
   operationsAgentContextText,
+  normalizeOperationsState,
+  lockQwenPawBuiltinTools,
   parseOperationsFile,
   qwenPawBootstrapPlan,
-  qwenPawPythonExecutable,
+  qwenPawRuntimeStatus,
   qwenPawSyncPlan,
 } from "./operationsAssistantService.js";
 import { updateModelConfig } from "./modelConfigService.js";
@@ -89,6 +89,25 @@ test("QwenPaw receives a compact text-safe local operations context", () => {
   assert.ok(context.audiences.length <= 12);
 });
 
+test("QwenPaw selected install directory remains part of the local operations state", () => {
+  const directory = path.resolve("D:/自定义/QwenPaw");
+  assert.equal(normalizeOperationsState({ qwenPawInstallDirectory: directory }).qwenPawInstallDirectory, directory);
+});
+
+test("QwenPaw fails closed when its official builtin tool inventory is incomplete", () => {
+  assert.throws(() => lockQwenPawBuiltinTools({ builtin_tools: {} }), /工具清单不完整/);
+  const tools = lockQwenPawBuiltinTools({
+    builtin_tools: {
+      view_image: { enabled: false },
+      execute_shell_command: { enabled: true },
+      browser_visible: { enabled: true },
+    },
+  });
+  assert.equal(tools.builtin_tools.view_image.enabled, true);
+  assert.equal(tools.builtin_tools.execute_shell_command.enabled, false);
+  assert.equal(tools.builtin_tools.browser_visible.enabled, false);
+});
+
 test("operations agent uses the active Settings text model instead of a separate configuration", async () => {
   const report = await promotionReport(["锅具,新品,100,500,5,100,计划A,店铺A"]);
   const workspace = buildOperationsWorkspace({ reports: [report] }, { now: new Date("2026-07-23T12:00:00.000Z") });
@@ -124,9 +143,9 @@ test("QwenPaw operations sync receives the Settings text model without putting i
   });
   const plan = qwenPawSyncPlan("C:/temp/ecom-qwenpaw", config, "新品先验证转化，再逐步放量。");
 
-  assert.deepEqual(plan.args, ["--base-url", "https://operations-model.example/v1", "--model", "operations-text-model"]);
-  assert.equal(plan.environment.ECOM_QWENPAW_API_KEY, "operations-key");
-  assert.equal(plan.environment.QWENPAW_WORKING_DIR, path.join("C:/temp/ecom-qwenpaw", "operations", "qwenpaw"));
+  assert.deepEqual(plan.args, []);
+  assert.equal(plan.environment.ECOM_QWENPAW_API_KEY, undefined);
+  assert.equal(plan.environment.QWENPAW_WORKING_DIR, path.join("C:/temp/ecom-qwenpaw", "data"));
   assert.equal(plan.environment.ECOM_QWENPAW_CONTEXT_URL, "http://127.0.0.1:4317/api/operations/agent-context");
   assert.equal(plan.environment.ECOM_QWENPAW_OPERATING_PRINCIPLES, "新品先验证转化，再逐步放量。");
   assert.equal(plan.environment.ECOM_QWENPAW_APP_URL, "http://127.0.0.1:4317");
@@ -150,25 +169,28 @@ test("QwenPaw sync plan changes when the saved operating principles change", () 
   assert.notEqual(first.signature, second.signature);
 });
 
-test("QwenPaw automatic bootstrap selects the matching Windows and macOS runtime", () => {
+test("QwenPaw official bootstrap selects Windows x64 and Apple Silicon without cross-architecture fallback", () => {
   assert.deepEqual(qwenPawBootstrapPlan({ platform: "win32", arch: "x64" }), {
-    archive: "uv-x86_64-pc-windows-msvc.zip",
-    binary: "uv.exe",
+    platform: "win32",
+    arch: "x64",
+    manifestPlatform: "win-tauri",
+    packageType: "exe",
+    universal: false,
   });
   assert.deepEqual(qwenPawBootstrapPlan({ platform: "darwin", arch: "arm64" }), {
-    archive: "uv-aarch64-apple-darwin.tar.gz",
-    binary: "uv",
+    platform: "darwin",
+    arch: "arm64",
+    manifestPlatform: "mac-tauri",
+    packageType: "zip",
+    universal: false,
   });
+  assert.throws(() => qwenPawBootstrapPlan({ platform: "darwin", arch: "x64" }), /Intel Mac/);
 });
 
-test("QwenPaw console prefers the application-managed Python runtime", async () => {
-  const dataDir = await fs.mkdtemp(path.join(os.tmpdir(), "ecom-qwenpaw-runtime-"));
-  const managedPython = path.join(dataDir, "operations", "qwenpaw", "runtime", process.platform === "win32" ? "Scripts" : "bin", process.platform === "win32" ? "python.exe" : "python");
-  try {
-    await fs.mkdir(path.dirname(managedPython), { recursive: true });
-    await fs.writeFile(managedPython, "managed runtime marker");
-    assert.equal(qwenPawPythonExecutable(dataDir), managedPython);
-  } finally {
-    await fs.rm(dataDir, { recursive: true, force: true });
-  }
+test("QwenPaw status reports the selected install directory without falling back to system Python", () => {
+  const directory = path.resolve("C:/temp/ecom-qwenpaw-official");
+  const status = qwenPawRuntimeStatus(directory);
+  assert.equal(status.installDirectory, directory);
+  assert.equal(status.installed, false);
+  assert.match(status.message, /尚未安装/);
 });

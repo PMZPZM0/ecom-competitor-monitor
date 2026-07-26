@@ -67,6 +67,7 @@ test("database migration preserves user data and marks legacy snapshots", () => 
   assert.deepEqual(migration.data.captureJobs, []);
   assert.deepEqual(migration.data.pendingAuthScans, []);
   assert.deepEqual(migration.data.alertStates, {});
+  assert.deepEqual(migration.data.qwenPawAlertStates, {});
   assert.deepEqual(migration.data.notificationOutbox, []);
   assert.deepEqual(migration.data.operations, {
     reports: [],
@@ -74,6 +75,8 @@ test("database migration preserves user data and marks legacy snapshots", () => 
     feedback: [],
     chat: [],
     principles: "",
+    qwenPawInstallDirectory: "D:\\电商监控数据\\QwenPaw",
+    qwenPawAlerts: { belowThresholdTargets: [], loginExpiredTargets: [] },
     dailyReport: { enabled: false, time: "09:30", lastRunAt: null, lastSentAt: null, lastError: "" },
     analyses: [],
   });

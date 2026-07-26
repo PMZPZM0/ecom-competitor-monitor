@@ -7,17 +7,18 @@ files:
   - dist/**/*
   - electron/**/*
   - '!electron/**/*.test.mjs'
-  - server/**/*
+  # Use an allow-list so electron-builder never walks local runtime data.
+  # `server/data` can contain browser profiles, evidence, and generated files.
+  - server/*.js
+  - server/services/**/*
+  - server/scripts/**/*
+  - server/storage/**/*
+  - server/utils/**/*
+  - server/routes/**/*
+  - server/qwenpaw-plugins/**/*
   - public/app-icon.ico
   - public/app-icon.png
   - package.json
-  - '!server/data/**'
-  - '!server/**/account-profiles/**'
-  - '!server/**/capture-evidence/**'
-  - '!server/**/generated-images/**'
-  - '!server/**/db.json*'
-  - '!server/**/.env'
-  - '!server/**/.env.*'
   - '!server/**/*.test.js'
   - '!release/**'
   - '!output/**'

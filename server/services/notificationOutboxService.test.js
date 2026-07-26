@@ -11,6 +11,8 @@ process.env.ECOM_MONITOR_DATA_DIR = dataDir;
 const {
   drainNotificationOutbox,
   enqueuePostCommitNotifications,
+  enqueueQwenPawLoginQrNotifications,
+  enqueueQwenPawLoginExpiryNotifications,
   nextNotificationRetryAt,
   resumeNotificationOutbox,
 } = await import("./notificationOutboxService.js");
@@ -28,6 +30,12 @@ beforeEach(async () => {
     current.notificationOutbox = [];
     current.notificationLogs = [];
     current.alertStates = {};
+    current.qwenPawAlertStates = {};
+    current.authSessions = [];
+    current.operations = {
+      ...(current.operations || {}),
+      qwenPawAlerts: { belowThresholdTargets: [], loginExpiredTargets: [] },
+    };
     current.feishu = updateFeishuConfig(current.feishu, {
       enabled: true,
       webhookUrl: "https://open.feishu.cn/open-apis/bot/v2/hook/test",
@@ -231,6 +239,84 @@ test("a delivered webhook is acknowledged without resending after a transient da
   await drainNotificationOutbox({ now: Date.now() + 2 });
   assert.equal(sends, 1);
   assert.equal((await readDb()).notificationOutbox.length, 0);
+});
+
+test("QwenPaw low-price delivery is isolated per selected Feishu target", async () => {
+  const firstTarget = { channel: "feishu", userId: "ou_first", sessionId: "p2p_first" };
+  const secondTarget = { channel: "feishu", userId: "oc_group", sessionId: "group_second" };
+  await updateDb((current) => {
+    current.feishu.enabled = false;
+    current.operations = {
+      ...(current.operations || {}),
+      qwenPawInstallDirectory: "D:\\QwenPaw",
+      qwenPawAlerts: { belowThresholdTargets: [firstTarget, secondTarget], loginExpiredTargets: [] },
+    };
+    enqueuePostCommitNotifications(current, { alertPlans: [alertPlan()], now: Date.now() });
+    return current;
+  });
+  const queued = await readDb();
+  assert.equal(queued.notificationOutbox.length, 2);
+  assert.ok(queued.notificationOutbox.every((job) => job.kind === "qwenpaw-threshold-alert"));
+  const sent = [];
+  await drainNotificationOutbox({ sendQwen: async (_directory, target, message) => { sent.push({ target, message }); } });
+  assert.equal(sent.length, 2);
+  assert.deepEqual(new Set(sent.map((item) => item.target.userId)), new Set(["ou_first", "oc_group"]));
+  assert.ok(sent.every((item) => item.message.includes("本地已验证快照")));
+});
+
+test("QwenPaw only alerts when an account transitions from online to expired", async () => {
+  const target = { channel: "feishu", userId: "ou_owner", sessionId: "p2p_owner" };
+  await updateDb((current) => {
+    current.operations = {
+      ...(current.operations || {}),
+      qwenPawAlerts: { belowThresholdTargets: [], loginExpiredTargets: [target] },
+    };
+    current.authSessions = [{ id: "account-1", name: "主账号", accountType: "normal", loginStatus: "valid" }];
+    enqueueQwenPawLoginExpiryNotifications(current, { now: Date.now() });
+    current.authSessions[0].loginStatus = "expired";
+    current.authSessions[0].lastFailureAt = new Date().toISOString();
+    enqueueQwenPawLoginExpiryNotifications(current, { now: Date.now() });
+    enqueueQwenPawLoginExpiryNotifications(current, { now: Date.now() });
+    current.authSessions[0].loginStatus = "valid";
+    enqueueQwenPawLoginExpiryNotifications(current, { now: Date.now() + 1 });
+    current.authSessions[0].loginStatus = "expired";
+    current.authSessions[0].lastFailureAt = new Date(Date.now() + 2).toISOString();
+    enqueueQwenPawLoginExpiryNotifications(current, { now: Date.now() + 2 });
+    return current;
+  });
+  const queued = await readDb();
+  assert.equal(queued.notificationOutbox.filter((job) => job.kind === "qwenpaw-login-expired").length, 2);
+});
+
+test("QwenPaw login QR delivery schedules a separate expiry retraction", async () => {
+  const target = { channel: "feishu", userId: "ou_owner", sessionId: "p2p_owner" };
+  const now = Date.parse("2026-07-18T00:00:00.000Z");
+  await updateDb((current) => {
+    current.operations = {
+      ...(current.operations || {}),
+      qwenPawInstallDirectory: "D:\\QwenPaw",
+      qwenPawAlerts: { belowThresholdTargets: [], loginExpiredTargets: [target] },
+    };
+    enqueueQwenPawLoginQrNotifications(current, { sessionId: "account-1", qrFileId: "account-1-qr", now });
+    return current;
+  });
+  const delivered = [];
+  await drainNotificationOutbox({
+    now: now + 1,
+    readQwenQr: async () => Buffer.from("qr"),
+    sendQwenQr: async () => ({ message_id: "feishu-message-1" }),
+    retractQwenQr: async (_directory, messageId) => { delivered.push(messageId); },
+    deleteQwenQr: async (fileId) => { delivered.push(`deleted:${fileId}`); },
+  });
+  const pending = await readDb();
+  const retraction = pending.notificationOutbox.find((job) => job.kind === "qwenpaw-login-qr-retract");
+  assert.ok(retraction);
+  await drainNotificationOutbox({
+    now: Date.parse(retraction.nextAttemptAt),
+    retractQwenQr: async (_directory, messageId) => { delivered.push(messageId); },
+    deleteQwenQr: async (fileId) => { delivered.push(`deleted:${fileId}`); },
+  });
+  assert.deepEqual(delivered, ["feishu-message-1", "deleted:account-1-qr"]);
 });
 
 test("retry delays use the agreed 1, 5, and 15 minute backoff", () => {

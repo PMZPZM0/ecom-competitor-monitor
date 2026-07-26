@@ -1555,6 +1555,26 @@ test("a partial SKU round saves verified SKUs while keeping unresolved SKUs unav
   assert.equal(after.alertStates[productId].normal[`${itemId}-missing`].normal.lastPriceCents, null);
 });
 
+test("out-of-stock SKUs do not turn verified sibling prices into a capture failure", () => {
+  const coverage = snapshotPriceCoverage({
+    resolutionStatus: "verified",
+    rawSignals: { observedSkuCount: 2 },
+    skuPrices: [
+      verifiedSku({ skuId: "in-stock", normalPrice: 99 }),
+      { skuId: "sold-out", normalPrice: null, availabilityStatus: "out-of-stock", resolutionStatus: "unavailable", priceResolution: { status: "unavailable", channels: {} } },
+    ],
+  });
+  assert.deepEqual(coverage, {
+    applicable: true,
+    totalSkuCount: 2,
+    outOfStockSkuCount: 1,
+    priceRequiredSkuCount: 1,
+    verifiedSkuCount: 1,
+    unresolvedSkuCount: 0,
+    complete: true,
+  });
+});
+
 test("only an explicit Taobao login redirect expires an account", () => {
   assert.equal(isExplicitLoginExpiryError("账号登录已明确失效：商品页跳转到淘宝登录页。"), true);
   assert.equal(isExplicitLoginExpiryError("账号页面需要安全验证，本次抓取已停止，登录状态保留待复检。"), false);

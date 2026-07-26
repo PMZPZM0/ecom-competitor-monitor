@@ -1,4 +1,4 @@
-import type { Analysis, AuthSession, BrowserEngineCatalog, BrowserEngineId, CaptureQueueStatus, ExcelSyncResult, ExcelSyncStatus, ImageGenerationJob, ImageGenerationRequest, ImageGenerationResponse, ImageLibraryItem, LarkCliStatus, LocalEvidenceStatus, LocalImportCommitResult, LocalImportPreview, ModelCatalog, ModelCatalogRequest, ModelConfigPatch, ModelConfigTestPayload, ModelConfigTestResult, MonitorChannel, OperationsAnalysis, OperationsChatMessage, OperationsReportType, OperationsTarget, OperationsWorkspace, Overview, PhotoshopOpenResult, PhotoshopSyncResult, Product, RawDataCaptureResult, RunRecord, Snapshot, UpdateInfo } from '../types/domain'
+import type { Analysis, AuthSession, BrowserEngineCatalog, BrowserEngineId, CaptureQueueStatus, ExcelSyncResult, ExcelSyncStatus, ImageGenerationJob, ImageGenerationRequest, ImageGenerationResponse, ImageLibraryItem, LarkCliStatus, LocalEvidenceStatus, LocalImportCommitResult, LocalImportPreview, ModelCatalog, ModelCatalogRequest, ModelConfigPatch, ModelConfigTestPayload, ModelConfigTestResult, MonitorChannel, OperationsAnalysis, OperationsChatMessage, OperationsReportType, OperationsTarget, OperationsWorkspace, Overview, PhotoshopOpenResult, PhotoshopSyncResult, Product, QwenPawAlertSettings, QwenPawFeishuTarget, RawDataCaptureResult, RunRecord, Snapshot, UpdateInfo } from '../types/domain'
 import type { ProductRecognitionResult, PromptEnhancementResult, PromptGenerationRequest, PromptGenerationResult, PromptHistoryItem, PromptProductProfile, PromptReferenceFiles, PromptStudioWorkspace, PromptStylePreset, QuickPromptGenerationResult, QuickPromptRequest } from '../features/prompt-studio/types'
 
 const baseUrl = import.meta.env.VITE_API_BASE || ''
@@ -64,6 +64,13 @@ export const api = {
   chatOperations: (message: string) => request<{ message: OperationsChatMessage, workspace: OperationsWorkspace }>('/api/operations/chat', { method: 'POST', body: JSON.stringify({ message }) }),
   runOperationsDailyReport: () => request<{ analysis: OperationsAnalysis, workspace: OperationsWorkspace, sent: boolean, sendError: string }>('/api/operations/daily-report/run', { method: 'POST' }),
   qwenPawStatus: () => request<OperationsWorkspace['qwenPaw']>('/api/operations/qwenpaw'),
+  updateQwenPawInstallDirectory: (directory: string) => request<OperationsWorkspace['qwenPaw']>('/api/operations/qwenpaw/install-directory', { method: 'PATCH', body: JSON.stringify({ directory }) }),
+  selectQwenPawInstallDirectory: () => request<{ directory: string | null }>('/api/operations/qwenpaw/select-directory', { method: 'POST', body: '{}' }),
+  installQwenPaw: () => request<OperationsWorkspace['qwenPaw']['installTask']>('/api/operations/qwenpaw/install', { method: 'POST', body: '{}' }),
+  qwenPawInstallTask: () => request<OperationsWorkspace['qwenPaw']['installTask']>('/api/operations/qwenpaw/install-task'),
+  qwenPawFeishuTargets: () => request<{ configured: boolean, targets: QwenPawFeishuTarget[], message: string }>('/api/operations/qwenpaw/feishu-targets'),
+  updateQwenPawAlerts: (payload: QwenPawAlertSettings) => request<QwenPawAlertSettings>('/api/operations/qwenpaw/alerts', { method: 'PATCH', body: JSON.stringify(payload) }),
+  testQwenPawFeishuTarget: (target: QwenPawFeishuTarget) => request<{ ok: boolean }>('/api/operations/qwenpaw/feishu-test', { method: 'POST', body: JSON.stringify(target) }),
   prepareQwenPawOperations: () => request<OperationsWorkspace['qwenPaw'] & { directory: string, skillPath: string }>('/api/operations/qwenpaw/prepare', { method: 'POST' }),
   qwenPawConsole: () => request<{ consoleUrl: string, agentId: string, model: string }>('/api/operations/qwenpaw/console'),
   captureQueue: () => request<CaptureQueueStatus>('/api/capture-queue'),

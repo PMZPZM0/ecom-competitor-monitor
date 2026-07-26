@@ -257,6 +257,7 @@ export type Snapshot = {
     quantity?: number
     quantityText?: string
     quantitySource?: 'buyer-page'
+    availabilityStatus?: 'available' | 'out-of-stock'
     parserVersion?: string
     resolutionStatus?: PriceResolutionStatus
     priceResolution?: PriceResolution
@@ -516,6 +517,18 @@ export type OperationsChatMessage = {
   createdAt: string
 }
 
+export type QwenPawFeishuTarget = {
+  channel: 'feishu'
+  userId: string
+  sessionId: string
+  label?: string
+}
+
+export type QwenPawAlertSettings = {
+  belowThresholdTargets: QwenPawFeishuTarget[]
+  loginExpiredTargets: QwenPawFeishuTarget[]
+}
+
 export type OperationsWorkspace = {
   reports: OperationsReport[]
   profile: {
@@ -532,7 +545,35 @@ export type OperationsWorkspace = {
   suggestions: OperationsSuggestion[]
   analyses: OperationsAnalysis[]
   chat: OperationsChatMessage[]
-  qwenPaw: { installed: boolean, version: string, message: string, skillReady: boolean, signature?: string }
+  qwenPawAlerts: QwenPawAlertSettings
+  qwenPaw: {
+    installed: boolean
+    version: string
+    message: string
+    skillReady: boolean
+    signature?: string
+    installDirectory: string
+    defaultInstallDirectory: string
+    platform: string
+    arch: string
+    updateAvailable: boolean
+    latestVersion: string
+    latestCheckError?: string
+    installTask: QwenPawInstallTask
+  }
+}
+
+export type QwenPawInstallTask = {
+  state: 'idle' | 'resolving' | 'downloading' | 'verifying' | 'installing' | 'completed' | 'failed'
+  progress: number
+  downloadedBytes: number
+  totalBytes: number
+  message: string
+  error: string
+  version: string
+  installDirectory: string
+  startedAt: string | null
+  finishedAt: string | null
 }
 
 export type RunRecord = {

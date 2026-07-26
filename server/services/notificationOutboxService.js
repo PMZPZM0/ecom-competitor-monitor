@@ -1,14 +1,22 @@
 import { newId, readDb, updateDb } from "../storage/db.js";
 import { createNotificationLog, sendFeishuNotification } from "./feishuService.js";
 import { appendPriceDocument } from "./larkCliService.js";
+import { deleteQwenPawLoginQr, normalizeQwenPawAlerts, qwenPawLoginExpiredMessage, qwenPawThresholdMessage, readQwenPawLoginQr, retractQwenPawFeishuQr, sendQwenPawFeishuQr, sendQwenPawFeishuText, targetKey } from "./qwenPawFeishuService.js";
 
 const RETRY_DELAYS_MS = [60_000, 5 * 60_000, 15 * 60_000];
 const DELIVERY_LEASE_MS = 2 * 60_000;
 const WORKER_INTERVAL_MS = 30_000;
+const QWENPAW_OUTBOX_TTL_MS = 24 * 60 * 60 * 1_000;
+const QWENPAW_QR_TTL_MS = 5 * 60 * 1_000;
 
 let drainPromise = null;
 let workerTimer = null;
 const deliveredAwaitingAck = new Map();
+let qwenPawLoginQrProvider = null;
+
+export function configureQwenPawLoginQrProvider(provider) {
+  qwenPawLoginQrProvider = typeof provider === "function" ? provider : null;
+}
 
 function isoTime(value = Date.now()) {
   return new Date(value).toISOString();
@@ -67,6 +75,17 @@ function createOutboxJob(kind, dedupeKey, payload, source, now) {
   };
 }
 
+function qwenPawAlertConfig(current) {
+  return normalizeQwenPawAlerts(current.operations?.qwenPawAlerts);
+}
+
+function qwenPawDeliveryJob(kind, dedupeKey, payload, source, now) {
+  return {
+    ...createOutboxJob(kind, dedupeKey, payload, source, now),
+    expiresAt: isoTime(now + QWENPAW_OUTBOX_TTL_MS),
+  };
+}
+
 function thresholdPayload(plan) {
   const snapshot = {
     ...(plan.product.lastSnapshot || {}),
@@ -104,11 +123,25 @@ export function enqueuePostCommitNotifications(current, { alertPlans = [], docum
   for (const plan of alertPlans) {
     if (!plan?.pending?.length) continue;
     const dedupeKey = alertDedupeKey(plan);
-    if (existing.has(dedupeKey)) continue;
-    const job = createOutboxJob("threshold-alert", dedupeKey, thresholdPayload(plan), plan.source || source, now);
-    current.notificationOutbox.push(job);
-    existing.add(dedupeKey);
-    created.push(job);
+    if (current.feishu?.enabled && !existing.has(dedupeKey)) {
+      const job = createOutboxJob("threshold-alert", dedupeKey, thresholdPayload(plan), plan.source || source, now);
+      current.notificationOutbox.push(job);
+      existing.add(dedupeKey);
+      created.push(job);
+    }
+
+    const alertConfig = qwenPawAlertConfig(current);
+    for (const target of alertConfig.belowThresholdTargets) {
+      const qwenKey = `qwenpaw:${dedupeKey}:${targetKey(target)}`;
+      if (existing.has(qwenKey)) continue;
+      const qwenJob = qwenPawDeliveryJob("qwenpaw-threshold-alert", qwenKey, {
+        ...thresholdPayload(plan),
+        target,
+      }, plan.source || source, now);
+      current.notificationOutbox.push(qwenJob);
+      existing.add(qwenKey);
+      created.push(qwenJob);
+    }
   }
 
   for (const item of documentPlans) {
@@ -121,6 +154,66 @@ export function enqueuePostCommitNotifications(current, { alertPlans = [], docum
     created.push(job);
   }
 
+  return created;
+}
+
+export function enqueueQwenPawLoginExpiryNotifications(current, { source = "auth-check", now = Date.now() } = {}) {
+  current.qwenPawAlertStates = current.qwenPawAlertStates && typeof current.qwenPawAlertStates === "object"
+    ? current.qwenPawAlertStates
+    : {};
+  current.notificationOutbox = Array.isArray(current.notificationOutbox) ? current.notificationOutbox : [];
+  const existing = new Set(current.notificationOutbox.map((job) => job.dedupeKey).filter(Boolean));
+  const targets = qwenPawAlertConfig(current).loginExpiredTargets;
+  const created = [];
+  const activeIds = new Set();
+  for (const session of current.authSessions || []) {
+    if (!session?.id) continue;
+    activeIds.add(session.id);
+    const prior = current.qwenPawAlertStates[session.id]?.loginStatus;
+    const status = session.loginStatus === "expired" ? "expired" : "valid";
+    current.qwenPawAlertStates[session.id] = { loginStatus: status, updatedAt: isoTime(now) };
+    if (prior !== "valid" || status !== "expired") continue;
+    for (const target of targets) {
+      const dedupeKey = `qwenpaw:login-expired:${session.id}:${Date.parse(session.lastFailureAt || "") || now}:${targetKey(target)}`;
+      if (existing.has(dedupeKey)) continue;
+      const job = qwenPawDeliveryJob("qwenpaw-login-expired", dedupeKey, {
+        session: {
+          id: session.id,
+          name: session.name || "",
+          accountType: session.accountType || "normal",
+          browserEngine: session.browserEngine || "",
+          browserProfileKey: session.browserProfileKey || "",
+        },
+        target,
+      }, source, now);
+      current.notificationOutbox.push(job);
+      existing.add(dedupeKey);
+      created.push(job);
+    }
+  }
+  for (const sessionId of Object.keys(current.qwenPawAlertStates)) {
+    if (!activeIds.has(sessionId)) delete current.qwenPawAlertStates[sessionId];
+  }
+  return created;
+}
+
+export function enqueueQwenPawLoginQrNotifications(current, { sessionId, qrFileId, source = "auth-check", now = Date.now() } = {}) {
+  if (!sessionId || !qrFileId) return [];
+  current.notificationOutbox = Array.isArray(current.notificationOutbox) ? current.notificationOutbox : [];
+  const existing = new Set(current.notificationOutbox.map((job) => job.dedupeKey).filter(Boolean));
+  const expiresAt = isoTime(now + QWENPAW_QR_TTL_MS);
+  const created = [];
+  for (const target of qwenPawAlertConfig(current).loginExpiredTargets) {
+    const dedupeKey = `qwenpaw:login-qr:${sessionId}:${qrFileId}:${targetKey(target)}`;
+    if (existing.has(dedupeKey)) continue;
+    const job = {
+      ...qwenPawDeliveryJob("qwenpaw-login-qr", dedupeKey, { sessionId, qrFileId, target }, source, now),
+      expiresAt,
+    };
+    current.notificationOutbox.push(job);
+    existing.add(dedupeKey);
+    created.push(job);
+  }
   return created;
 }
 
@@ -193,7 +286,67 @@ function thresholdLogs(job, status, message) {
   }));
 }
 
-async function deliverJob(job, feishu, dependencies) {
+function qwenPawLogs(job, status, message) {
+  if (job.kind === "qwenpaw-login-qr") {
+    return [createNotificationLog({
+      productId: "",
+      type: "account-login-qr",
+      status,
+      message: status === "sent"
+        ? "QwenPaw 已向飞书目标发送限时淘宝登录二维码。"
+        : message,
+      price: null,
+      threshold: null,
+      source: job.source,
+    })];
+  }
+  if (job.kind === "qwenpaw-login-qr-retract") {
+    return [createNotificationLog({
+      productId: "",
+      type: "account-login-qr-retract",
+      status,
+      message: status === "sent" ? "已撤回过期的淘宝登录二维码。" : message,
+      price: null,
+      threshold: null,
+      source: job.source,
+    })];
+  }
+  if (job.kind === "qwenpaw-login-expired") {
+    return [createNotificationLog({
+      productId: "",
+      type: "account-login-expired",
+      status,
+      message: status === "sent"
+        ? `QwenPaw 已向飞书目标发送账号「${job.payload.session?.name || "淘宝账号"}」掉线提醒。`
+        : message,
+      price: null,
+      threshold: null,
+      source: job.source,
+    })];
+  }
+  return (job.payload.items || []).map((item) => createNotificationLog({
+    productId: job.payload.product.id,
+    skuId: item.skuId,
+    type: "qwenpaw-below-threshold",
+    status,
+    message: status === "sent"
+      ? `SKU「${item.skuName || item.skuId}」${item.event === "new-low" ? "出现新低" : "首次跌破监控价"}：QwenPaw 飞书提醒已发送。`
+      : message,
+    price: Number(item.priceCents) / 100,
+    threshold: Number(item.thresholdCents) / 100,
+    source: job.source,
+  }));
+}
+
+async function deliverJob(job, db, dependencies, now = Date.now()) {
+  if (job.expiresAt && Date.parse(job.expiresAt) <= now) {
+    if (job.kind === "qwenpaw-login-qr") await dependencies.deleteQwenPawLoginQr(job.payload.qrFileId).catch(() => undefined);
+    const message = job.kind === "qwenpaw-login-qr"
+      ? "淘宝登录二维码已过期，未再发送。"
+      : "QwenPaw 飞书通知超过 24 小时未送达，已停止补发。";
+    return { outcome: "cancelled", logs: qwenPawLogs(job, "failed", message) };
+  }
+  const feishu = db.feishu || {};
   if (job.kind === "threshold-alert") {
     if (!feishu.enabled) return { outcome: "deferred", reason: "飞书机器人提醒已关闭。", logs: [] };
     await dependencies.sendFeishuNotification(feishu, thresholdDetails(job));
@@ -214,6 +367,29 @@ async function deliverJob(job, feishu, dependencies) {
       })],
     };
   }
+  if (job.kind === "qwenpaw-threshold-alert") {
+    await dependencies.sendQwenPawFeishuText(db.operations?.qwenPawInstallDirectory, job.payload.target, qwenPawThresholdMessage(job.payload));
+    return { outcome: "sent", logs: qwenPawLogs(job, "sent", "") };
+  }
+  if (job.kind === "qwenpaw-login-expired") {
+    await dependencies.sendQwenPawFeishuText(db.operations?.qwenPawInstallDirectory, job.payload.target, qwenPawLoginExpiredMessage(job.payload));
+    const qwenQrFileId = qwenPawLoginQrProvider
+      ? await qwenPawLoginQrProvider(job.payload.session)
+      : "";
+    return { outcome: "sent", qwenQrFileId, logs: qwenPawLogs(job, "sent", "") };
+  }
+  if (job.kind === "qwenpaw-login-qr") {
+    const image = await dependencies.readQwenPawLoginQr(job.payload.qrFileId);
+    const delivery = await dependencies.sendQwenPawFeishuQr(db.operations?.qwenPawInstallDirectory, job.payload.target, image);
+    const messageId = String(delivery?.message_id || "").trim();
+    if (!messageId) throw new Error("QwenPaw 未返回飞书二维码消息标识。");
+    return { outcome: "sent", qwenQrMessageId: messageId, logs: qwenPawLogs(job, "sent", "") };
+  }
+  if (job.kind === "qwenpaw-login-qr-retract") {
+    await dependencies.retractQwenPawFeishuQr(db.operations?.qwenPawInstallDirectory, job.payload.messageId);
+    await dependencies.deleteQwenPawLoginQr(job.payload.qrFileId).catch(() => undefined);
+    return { outcome: "sent", logs: qwenPawLogs(job, "sent", "") };
+  }
   return { outcome: "cancelled", logs: [] };
 }
 
@@ -230,6 +406,34 @@ async function finishJob(job, result, now) {
     if (stored.status !== "processing" || stored.leaseUntil !== job.leaseUntil) return current;
 
     if (result.outcome === "sent" || result.outcome === "cancelled") {
+      if (result.outcome === "sent" && stored.kind === "qwenpaw-login-qr" && result.qwenQrMessageId) {
+        const retractionKey = `qwenpaw:login-qr-retract:${stored.id}:${result.qwenQrMessageId}`;
+        if (!current.notificationOutbox.some((item) => item.dedupeKey === retractionKey)) {
+          const dueAt = stored.expiresAt || isoTime(now + QWENPAW_QR_TTL_MS);
+          current.notificationOutbox.push({
+            ...qwenPawDeliveryJob("qwenpaw-login-qr-retract", retractionKey, {
+              messageId: result.qwenQrMessageId,
+              qrFileId: stored.payload.qrFileId,
+              sessionId: stored.payload.sessionId,
+            }, stored.source, now),
+            nextAttemptAt: dueAt,
+            expiresAt: isoTime(Date.parse(dueAt) + QWENPAW_OUTBOX_TTL_MS),
+          });
+        }
+      }
+      if (result.outcome === "sent" && stored.kind === "qwenpaw-login-expired" && result.qwenQrFileId) {
+        const qrKey = `qwenpaw:login-qr:${stored.payload.session?.id}:${result.qwenQrFileId}:${targetKey(stored.payload.target)}`;
+        if (!current.notificationOutbox.some((item) => item.dedupeKey === qrKey)) {
+          current.notificationOutbox.push({
+            ...qwenPawDeliveryJob("qwenpaw-login-qr", qrKey, {
+              sessionId: stored.payload.session?.id,
+              qrFileId: result.qwenQrFileId,
+              target: stored.payload.target,
+            }, stored.source, now),
+            expiresAt: isoTime(now + QWENPAW_QR_TTL_MS),
+          });
+        }
+      }
       current.notificationOutbox.splice(index, 1);
       if (result.logs?.length) current.notificationLogs.push(...result.logs);
       current.notificationLogs = current.notificationLogs.slice(-500);
@@ -257,6 +461,8 @@ async function finishJob(job, result, now) {
     if (stored.attempts === 1) {
       const logs = stored.kind === "threshold-alert"
         ? thresholdLogs(stored, "failed", `飞书发送失败，已进入自动重试：${result.error}`)
+        : stored.kind.startsWith("qwenpaw-")
+          ? qwenPawLogs(stored, "failed", `QwenPaw 飞书发送失败，已进入自动重试：${result.error}`)
         : [createNotificationLog({
           productId: stored.payload.product.id,
           type: "document-sync",
@@ -280,7 +486,7 @@ async function flushDeliveredAcks() {
   }
 }
 
-async function drainUnlocked({ now = Date.now, send = sendFeishuNotification, append = appendPriceDocument } = {}) {
+async function drainUnlocked({ now = Date.now, send = sendFeishuNotification, append = appendPriceDocument, sendQwen = sendQwenPawFeishuText, sendQwenQr = sendQwenPawFeishuQr, retractQwenQr = retractQwenPawFeishuQr, readQwenQr = readQwenPawLoginQr, deleteQwenQr = deleteQwenPawLoginQr } = {}) {
   const currentTime = typeof now === "function" ? now : () => now;
   await flushDeliveredAcks();
   let processed = 0;
@@ -290,7 +496,15 @@ async function drainUnlocked({ now = Date.now, send = sendFeishuNotification, ap
     const db = await readDb();
     let result;
     try {
-      result = await deliverJob(job, db.feishu, { sendFeishuNotification: send, appendPriceDocument: append });
+      result = await deliverJob(job, db, {
+        sendFeishuNotification: send,
+        appendPriceDocument: append,
+        sendQwenPawFeishuText: sendQwen,
+        sendQwenPawFeishuQr: sendQwenQr,
+        retractQwenPawFeishuQr: retractQwenQr,
+        readQwenPawLoginQr: readQwenQr,
+        deleteQwenPawLoginQr: deleteQwenQr,
+      }, currentTime());
     } catch (error) {
       await finishJob(job, { outcome: "failed", error: error?.message || String(error) }, Date.now());
       processed += 1;
@@ -328,6 +542,7 @@ export async function resumeNotificationOutbox({
   now = Date.now(),
   send,
   append,
+  sendQwen,
 } = {}) {
   if (!thresholdAlerts && !documentSync) return 0;
   let resumed = 0;
@@ -345,9 +560,10 @@ export async function resumeNotificationOutbox({
     return current;
   });
   if (resumed) await drainNotificationOutbox({
-    ...((send || append) ? { now } : { now: Date.now }),
+    ...((send || append || sendQwen) ? { now } : { now: Date.now }),
     ...(send ? { send } : {}),
     ...(append ? { append } : {}),
+    ...(sendQwen ? { sendQwen } : {}),
   });
   return resumed;
 }

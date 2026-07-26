@@ -27,3 +27,10 @@ test('the React root has a recoverable application error boundary', async () => 
   assert.match(boundary, /window\.location\.reload\(\)/)
   assert.match(boundary, /ACTIVE_PAGE_KEY, 'monitoring'/)
 })
+
+test('the QwenPaw toolbar tolerates installer fields from an older backend', async () => {
+  const agent = await source('src/features/operations/OperationsAgentChat.tsx')
+  assert.match(agent, /runtimeStatus\.installTask \|\| idleInstallTask/)
+  assert.match(agent, /installDirectory \|\| workspace\.qwenPaw\.defaultInstallDirectory \|\| ''/)
+  assert.match(agent, /String\(directory \|\| ''\)\.trim\(\)/)
+})

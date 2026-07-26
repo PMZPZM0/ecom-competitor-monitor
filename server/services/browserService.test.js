@@ -114,6 +114,36 @@ test("one SKU runtime timeout does not erase successful sibling selections", asy
   ]);
 });
 
+test("an out-of-stock SKU is recorded without clicking it or blocking sibling SKU capture", async () => {
+  let calls = 0;
+  const cdp = {
+    async send() {
+      calls += 1;
+      return calls === 1
+        ? { result: { value: { selected: false, clicked: [], unavailable: "sold-out-value" } } }
+        : { result: { value: { selected: true, clicked: ["in-stock-value"] } } };
+    },
+  };
+
+  const results = await captureRequestedSkuSelections({
+    cdp,
+    requestedSelections: [
+      { skuId: "sku-sold-out", valueIds: ["sold-out-value"] },
+      { skuId: "sku-in-stock", valueIds: ["in-stock-value"] },
+    ],
+    captureRunId: "selection-stock-run",
+    getResponseSequence: () => calls,
+    responseTimeoutMs: 0,
+    responseSettleMs: 0,
+    warmupSelection: false,
+  });
+
+  assert.deepEqual(results.map(({ skuId, selected, outOfStock, reason }) => ({ skuId, selected, outOfStock, reason })), [
+    { skuId: "sku-sold-out", selected: false, outOfStock: true, reason: "out-of-stock:sold-out-value" },
+    { skuId: "sku-in-stock", selected: true, outOfStock: undefined, reason: "response-received" },
+  ]);
+});
+
 test("SKU capture keeps waiting until delayed responses become quiet", async () => {
   let clock = 0;
   let responseSequence = 0;

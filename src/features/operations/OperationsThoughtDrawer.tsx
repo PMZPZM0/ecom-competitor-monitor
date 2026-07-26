@@ -3,6 +3,7 @@ import { createPortal } from 'react-dom'
 import { Lightbulb, X } from 'lucide-react'
 import type { OperationsWorkspace } from '../../types/domain'
 import { OperationsPrinciples } from './OperationsPrinciples'
+import { QwenPawAlertSettings } from './QwenPawAlertSettings'
 
 type OperationsThoughtDrawerProps = {
   open: boolean
@@ -67,7 +68,10 @@ export function OperationsThoughtDrawer({ open, workspace, onClose, onUpdateProf
           </button>
         </header>
         <div className="scrollbar-thin min-h-0 flex-1 overflow-y-auto p-4 sm:p-5">
-          <OperationsPrinciples workspace={workspace} onUpdateProfile={onUpdateProfile} onDeleteReport={onDeleteReport} />
+          <div className="space-y-5">
+            <QwenPawAlertSettings workspace={workspace} />
+            <OperationsPrinciples workspace={workspace} onUpdateProfile={onUpdateProfile} onDeleteReport={onDeleteReport} />
+          </div>
         </div>
       </aside>
     </div>,

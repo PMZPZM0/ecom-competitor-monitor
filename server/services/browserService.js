@@ -1003,7 +1003,8 @@ async function minimizeBrowserForCapture(options = {}) {
 async function openLoginPage(loginUrl, options, message) {
   const context = await ensureBrowser("about:blank", { ...options, headless: false });
   const tab = await createTab(loginUrl, { ...context, headless: false });
-  restoreAccountBrowser(context);
+  if (options?.restoreWindow !== false) restoreAccountBrowser(context);
+  else await minimizeAccountBrowser(context);
   return {
     ok: true,
     url: loginUrl,
@@ -1020,6 +1021,52 @@ export async function openTaobaoLogin(options = {}) {
     options,
     "已打开独立淘宝登录窗口，请用淘宝 App 扫码；检测到账号身份后会自动同步并最小化窗口。",
   );
+}
+
+export async function captureTaobaoLoginQr(options = {}) {
+  const context = browserContext({ ...options, headless: false, background: true });
+  const targets = await getJson(`http://127.0.0.1:${context.port}/json/list`).catch(() => []);
+  const target = targets.find((item) => item.id === options.targetId)
+    || targets.find((item) => item.type === "page" && isTaobaoLoginUrl(item.url));
+  if (!target?.webSocketDebuggerUrl) throw new Error("淘宝登录二维码窗口尚未准备好。");
+
+  const cdp = await createCdp(target.webSocketDebuggerUrl);
+  try {
+    const evaluated = await cdp.send("Runtime.evaluate", {
+      expression: `(() => {
+        const score = (node) => {
+          const box = node.getBoundingClientRect();
+          const marker = [node.id, node.className, node.alt, node.src].join(" ").toLowerCase();
+          const area = box.width * box.height;
+          if (box.width < 80 || box.height < 80 || box.width > 620 || box.height > 620 || area < 6_400) return null;
+          const qrSignal = /qr|qrcode|scan|code|login/.test(marker) ? 10_000 : 0;
+          const squareSignal = Math.max(0, 1_000 - Math.abs(box.width - box.height) * 8);
+          return { x: box.x, y: box.y, width: box.width, height: box.height, score: qrSignal + squareSignal + Math.min(area, 250_000) / 250 };
+        };
+        return [...document.querySelectorAll("img, canvas")].map(score).filter(Boolean).sort((a, b) => b.score - a.score)[0] || null;
+      })()`,
+      returnByValue: true,
+      awaitPromise: true,
+    }, 10_000);
+    const rect = evaluated?.result?.value;
+    if (!rect) throw new Error("未识别到淘宝登录二维码，请稍后重试。");
+    const padding = 12;
+    const image = await cdp.send("Page.captureScreenshot", {
+      format: "png",
+      captureBeyondViewport: false,
+      clip: {
+        x: Math.max(0, rect.x - padding),
+        y: Math.max(0, rect.y - padding),
+        width: rect.width + padding * 2,
+        height: rect.height + padding * 2,
+        scale: 1,
+      },
+    }, 15_000);
+    if (!image?.data) throw new Error("淘宝登录二维码截图为空。");
+    return Buffer.from(image.data, "base64");
+  } finally {
+    cdp.close();
+  }
 }
 
 export async function getTaobaoCookieHeader(options = {}) {
@@ -1212,7 +1259,14 @@ export async function captureRequestedSkuSelections({
           await pause(100);
           target = findValue(valueId);
         }
-        if (!target || target.getAttribute('data-disabled') === 'true') return { selected: false, clicked, missing: valueId };
+        if (!target) return { selected: false, clicked, missing: valueId };
+        const unavailableText = String(target.textContent || '').replaceAll(' ', '').replaceAll(String.fromCharCode(10), '').replaceAll(String.fromCharCode(9), '');
+        const unavailable = target.hasAttribute('disabled')
+          || target.getAttribute('aria-disabled') === 'true'
+          || ['true', '1', 'disabled'].includes(String(target.getAttribute('data-disabled') || '').toLowerCase())
+          || /disabled|soldout|sold-out|nostock|no-stock|unavailable/i.test(String(target.className || ''))
+          || /无货|售罄|已售完|暂时缺货|库存不足|补货中/.test(unavailableText);
+        if (unavailable) return { selected: false, clicked, unavailable: valueId };
         const clickable = target.closest('button,[role="button"]') || target;
         if (clickable.closest('a[href]')) return { selected: false, clicked, unsafeAnchor: valueId };
         clickable.scrollIntoView({ block: 'center', inline: 'nearest' });
@@ -1319,9 +1373,12 @@ export async function captureRequestedSkuSelections({
       responseReceivedAfterSelection,
       responseSequenceEndInclusive,
       clicked,
+      ...(selectionResult.result?.value?.unavailable ? { outOfStock: true } : {}),
       ...(typeof captureSelectedDocument === "function" ? { documentCaptured } : {}),
       reason: selectionResult.result?.value?.missing
         ? `missing-value:${selectionResult.result.value.missing}`
+        : selectionResult.result?.value?.unavailable
+          ? `out-of-stock:${selectionResult.result.value.unavailable}`
         : selectionResult.result?.value?.unsafeAnchor
           ? `unsafe-anchor:${selectionResult.result.value.unsafeAnchor}`
           : documentCaptureError

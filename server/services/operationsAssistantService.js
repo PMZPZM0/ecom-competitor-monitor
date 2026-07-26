@@ -2,10 +2,19 @@ import crypto from "node:crypto";
 import { existsSync } from "node:fs";
 import fs from "node:fs/promises";
 import path from "node:path";
-import { spawn, spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import ExcelJS from "exceljs";
 import { requestModelApiJson, resolveModelConfig } from "./modelConfigService.js";
+import {
+  qwenPawBackendUrl,
+  qwenPawLocalRuntimeStatus,
+  normalizeQwenPawInstallDirectory,
+  qwenPawOfficialPackagePlan,
+  qwenPawWorkingDirectory as officialQwenPawWorkingDirectory,
+  startQwenPawBackend,
+  stopQwenPawBackend,
+} from "./qwenPawRuntimeService.js";
+import { normalizeQwenPawAlerts } from "./qwenPawFeishuService.js";
 
 export const OPERATIONS_REPORT_TYPES = Object.freeze(["promotion", "market", "audience", "competitor"]);
 export const OPERATIONS_MAX_UPLOAD_BYTES = 16 * 1024 * 1024;
@@ -17,17 +26,10 @@ const MAX_CHAT_MESSAGES = 80;
 const DEFAULT_TARGETS = Object.freeze({ targetRoi: 2, maxFeeRate: 0.3, dailyBudgetCap: 0 });
 const DEFAULT_DAILY_REPORT = Object.freeze({ enabled: false, time: "09:30", lastRunAt: null, lastSentAt: null, lastError: "" });
 const QWENPAW_OPERATIONS_AGENT_ID = "default";
-const QWENPAW_CONSOLE_HOST = "127.0.0.1";
-const QWENPAW_CONSOLE_PORT = 4318;
-const QWENPAW_OPERATIONS_CONFIG_REVISION = "operations-agent-tools-v4";
-const QWENPAW_VERSION = "2.0.0.post4";
-const UV_RELEASE_API = "https://api.github.com/repos/astral-sh/uv/releases/latest";
+const QWENPAW_OPERATIONS_CONFIG_REVISION = "operations-agent-official-runtime-v1";
+const QWENPAW_PROVIDER_ID = "ecommerce-monitor-model";
 const serviceDirectory = path.dirname(fileURLToPath(import.meta.url));
 let qwenPawOperationsContextUrl = "http://127.0.0.1:4317/api/operations/agent-context";
-let qwenPawConsoleProcess = null;
-let qwenPawConsoleSignature = "";
-let qwenPawConsoleLastError = "";
-let qwenPawBootstrapPromise = null;
 const qwenPawAgentToolToken = crypto.randomBytes(32).toString("base64url");
 
 const FIELD_ALIASES = Object.freeze({
@@ -254,6 +256,8 @@ export function normalizeOperationsState(value = {}) {
     feedback,
     chat,
     principles: text(value?.principles, 4_000),
+    qwenPawInstallDirectory: normalizeQwenPawInstallDirectory(value?.qwenPawInstallDirectory),
+    qwenPawAlerts: normalizeQwenPawAlerts(value?.qwenPawAlerts),
     dailyReport: {
       ...DEFAULT_DAILY_REPORT,
       enabled: Boolean(schedule.enabled),
@@ -414,6 +418,7 @@ export function buildOperationsWorkspace(value = {}, { now = new Date() } = {}) 
     suggestions: suggestions.map((item) => ({ ...item, feedback: feedbackBySuggestion[item.id] || null })),
     analyses: state.analyses.slice().reverse(),
     chat: state.chat,
+    qwenPawAlerts: state.qwenPawAlerts,
   };
 }
 
@@ -564,141 +569,12 @@ export async function askOperationsAgent(modelConfig, workspace, question, { pri
   return text(outputText(response), 4_000) || "Agent 未返回可用内容，请稍后重试。";
 }
 
-function qwenPawWorkingDirectory(dataDir) {
-  return path.join(dataDir, "operations", "qwenpaw");
-}
-
-function qwenPawRuntimeDirectory(dataDir) {
-  return path.join(qwenPawWorkingDirectory(dataDir), "runtime");
-}
-
-function qwenPawManagedPythonPath(dataDir) {
-  return path.join(qwenPawRuntimeDirectory(dataDir), process.platform === "win32" ? "Scripts" : "bin", process.platform === "win32" ? "python.exe" : "python");
-}
-
-export function qwenPawPythonExecutable(dataDir) {
-  const managed = qwenPawManagedPythonPath(dataDir);
-  return existsSync(managed) ? managed : process.platform === "win32" ? "py" : "python3";
+function qwenPawWorkingDirectory(installDirectory) {
+  return officialQwenPawWorkingDirectory(installDirectory);
 }
 
 export function qwenPawBootstrapPlan({ platform = process.platform, arch = process.arch } = {}) {
-  const cpu = arch === "arm64" ? "aarch64" : arch === "x64" ? "x86_64" : "";
-  if (!cpu) throw new Error(`当前 CPU 架构暂不支持自动部署运营 Agent：${arch}`);
-  if (platform === "win32") return { archive: `uv-${cpu}-pc-windows-msvc.zip`, binary: "uv.exe" };
-  if (platform === "darwin") return { archive: `uv-${cpu}-apple-darwin.tar.gz`, binary: "uv" };
-  throw new Error(`当前系统暂不支持自动部署运营 Agent：${platform}`);
-}
-
-async function runRuntimeCommand(command, args, { timeoutMs = 120_000, env = process.env } = {}) {
-  return new Promise((resolve, reject) => {
-    const child = spawn(command, args, { windowsHide: true, stdio: ["ignore", "pipe", "pipe"], env });
-    const output = [];
-    const collect = (chunk) => {
-      output.push(Buffer.from(chunk));
-      if (output.length > 12) output.shift();
-    };
-    const timer = setTimeout(() => child.kill(), timeoutMs);
-    child.stdout.on("data", collect);
-    child.stderr.on("data", collect);
-    child.on("error", (error) => {
-      clearTimeout(timer);
-      reject(error);
-    });
-    child.on("exit", (code) => {
-      clearTimeout(timer);
-      if (code === 0) return resolve();
-      const detail = Buffer.concat(output).toString("utf8").trim().slice(-1_200);
-      reject(new Error(detail || `${path.basename(command)} 退出，状态码 ${code ?? "未知"}。`));
-    });
-  });
-}
-
-async function downloadText(url) {
-  const response = await fetch(url, { headers: { accept: "application/vnd.github+json", "user-agent": "ecommerce-competitor-monitor" } });
-  if (!response.ok) throw new Error(`下载运行环境清单失败（${response.status}）。`);
-  return response.text();
-}
-
-async function downloadFile(url, destination) {
-  const response = await fetch(url, { headers: { "user-agent": "ecommerce-competitor-monitor" } });
-  if (!response.ok) throw new Error(`下载运行环境失败（${response.status}）。`);
-  await fs.writeFile(destination, Buffer.from(await response.arrayBuffer()));
-}
-
-async function findFile(root, filename) {
-  const entries = await fs.readdir(root, { withFileTypes: true });
-  for (const entry of entries) {
-    const fullPath = path.join(root, entry.name);
-    if (entry.isFile() && entry.name === filename) return fullPath;
-    if (entry.isDirectory()) {
-      const found = await findFile(fullPath, filename);
-      if (found) return found;
-    }
-  }
-  return "";
-}
-
-async function ensureUvBootstrap(dataDir) {
-  const plan = qwenPawBootstrapPlan();
-  const bootstrapDirectory = path.join(qwenPawWorkingDirectory(dataDir), "bootstrap");
-  const uvPath = path.join(bootstrapDirectory, plan.binary);
-  if (existsSync(uvPath)) return uvPath;
-
-  const stagingDirectory = `${bootstrapDirectory}.staging-${process.pid}-${Date.now()}`;
-  try {
-    await fs.mkdir(stagingDirectory, { recursive: true });
-    const release = JSON.parse(await downloadText(UV_RELEASE_API));
-    const assets = Array.isArray(release.assets) ? release.assets : [];
-    const archive = assets.find((asset) => asset?.name === plan.archive);
-    const checksum = assets.find((asset) => asset?.name === `${plan.archive}.sha256`);
-    if (!archive?.browser_download_url || !checksum?.browser_download_url) throw new Error("自动部署所需的运行环境文件不完整。请检查网络后重试。");
-
-    const archivePath = path.join(stagingDirectory, plan.archive);
-    await downloadFile(archive.browser_download_url, archivePath);
-    const expected = (await downloadText(checksum.browser_download_url)).match(/[a-f0-9]{64}/i)?.[0]?.toLowerCase();
-    const actual = crypto.createHash("sha256").update(await fs.readFile(archivePath)).digest("hex");
-    if (!expected || expected !== actual) throw new Error("运行环境下载校验失败，已停止安装。请检查网络后重试。");
-
-    const extracted = path.join(stagingDirectory, "extracted");
-    await fs.mkdir(extracted);
-    if (process.platform === "win32") {
-      await runRuntimeCommand("powershell.exe", ["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", "Expand-Archive -LiteralPath $args[0] -DestinationPath $args[1] -Force", archivePath, extracted]);
-    } else {
-      await runRuntimeCommand("tar", ["-xzf", archivePath, "-C", extracted]);
-    }
-    const extractedUv = await findFile(extracted, plan.binary);
-    if (!extractedUv) throw new Error("运行环境解压后未找到启动文件。");
-    await fs.mkdir(bootstrapDirectory, { recursive: true });
-    await fs.copyFile(extractedUv, uvPath);
-    if (process.platform !== "win32") await fs.chmod(uvPath, 0o755);
-    return uvPath;
-  } finally {
-    await fs.rm(stagingDirectory, { recursive: true, force: true }).catch(() => undefined);
-  }
-}
-
-async function installManagedQwenPawRuntime(dataDir) {
-  const uvPath = await ensureUvBootstrap(dataDir);
-  const runtimeDirectory = qwenPawRuntimeDirectory(dataDir);
-  const pythonPath = qwenPawManagedPythonPath(dataDir);
-  await fs.rm(runtimeDirectory, { recursive: true, force: true });
-  await fs.mkdir(path.dirname(runtimeDirectory), { recursive: true });
-  await runRuntimeCommand(uvPath, ["venv", "--python", "3.12", runtimeDirectory], { timeoutMs: 300_000 });
-  await runRuntimeCommand(uvPath, ["pip", "install", "--python", pythonPath, `qwenpaw==${QWENPAW_VERSION}`], { timeoutMs: 900_000 });
-  const status = qwenPawRuntimeStatus(dataDir);
-  if (!status.installed) throw new Error("运行环境已完成下载，但 QwenPaw 未能正常启动。");
-  return status;
-}
-
-async function ensureQwenPawRuntime(dataDir) {
-  const ready = qwenPawRuntimeStatus(dataDir);
-  if (ready.installed) return ready;
-  if (!qwenPawBootstrapPromise) {
-    qwenPawBootstrapPromise = installManagedQwenPawRuntime(dataDir)
-      .catch((error) => { throw new Error(`首次自动部署运营 Agent 失败：${error.message || error}`); })
-      .finally(() => { qwenPawBootstrapPromise = null; });
-  }
-  return qwenPawBootstrapPromise;
+  return qwenPawOfficialPackagePlan({ platform, arch });
 }
 
 function qwenPawOperationsWorkspace(dataDir) {
@@ -709,34 +585,12 @@ function qwenPawOperationsSkillPath(dataDir) {
   return path.join(qwenPawOperationsWorkspace(dataDir), "skills", "ecommerce-operations-assistant", "SKILL.md");
 }
 
-function qwenPawOperationsAgentPath(dataDir) {
-  return path.join(qwenPawOperationsWorkspace(dataDir), "agent.json");
-}
-
-function qwenPawConsoleUrl() {
-  return `http://${QWENPAW_CONSOLE_HOST}:${QWENPAW_CONSOLE_PORT}/console`;
-}
-
-function qwenPawSyncScriptSourcePath() {
-  return path.join(serviceDirectory, "..", "scripts", "sync-qwenpaw-operations.py");
-}
-
 function qwenPawToolBridgeSourcePath() {
   return path.join(serviceDirectory, "..", "scripts", "ecommerce-agent-mcp.js");
 }
 
 function qwenPawToolBridgePath(dataDir) {
   return path.join(qwenPawWorkingDirectory(dataDir), "ecommerce-agent-mcp.js");
-}
-
-async function qwenPawSyncScriptPath(dataDir) {
-  const sourcePath = qwenPawSyncScriptSourcePath();
-  const destinationPath = path.join(qwenPawWorkingDirectory(dataDir), "sync-qwenpaw-operations.py");
-  const script = await fs.readFile(sourcePath, "utf8");
-  await fs.mkdir(path.dirname(destinationPath), { recursive: true });
-  const existing = await fs.readFile(destinationPath, "utf8").catch(() => "");
-  if (existing !== script) await fs.writeFile(destinationPath, script, "utf8");
-  return destinationPath;
 }
 
 async function qwenPawToolBridgeScriptPath(dataDir) {
@@ -768,11 +622,6 @@ function qwenPawRuntimeEnvironment(dataDir, { apiKey = "", contextUrl = qwenPawO
   };
 }
 
-function qwenPawSafeMessage(value, apiKey = "") {
-  const source = text(value, 600);
-  return apiKey ? source.split(apiKey).join("[已隐藏]") : source;
-}
-
 export function setQwenPawOperationsContextUrl(value) {
   const next = String(value || "").trim();
   if (!/^http:\/\/127\.0\.0\.1:\d+\/api\/operations\/agent-context$/.test(next)) {
@@ -785,7 +634,7 @@ export function qwenPawAgentToolAccessToken() {
   return qwenPawAgentToolToken;
 }
 
-export function qwenPawSyncPlan(dataDir, modelConfig, operatingPrinciples = "") {
+export function qwenPawSyncPlan(installDirectory, modelConfig, operatingPrinciples = "") {
   const resolved = resolveModelConfig(modelConfig);
   if (!resolved.apiKey) throw Object.assign(new Error("请先在设置中心配置文字模型 API Key 后再打开运营 Agent。"), { status: 400 });
   const normalizedPrinciples = text(operatingPrinciples, 4_000);
@@ -795,120 +644,221 @@ export function qwenPawSyncPlan(dataDir, modelConfig, operatingPrinciples = "") 
   return {
     model: resolved.model,
     signature,
-    args: ["--base-url", resolved.baseUrl, "--model", resolved.model],
-    environment: qwenPawRuntimeEnvironment(dataDir, { apiKey: resolved.apiKey, operatingPrinciples: normalizedPrinciples }),
+    args: [],
+    environment: qwenPawRuntimeEnvironment(installDirectory, { operatingPrinciples: normalizedPrinciples }),
     resolved,
   };
 }
 
-async function syncQwenPawOperationsAgent(dataDir, modelConfig, operatingPrinciples = "") {
-  const runtime = await ensureQwenPawRuntime(dataDir);
-  if (!runtime.installed) throw Object.assign(new Error("未检测到 QwenPaw 本地运行时，请先安装后再打开运营 Agent。"), { status: 503 });
-  await qwenPawToolBridgeScriptPath(dataDir);
-  const plan = qwenPawSyncPlan(dataDir, modelConfig, operatingPrinciples);
-  const scriptPath = await qwenPawSyncScriptPath(dataDir);
-  const result = spawnSync(qwenPawPythonExecutable(dataDir), [scriptPath, "--base-url", plan.resolved.baseUrl, "--model", plan.model], {
-    encoding: "utf8",
-    timeout: 45_000,
-    windowsHide: true,
-    env: plan.environment,
+async function qwenPawApi(runtime, pathname, options = {}) {
+  const response = await fetch(qwenPawBackendUrl(runtime, pathname), {
+    ...options,
+    headers: { "content-type": "application/json", ...options.headers },
+    signal: options.signal || AbortSignal.timeout(30_000),
   });
-  if (result.error || result.status !== 0) {
-    const message = qwenPawSafeMessage(result.stderr || result.stdout || result.error?.message, plan.resolved.apiKey);
-    throw Object.assign(new Error(message || "QwenPaw 运营 Agent 同步失败。"), { status: 502 });
+  const body = await response.text();
+  if (!response.ok) {
+    let detail = body;
+    try {
+      const parsed = JSON.parse(body);
+      detail = parsed.detail || parsed.message || body;
+    } catch {
+      // Preserve text returned by the local QwenPaw backend.
+    }
+    throw Object.assign(new Error(text(detail, 600) || `QwenPaw 本地接口返回 ${response.status}。`), { status: 502 });
   }
+  return body ? JSON.parse(body) : null;
+}
+
+async function writeQwenPawWorkspace(installDirectory, operatingPrinciples) {
+  const workspace = qwenPawOperationsWorkspace(installDirectory);
+  await fs.mkdir(workspace, { recursive: true });
+  await fs.rm(path.join(workspace, "BOOTSTRAP.md"), { force: true });
+  const principles = text(operatingPrinciples, 4_000);
+  const principlesBlock = principles
+    ? `## 当前运营思路（必须遵循）\n\n${principles}\n\n每一项运营建议都必须按上述思路作为判断约束。若它与当前本地数据冲突，要明确指出冲突、说明依据并给出替代方案。\n\n`
+    : "## 当前运营思路\n\n暂未设置额外运营思路；仍须严格依据本地数据回答。\n\n";
+  await fs.writeFile(path.join(workspace, "AGENTS.md"), `# 电商运营助手\n\n${principlesBlock}你是电商竞品监控应用的本机运营 Agent。通过 ecommerce_monitor MCP 工具查询和执行应用任务。\n普通业务动作可直接执行并说明结果，包括查价、启停监控、设置监控价、重试本地解析、导入报表、经营分析和创建生图任务。\n删除商品、清空记录、删除账号、修改模型密钥和账号登录资料必须要求用户明确确认。\n价格任务必须调用 capture_product_price 或 get_product_prices，严禁访问淘宝、天猫、浏览器、Cookie、外部网页或任意本地文件。\n查价完成后必须注明账号范围、SKU 覆盖、证据时间和不可用原因；未验证价格不得猜测、不得用历史价替代当前价。\n所有金额、费率和 ROI 以工具返回的本地计算结果为准；数据过期或缺失时必须明确说明。\n回答使用简洁中文：先给结论，再列依据、执行回执、风险和下一步。\n`, "utf8");
+  await fs.writeFile(path.join(workspace, "SOUL.md"), "你是严谨的电商运营助手。把已导入的经营数据转成可核对、可执行的建议，不能补造数据或把推测说成事实。\n", "utf8");
+
+  const skillsDirectory = path.join(workspace, "skills");
+  await fs.mkdir(skillsDirectory, { recursive: true });
+  for (const entry of await fs.readdir(skillsDirectory, { withFileTypes: true })) {
+    if (entry.name !== "ecommerce-operations-assistant") await fs.rm(path.join(skillsDirectory, entry.name), { recursive: true, force: true });
+  }
+  const skillDirectory = path.join(skillsDirectory, "ecommerce-operations-assistant");
+  await fs.mkdir(skillDirectory, { recursive: true });
+  await fs.writeFile(path.join(skillDirectory, "SKILL.md"), "---\nname: ecommerce-operations-assistant\ndescription: Analyze only the local ecommerce operations context supplied by 电商竞品监控.\n---\n\n# 电商运营数据分析\n\n需要本机数据或动作时，只能调用 ecommerce_monitor MCP 工具。工具结果是唯一事实来源。\n", "utf8");
+  await fs.writeFile(path.join(workspace, "skill.json"), `${JSON.stringify({ schema_version: "workspace-skill-manifest.v1", version: 0, skills: { "ecommerce-operations-assistant": { enabled: true, channels: ["all"], source: "customized" } } }, null, 2)}\n`, "utf8");
+  return workspace;
+}
+
+function qwenPawApplicationMcp(installDirectory, workspace) {
+  const mediaDirectory = path.join(workspace, "media");
+  const environment = {
+    ECOM_AGENT_APP_URL: qwenPawAppUrl(),
+    ECOM_AGENT_TOOL_TOKEN: qwenPawAgentToolToken,
+    ECOM_AGENT_WORKSPACE_DIR: workspace,
+    ECOM_AGENT_MEDIA_DIR: mediaDirectory,
+  };
+  if (process.versions.electron) environment.ELECTRON_RUN_AS_NODE = "1";
   return {
-    ...runtime,
-    directory: qwenPawWorkingDirectory(dataDir),
+    clients: {
+      ecommerce_monitor: {
+        name: "ecommerce_monitor",
+        description: "电商竞品监控本机商品、价格、监控、运营数据和 AI 创作工具。",
+        enabled: true,
+        transport: "stdio",
+        command: process.execPath,
+        args: [qwenPawToolBridgePath(installDirectory)],
+        env: environment,
+        cwd: workspace,
+        tools: [
+          "get_workspace_state", "find_products", "get_product_prices", "capture_product_price", "set_product_monitoring",
+          "set_sku_monitor_price", "retry_local_product_data", "get_capture_queue", "capture_products_batch", "set_global_monitor",
+          "sync_product_to_feishu", "get_local_evidence_status", "get_operations_data", "analyze_operations_data",
+          "preview_operations_report", "import_operations_report", "get_image_queue", "get_image_library", "update_image_library_item",
+          "create_image_task", "get_agent_activity",
+        ],
+      },
+    },
+  };
+}
+
+async function configureQwenPawProvider(runtime, plan) {
+  const providers = await qwenPawApi(runtime, "/api/models");
+  let provider = providers.find((item) => item.id === QWENPAW_PROVIDER_ID);
+  if (!provider) {
+    provider = await qwenPawApi(runtime, "/api/models/custom-providers", {
+      method: "POST",
+      body: JSON.stringify({
+        id: QWENPAW_PROVIDER_ID,
+        name: "电商竞品监控文字模型",
+        default_base_url: plan.resolved.baseUrl,
+        api_key_prefix: "",
+        chat_model: "OpenAIChatModel",
+        models: [{ id: plan.model, name: plan.model, supports_multimodal: true }],
+      }),
+    });
+  }
+  const models = [...(provider.models || []), ...(provider.extra_models || [])];
+  if (!models.some((item) => item.id === plan.model)) {
+    await qwenPawApi(runtime, `/api/models/${encodeURIComponent(QWENPAW_PROVIDER_ID)}/models`, {
+      method: "POST",
+      body: JSON.stringify({ id: plan.model, name: plan.model, supports_multimodal: true }),
+    });
+  }
+  await qwenPawApi(runtime, `/api/models/${encodeURIComponent(QWENPAW_PROVIDER_ID)}/config`, {
+    method: "PUT",
+    body: JSON.stringify({ api_key: plan.resolved.apiKey, base_url: plan.resolved.baseUrl, chat_model: "OpenAIChatModel" }),
+  });
+}
+
+export function lockQwenPawBuiltinTools(tools) {
+  const builtinTools = tools?.builtin_tools;
+  if (!builtinTools || typeof builtinTools !== "object" || !Object.keys(builtinTools).length || !builtinTools.view_image) {
+    throw new Error("QwenPaw 内置工具清单不完整，已停止配置，避免误开放通用工具权限。");
+  }
+  for (const [name, tool] of Object.entries(builtinTools)) tool.enabled = name === "view_image";
+  return tools;
+}
+
+async function configureQwenPawAgent(runtime, installDirectory, plan, operatingPrinciples) {
+  const workspace = await writeQwenPawWorkspace(installDirectory, operatingPrinciples);
+  await qwenPawToolBridgeScriptPath(installDirectory);
+  const agent = await qwenPawApi(runtime, `/api/agents/${QWENPAW_OPERATIONS_AGENT_ID}`);
+  agent.name = "运营助手";
+  agent.description = "管理本机商品监控、经营数据分析与 AI 创作任务。";
+  agent.workspace_dir = workspace;
+  agent.language = "zh";
+  agent.active_model = { provider_id: QWENPAW_PROVIDER_ID, model: plan.model };
+  agent.approval_level = "AUTO";
+  agent.system_prompt_files = ["AGENTS.md", "SOUL.md"];
+  agent.channels ||= {};
+  agent.channels.console ||= {};
+  agent.channels.console.enabled = true;
+  agent.channels.feishu ||= {};
+  agent.channels.feishu.require_mention = true;
+  agent.channels.feishu.share_session_in_group = false;
+  agent.channels.feishu.media_dir ||= path.join(workspace, "media");
+  agent.mcp = qwenPawApplicationMcp(installDirectory, workspace);
+  agent.tools = lockQwenPawBuiltinTools(agent.tools);
+  agent.heartbeat = null;
+  agent.acp = null;
+  agent.plan = { ...(agent.plan || {}), enabled: false };
+  agent.coding_mode = { ...(agent.coding_mode || {}), enabled: false };
+  agent.running ||= {};
+  agent.running.auto_title_config = { ...(agent.running.auto_title_config || {}), enabled: false };
+  agent.running.max_iters = 8;
+  agent.running.max_input_length = 16_000;
+  agent.running.context_manager_backend = "light";
+  agent.running.memory_manager_backend = "none";
+  agent.running.light_context_config ||= {};
+  agent.running.light_context_config.strategy = "native";
+  agent.running.light_context_config.context_compact_config = {
+    ...(agent.running.light_context_config.context_compact_config || {}),
+    enabled: true,
+    compact_threshold_ratio: 0.6,
+    reserve_threshold_ratio: 0.15,
+  };
+  agent.running.light_context_config.tool_result_pruning_config = {
+    ...(agent.running.light_context_config.tool_result_pruning_config || {}),
+    enabled: true,
+    pruning_recent_n: 1,
+    pruning_recent_msg_max_bytes: 12_000,
+    pruning_old_msg_max_bytes: 2_000,
+  };
+  await qwenPawApi(runtime, `/api/agents/${QWENPAW_OPERATIONS_AGENT_ID}`, { method: "PUT", body: JSON.stringify(agent) });
+  const agents = await qwenPawApi(runtime, "/api/agents");
+  for (const item of agents.agents || []) {
+    if (item.id !== QWENPAW_OPERATIONS_AGENT_ID && item.enabled) {
+      await qwenPawApi(runtime, `/api/agents/${encodeURIComponent(item.id)}/toggle`, { method: "PATCH", body: JSON.stringify({ enabled: false }) });
+    }
+  }
+  return workspace;
+}
+
+async function syncQwenPawOperationsAgent(installDirectory, modelConfig, operatingPrinciples = "") {
+  const status = qwenPawLocalRuntimeStatus(installDirectory);
+  if (!status.installed) throw Object.assign(new Error("尚未安装 QwenPaw，请先在运营思路旁点击安装。"), { status: 503 });
+  const plan = qwenPawSyncPlan(status.installDirectory, modelConfig, operatingPrinciples);
+  const runtime = await startQwenPawBackend(status.installDirectory);
+  await configureQwenPawProvider(runtime, plan);
+  const workspace = await configureQwenPawAgent(runtime, status.installDirectory, plan, operatingPrinciples);
+  return {
+    ...status,
+    installed: true,
+    skillReady: true,
+    directory: qwenPawWorkingDirectory(status.installDirectory),
     agentId: QWENPAW_OPERATIONS_AGENT_ID,
     model: plan.model,
     signature: plan.signature,
-    skillPath: qwenPawOperationsSkillPath(dataDir),
+    skillPath: path.join(workspace, "skills", "ecommerce-operations-assistant", "SKILL.md"),
+    runtime,
   };
-}
-
-async function qwenPawConsoleReachable() {
-  try {
-    const response = await fetch(qwenPawConsoleUrl(), { signal: AbortSignal.timeout(1_200) });
-    return response.ok;
-  } catch {
-    return false;
-  }
-}
-
-async function waitForQwenPawConsole() {
-  for (let attempt = 0; attempt < 60; attempt += 1) {
-    if (await qwenPawConsoleReachable()) return true;
-    await new Promise((resolve) => setTimeout(resolve, 250));
-  }
-  return false;
 }
 
 export async function stopQwenPawOperationsConsole() {
-  const processHandle = qwenPawConsoleProcess;
-  qwenPawConsoleProcess = null;
-  qwenPawConsoleSignature = "";
-  if (!processHandle || processHandle.exitCode !== null || processHandle.killed) return;
-  const exited = new Promise((resolve) => processHandle.once("exit", resolve));
-  processHandle.kill();
-  await Promise.race([exited, new Promise((resolve) => setTimeout(resolve, 2_000))]);
+  await stopQwenPawBackend();
 }
 
-export async function startQwenPawOperationsConsole(dataDir, modelConfig, operatingPrinciples = "") {
-  const synced = await syncQwenPawOperationsAgent(dataDir, modelConfig, operatingPrinciples);
-  const sameRuntime = qwenPawConsoleProcess && qwenPawConsoleProcess.exitCode === null && qwenPawConsoleSignature === synced.signature;
-  if (!sameRuntime) {
-    qwenPawConsoleLastError = "";
-    await stopQwenPawOperationsConsole();
-    if (!(await qwenPawConsoleReachable())) {
-      const child = spawn(qwenPawPythonExecutable(dataDir), ["-m", "qwenpaw", "app", "--host", QWENPAW_CONSOLE_HOST, "--port", String(QWENPAW_CONSOLE_PORT), "--log-level", "warning"], {
-        env: qwenPawRuntimeEnvironment(dataDir, { operatingPrinciples }),
-        windowsHide: true,
-        stdio: ["ignore", "pipe", "pipe"],
-      });
-      qwenPawConsoleProcess = child;
-      child.stderr.on("data", (chunk) => { qwenPawConsoleLastError = qwenPawSafeMessage(chunk, ""); });
-      child.on("error", (error) => { qwenPawConsoleLastError = qwenPawSafeMessage(error?.message, ""); });
-      child.on("exit", (code) => {
-        if (code && code !== 0) qwenPawConsoleLastError ||= `QwenPaw 本地会话已退出（${code}）。`;
-        if (qwenPawConsoleProcess === child) qwenPawConsoleProcess = null;
-      });
-    }
-    qwenPawConsoleSignature = synced.signature;
-  }
-  if (!(await waitForQwenPawConsole())) {
-    throw Object.assign(new Error(qwenPawConsoleLastError || "QwenPaw 原生会话启动超时。"), { status: 503 });
-  }
+export async function startQwenPawOperationsConsole(installDirectory, modelConfig, operatingPrinciples = "") {
+  const synced = await syncQwenPawOperationsAgent(installDirectory, modelConfig, operatingPrinciples);
   return {
     ...synced,
     running: true,
-    consoleUrl: qwenPawConsoleUrl(),
+    consoleUrl: qwenPawBackendUrl(synced.runtime, "/console"),
   };
 }
 
-export function qwenPawRuntimeStatus(dataDir = "") {
-  const options = { encoding: "utf8", timeout: 5_000, windowsHide: true };
-  const skillPath = dataDir ? qwenPawOperationsSkillPath(dataDir) : "";
-  const withSkillStatus = (status) => ({ ...status, skillReady: Boolean(skillPath && existsSync(skillPath)) });
-  const managedPython = dataDir ? qwenPawManagedPythonPath(dataDir) : "";
-  const candidates = [
-    ...(managedPython && existsSync(managedPython) ? [{ executable: managedPython, source: "应用自动部署" }] : []),
-    ...(process.platform === "win32" ? [{ executable: "py", source: "系统 Python" }, { executable: "python", source: "系统 Python" }] : [{ executable: "python3", source: "系统 Python" }]),
-  ];
-  for (const candidate of candidates) {
-    const result = spawnSync(candidate.executable, ["-m", "qwenpaw", "--version"], options);
-    if (!result.error && result.status === 0) {
-      return withSkillStatus({ installed: true, version: text(result.stdout || result.stderr, 120).replace(/^qwenpaw,?\s*version\s*/i, ""), message: `${candidate.source}运行时已就绪。` });
-    }
-  }
-  return withSkillStatus({ installed: false, version: "", message: "首次打开运营 Agent 时会自动部署本机运行环境。" });
+export function qwenPawRuntimeStatus(installDirectory = "") {
+  const status = qwenPawLocalRuntimeStatus(installDirectory);
+  status.skillReady = existsSync(qwenPawOperationsSkillPath(status.installDirectory));
+  return status;
 }
 
-export async function prepareQwenPawOperationsSkill(dataDir, modelConfig, operatingPrinciples = "") {
-  const synced = await syncQwenPawOperationsAgent(dataDir, modelConfig, operatingPrinciples);
-  // A running QwenPaw process reads its workspace instructions at startup.
-  // Model saves must replace that process so obsolete generic skills cannot
-  // keep inflating subsequent conversations.
-  await stopQwenPawOperationsConsole();
-  return { ...synced, skillReady: existsSync(qwenPawOperationsSkillPath(dataDir)) && existsSync(qwenPawOperationsAgentPath(dataDir)) };
+export async function prepareQwenPawOperationsSkill(installDirectory, modelConfig, operatingPrinciples = "") {
+  const synced = await syncQwenPawOperationsAgent(installDirectory, modelConfig, operatingPrinciples);
+  const { runtime: _runtime, ...payload } = synced;
+  return { ...payload, skillReady: existsSync(qwenPawOperationsSkillPath(installDirectory)) };
 }

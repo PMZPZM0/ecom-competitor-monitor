@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from 'react'
-import { Bot, CircleAlert, ExternalLink, Lightbulb, LoaderCircle, RefreshCw } from 'lucide-react'
+import { Bot, CircleAlert, ExternalLink, LoaderCircle, RefreshCw, Settings2 } from 'lucide-react'
 import { Button } from '../../components/ui/button'
 import { api } from '../../lib/api'
 
@@ -12,22 +12,23 @@ type QwenPawConsoleRuntime = {
 type QwenPawChatEmbedProps = {
   active: boolean
   modelConfigured: boolean
+  runtimeInstalled: boolean
   modelRuntimeKey: string
-  onOpenThinking: () => void
+  onOpenModelSettings: () => void
 }
 
 function messageOf(reason: unknown) {
   return reason instanceof Error ? reason.message : 'QwenPaw 原生会话暂时无法连接。'
 }
 
-export function QwenPawChatEmbed({ active, modelConfigured, modelRuntimeKey, onOpenThinking }: QwenPawChatEmbedProps) {
+export function QwenPawChatEmbed({ active, modelConfigured, runtimeInstalled, modelRuntimeKey, onOpenModelSettings }: QwenPawChatEmbedProps) {
   const [runtime, setRuntime] = useState<QwenPawConsoleRuntime | null>(null)
   const [loading, setLoading] = useState(false)
   const [loaded, setLoaded] = useState(false)
   const [error, setError] = useState('')
 
   const connect = useCallback(async () => {
-    if (!modelConfigured) return
+    if (!modelConfigured || !runtimeInstalled) return
     setLoading(true)
     setLoaded(false)
     setError('')
@@ -38,7 +39,7 @@ export function QwenPawChatEmbed({ active, modelConfigured, modelRuntimeKey, onO
     } finally {
       setLoading(false)
     }
-  }, [modelConfigured])
+  }, [modelConfigured, runtimeInstalled])
 
   useEffect(() => {
     if (active && !runtime && !loading && !error) void connect()
@@ -54,7 +55,16 @@ export function QwenPawChatEmbed({ active, modelConfigured, modelRuntimeKey, onO
     return <section className="flex min-h-[420px] flex-col items-center justify-center border border-dashed border-amber-200 bg-amber-50/50 px-6 text-center">
       <Bot className="h-8 w-8 text-amber-600" />
       <div className="mt-3 text-base font-semibold text-slate-900">先配置文字模型</div>
-      <p className="mt-2 max-w-md text-sm leading-6 text-slate-600">正在跳转至模型配置页。配置完成后，运营助手会自动使用当前文字模型。</p>
+      <p className="mt-2 max-w-md text-sm leading-6 text-slate-600">Agent 页面仍可查看；配置完成后会直接使用设置中心的文字模型。</p>
+      <Button type="button" className="mt-5" onClick={onOpenModelSettings}><Settings2 className="h-4 w-4" />配置模型</Button>
+    </section>
+  }
+
+  if (!runtimeInstalled) {
+    return <section className="flex min-h-[420px] flex-col items-center justify-center border border-dashed border-blue-200 bg-blue-50/40 px-6 text-center">
+      <Bot className="h-8 w-8 text-blue-600" />
+      <div className="mt-3 text-base font-semibold text-slate-900">安装 QwenPaw 后开始对话</div>
+      <p className="mt-2 max-w-md text-sm leading-6 text-slate-600">在上方确认安装路径并点击安装。安装包只从 QwenPaw 官方下载服务获取。</p>
     </section>
   }
 
@@ -78,7 +88,7 @@ export function QwenPawChatEmbed({ active, modelConfigured, modelRuntimeKey, onO
   return <section className="overflow-hidden border border-slate-200 bg-white shadow-sm">
     <div className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-200 bg-slate-50 px-4 py-2.5">
       <div className="flex min-w-0 items-center gap-2"><span className="inline-flex items-center gap-1 rounded-md bg-blue-50 px-2 py-1 text-xs font-medium text-blue-700 ring-1 ring-blue-200"><Bot className="h-3.5 w-3.5" />QwenPaw 原生流式会话</span><span className="truncate text-xs text-slate-500">{runtime.model}</span></div>
-      <div className="flex items-center gap-1"><Button type="button" size="sm" variant="ghost" onClick={onOpenThinking} title="编辑运营思路" className="gap-1.5 px-2 text-slate-700 hover:bg-amber-50 hover:text-amber-800"><Lightbulb className="h-4 w-4" /><span>运营思路</span></Button><Button type="button" size="sm" variant="ghost" title="重新连接" onClick={() => void connect()}><RefreshCw className="h-4 w-4" /></Button><a href={runtime.consoleUrl} target="_blank" rel="noreferrer" className="inline-flex h-8 w-8 items-center justify-center rounded-md text-slate-500 hover:bg-slate-200 hover:text-slate-800" title="在浏览器中打开"><ExternalLink className="h-4 w-4" /></a></div>
+      <div className="flex items-center gap-1"><Button type="button" size="sm" variant="ghost" title="重新连接" onClick={() => void connect()}><RefreshCw className="h-4 w-4" /></Button><a href={runtime.consoleUrl} target="_blank" rel="noreferrer" className="inline-flex h-8 w-8 items-center justify-center rounded-md text-slate-500 hover:bg-slate-200 hover:text-slate-800" title="在浏览器中打开"><ExternalLink className="h-4 w-4" /></a></div>
     </div>
     <div className="relative h-[calc(100vh-270px)] min-h-[620px] bg-white">
       {!loaded && <div className="absolute inset-0 z-10 flex items-center justify-center bg-white"><LoaderCircle className="h-6 w-6 animate-spin text-blue-600" /></div>}
