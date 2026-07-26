@@ -26,7 +26,9 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   })
   if (!response.ok) {
     const text = await response.text()
-    let message = text
+    let message = /<!doctype|<html|Cannot (?:GET|POST|PATCH|DELETE)\s/i.test(text)
+      ? '本地服务版本未更新，请重启应用后重试。'
+      : text
     let code = ''
     try {
       const body = JSON.parse(text) as { message?: string; error?: string | { code?: string; message?: string } }
