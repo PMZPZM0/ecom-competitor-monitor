@@ -2,7 +2,7 @@
   "name": "tmall-competitor-monitor",
   "productName": "电商竞品监控",
   "private": true,
-  "version": "1.0.30",
+  "version": "1.0.31",
   "type": "module",
   "main": "electron/main.mjs",
   "scripts": {
@@ -42,6 +42,7 @@
     "sharp": "^0.35.3",
     "tailwind-merge": "^3.6.0",
     "tailwindcss": "^4.3.2",
+    "xlsx": "^0.18.5",
     "zod": "^4.4.3"
   },
   "devDependencies": {

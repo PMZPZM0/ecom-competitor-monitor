@@ -67,6 +67,7 @@ type Props = {
   busy?: boolean
   onPreview: (preview: Preview) => void
   compactContext?: boolean
+  showPrimaryActions?: boolean
 }
 
 type OperationStatus = {
@@ -93,7 +94,7 @@ function benefitPriceClass(label: string) {
 function CaptureStatus({ product }: { product: Product }) {
   const snapshot = product.lastSnapshot
   const anonymous = snapshot?.accessMode === 'anonymous'
-  const partial = product.lastStatus === 'error' && snapshot?.resolutionStatus === 'partial'
+  const partial = snapshot?.resolutionStatus === 'partial'
   const verifiedSkuCount = snapshot?.skuPrices?.filter((sku) => sku.resolutionStatus === 'verified').length || 0
 
   return (
@@ -358,7 +359,7 @@ function CaptureButton({ busy, onCapture }: { busy?: boolean; onCapture: () => v
   )
 }
 
-export function ProductMonitorCard({ product, monitor, onToggle, onSchedule, onMediaPreference, onSaveSkuMonitorPrice: persistSkuMonitorPrice, onCapture, onRetryBuyerShows, onCaptureSearchMainImage, onReparseLocalEvidence, onLocalImport, onDelete, busy, onPreview, compactContext = false }: Props) {
+export function ProductMonitorCard({ product, monitor, onToggle, onSchedule, onMediaPreference, onSaveSkuMonitorPrice: persistSkuMonitorPrice, onCapture, onRetryBuyerShows, onCaptureSearchMainImage, onReparseLocalEvidence, onLocalImport, onDelete, busy, onPreview, compactContext = false, showPrimaryActions = true }: Props) {
   const cardRef = useRef<HTMLElement | null>(null)
   const [trendVisible, setTrendVisible] = useState(false)
   const [copiedItemId, setCopiedItemId] = useState(false)
@@ -753,15 +754,15 @@ export function ProductMonitorCard({ product, monitor, onToggle, onSchedule, onM
             </div>
           </div>
 
-          <div className="product-monitor-command-deck min-w-0">
-            <div className="ml-auto flex flex-wrap items-center justify-end gap-1.5">
+          <div className={`product-monitor-command-deck min-w-0 ${showPrimaryActions ? '' : 'product-monitor-schedule-only'}`}>
+            {showPrimaryActions && <div className="ml-auto flex flex-wrap items-center justify-end gap-1.5">
               <Button type="button" variant="secondary" size="sm" className="h-9 rounded-lg shadow-sm active:translate-y-px" onClick={() => setPriceVerificationOpen(true)} disabled={!product.lastSnapshot?.skuPrices?.length} title="逐 SKU 核对价格证据、展示金额和计算公式"><ShieldCheck className="h-4 w-4" />核对价格</Button>
               {canRepairPartialPriceFromDisk && <Button type="button" variant="secondary" size="sm" className="h-9 rounded-lg border-amber-200 bg-amber-50 text-amber-800 shadow-sm hover:bg-amber-100 active:translate-y-px" onClick={() => reparseLocalEvidence('price', '价格')} disabled={busy || operation?.tone === 'progress'} title="只读取已保存的本地价格证据补齐未解析 SKU，不打开淘宝"><FileJson className="h-4 w-4" />本地重算</Button>}
               {!localOnly && <Button type="button" variant="secondary" size="sm" className={`h-9 rounded-lg shadow-sm active:translate-y-px ${product.enabled ? 'border-amber-200 bg-amber-50 text-amber-800 hover:bg-amber-100' : 'border-emerald-600 bg-emerald-600 text-white hover:bg-emerald-700'}`} onClick={toggleMonitoring} disabled={togglingMonitor} title={!monitor.running ? '启用本商品计划；全局自动监控开启后执行' : product.enabled ? '暂停本商品定时监控' : '启用本商品定时监控'}>{product.enabled ? <PauseCircle className="h-4 w-4" /> : <PlayCircle className="h-4 w-4" />}{togglingMonitor ? '更新中' : product.enabled ? '暂停定时' : '启用定时'}</Button>}
               <Button type="button" variant="secondary" size="sm" className="h-9 rounded-lg shadow-sm active:translate-y-px" onClick={syncFeishu} disabled={syncingFeishu || !product.lastSnapshot}><BellRing className="h-4 w-4" />{syncingFeishu ? '同步中' : '同步飞书'}</Button>
               {localOnly ? <Button type="button" size="sm" className="h-9 rounded-lg shadow-sm" onClick={() => onLocalImport(product)} title="选择新的本地数据文件更新价格"><FileJson className="h-4 w-4" />导入新文件</Button> : <CaptureButton busy={busy} onCapture={captureNow} />}
               <Button type="button" variant="danger" size="sm" className="h-9 w-9 rounded-lg px-0 active:translate-y-px" onClick={() => onDelete(product)} title="删除商品" aria-label="删除商品"><Trash2 className="h-4 w-4" /></Button>
-            </div>
+            </div>}
             {localOnly ? <div className="product-monitor-schedule-row mt-2 ml-auto flex items-center justify-end gap-2 text-xs text-sky-700"><FileJson className="h-3.5 w-3.5" />本地数据不执行定时或在线抓取；请导入新文件更新价格。</div> : <div className="product-monitor-schedule-row mt-2 ml-auto flex flex-wrap items-center justify-end gap-2 text-sm text-slate-600">
               <div className="inline-flex h-9 overflow-hidden rounded-lg bg-slate-100 p-0.5" role="radiogroup" aria-label="抓取计划模式">
                 <button type="button" role="radio" aria-checked={scheduleModeDraft === 'once'} onClick={() => setScheduleModeDraft('once')} className={`rounded-md px-2.5 text-xs font-medium transition ${scheduleModeDraft === 'once' ? 'bg-white text-slate-900 shadow-sm' : 'text-slate-500 hover:text-slate-800'}`}>单次</button>

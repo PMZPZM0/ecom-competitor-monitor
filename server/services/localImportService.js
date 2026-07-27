@@ -3,7 +3,7 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import { dbRuntimeInfo, readDb } from "../storage/db.js";
 import { PRICE_PARSER_VERSION } from "./priceResolver.js";
-import { hydrateBrowserCapturePage, resolveLocalSkuPriceRows } from "./tmallScraper.js";
+import { extractProductMetadataFromLocalEvidence, hydrateBrowserCapturePage, resolveLocalSkuPriceRows } from "./tmallScraper.js";
 
 export const LOCAL_IMPORT_MAX_BYTES = 8 * 1024 * 1024;
 export const LOCAL_IMPORT_MAX_FILES = 200;
@@ -379,7 +379,14 @@ function metadataFrom(parsed, content) {
     shopName: /^(?:shopName|shopTitle|storeName|sellerName|sellerNick)$/i,
     model: /^(?:model|modelName|productModel)$/i,
   };
-  const result = { title: "", shopName: "", model: "" };
+  const pageHtml = typeof parsed?.page?.html === "string" ? parsed.page.html : content;
+  const pageUrl = String(parsed?.page?.finalUrl || parsed?.finalUrl || parsed?.requestedUrl || "");
+  const extracted = extractProductMetadataFromLocalEvidence(pageHtml, pageUrl);
+  const result = {
+    title: extracted.title || "",
+    shopName: extracted.shopName || "",
+    model: extracted.model || "",
+  };
   const stack = parsed && typeof parsed === "object" ? [parsed] : [];
   const seen = new Set();
   while (stack.length && Object.values(result).some((value) => !value)) {
@@ -398,6 +405,17 @@ function metadataFrom(parsed, content) {
     result.title = content.match(/<title[^>]*>([\s\S]*?)<\/title>/i)?.[1]?.replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim().slice(0, 160) || "";
   }
   return result;
+}
+
+export async function readBrowserCaptureMetadata(captureId) {
+  const capture = await readBrowserCaptureSource(captureId);
+  const metadata = metadataFrom(capture, JSON.stringify(capture));
+  return {
+    captureId: capture.captureId,
+    sourceFile: capture.sourceFile || "",
+    localFirst: { ...capture.localFirst },
+    ...metadata,
+  };
 }
 
 function buildSnapshot({ content, parsed, itemId, accountType, capturedAt }) {

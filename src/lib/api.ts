@@ -55,6 +55,11 @@ export const api = {
     body.append('sourceName', payload.sourceName || '')
     return request<{ workspace: OperationsWorkspace }>('/api/operations/reports', { method: 'POST', body })
   },
+  previewOperationsReport: (file: File) => {
+    const body = new FormData()
+    body.append('file', file, file.name)
+    return request<{ fileName: string, kind: 'xls' | 'xlsx' | 'csv' | 'json' | 'screenshot', columns: string[], rowCount?: number, sampleRows: Array<Record<string, unknown>> }>('/api/operations/reports/preview', { method: 'POST', body })
+  },
   deleteOperationsReport: (id: string) => request<void>(`/api/operations/reports/${encodeURIComponent(id)}`, { method: 'DELETE' }),
   updateOperationsProfile: (payload: { principles?: string, dailyReport?: { enabled?: boolean, time?: string } }) =>
     request<OperationsWorkspace>('/api/operations/profile', { method: 'PATCH', body: JSON.stringify(payload) }),

@@ -573,6 +573,11 @@ function App() {
     const result = await api.uploadOperationsReport(file, payload)
     setOperations(result.workspace)
     setNotice('运营数据已导入并完成本地指标计算。')
+    return result.workspace
+  }
+
+  async function previewOperationsReport(file: File) {
+    return api.previewOperationsReport(file)
   }
 
   async function deleteOperationsReport(id: string) {
@@ -660,6 +665,8 @@ function App() {
   const operationsAssistant = <OperationsAssistant
     workspace={operations}
     onUpload={uploadOperationsReport}
+    onPreview={previewOperationsReport}
+    onDeleteReport={deleteOperationsReport}
     onUpdateTarget={updateOperationsTarget}
     onFeedback={updateOperationsFeedback}
     onAnalyze={analyzeOperations}

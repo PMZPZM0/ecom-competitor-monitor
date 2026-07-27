@@ -90,9 +90,9 @@ export function HelpCenter({ onNavigate }: { onNavigate: (page: 'settings' | 'mo
           </div>
           <Checklist items={[
             '顶部“全局自动监控”是总开关。暂停后，所有商品都不会按时间自动抓取，但单品启停与计划会保留。',
-            '商品卡片“启用本商品”只影响当前商品。启用后会进入右侧任务中心的监控计划；移出计划不会删除商品和历史数据。',
-            '商品卡片底部二选一：单次定时只执行所选日期时间并在完成后暂停；循环监控只按分钟周期执行。',
-            '手动点击“抓取”不依赖定时计划；同一账号仍会按顺序执行，避免多个任务同时操作一个浏览器。',
+            '商品工作台卡片右侧的“定时”只启用或暂停当前商品；启用后会进入右上方任务中心的监控计划。',
+            '点击商品卡片进入预览，再选择单次或循环、填写时间或间隔并点击“保存计划”。同一商品只会执行其中一种计划。',
+            '手动点击卡片右侧“抓取”不依赖定时计划；同一账号仍会按顺序执行，避免多个任务同时操作一个浏览器。',
           ]} />
         </Section>
 
@@ -102,23 +102,24 @@ export function HelpCenter({ onNavigate }: { onNavigate: (page: 'settings' | 'mo
           <Checklist items={['选择账号类型是在指定首选监控视角；首选不可用时，会在其余可用账号中按 88VIP → 礼金 → 普通的能力顺序回退。', '多个账号的价格结果完全隔离，不会互相覆盖；商品卡片可切换账号视角查看，其中标记“监控”的主账号视角才用于监控阈值和飞书。', '页面没有返回可信价格证据时仍会失败或显示“未获取”，不会用标价或其他账号结果补造。', '“检测登录”只读取账号浏览器现有登录状态，不打开商品页；登录失效时点击“重新授权”扫码更新原账号。', '账号卡片的“导出登录包”会生成本机加密 JSON；点顶部“导入登录包”可写入新的独立浏览器并自动验证。登录包仅供本机恢复，Cookie 过期、文件被修改或换电脑都会拒绝导入。', '“一键检测全部”只检查登录状态，不会开始商品抓取。一个账号固定使用自己的浏览器资料目录。']} />
         </Section>
 
-        <Section id="guide-product" title="添加商品与抓取" summary="链接和商品 ID 都能用，买家秀按需开启" icon={Search}>
-          <div className="flex items-start gap-3"><Search className="mt-1 h-5 w-5 shrink-0 text-blue-600" /><div><p><strong>链接模式：</strong>粘贴淘宝或天猫商品链接，软件会自动删除跟踪参数，只保留平台、商品路径和商品 ID。</p><p className="mt-2"><strong>商品 ID 模式：</strong>只输入纯数字 ID，选择淘宝或天猫，软件会自动补全有效地址前缀。</p></div></div>
+        <Section id="guide-product" title="商品工作台：添加、预览与抓取" summary="外层快速操作，明细统一放进商品预览" icon={Search}>
+          <div className="flex items-start gap-3"><Search className="mt-1 h-5 w-5 shrink-0 text-blue-600" /><div><p><strong>新增商品：</strong>点击商品工作台右上角“新增商品”，可粘贴淘宝/天猫链接，或只输入商品 ID 并选择平台。链接会自动清理跟踪参数。</p><p className="mt-2"><strong>工作卡片：</strong>列表只保留商品、最低已验证价、账号和监控状态；右侧直接完成核对、定时、飞书、抓取和删除。</p></div></div>
           <Checklist items={[
-            '单个添加的主按钮是“自动采集并本地解析”：软件会使用已授权账号在后台打开商品页面，每个账号视角可能分别访问；采集完成后先脱敏保存原始证据，再从本地文件读取和解析价格。',
+            '单个添加的主按钮是“自动采集并本地解析”：软件会使用已授权账号在后台打开商品页面，每个账号视角可能分别访问；采集完成后先脱敏保存原始证据，再从本地文件读取和解析价格与型号。型号优先读取页面“型号/产品型号/货号”基础参数；旧记录打开工作台时也只会用已保存证据补齐，不重新访问商品页。',
             '自动采集仍会访问淘宝商品页面；本地落盘用于保证解析来源可核对、同一份证据可重复验证，不代表绕过淘宝验证，也不能保证不会遇到平台风控。',
-            '新商品默认处于“本商品未启用”，先核对主图、SKU 和各价格通道，再按需要启用定时监控。之后的手动抓取、批量抓取和定时监控也使用相同的“采集 → 脱敏落盘 → 读盘解析”流程。',
-            '“同时抓取买家秀”默认关闭；勾选后，该商品的首次、手动和定时抓取才会自动包含买家秀。',
+            '新商品默认处于“未启用”。先点卡片的“核对”检查 SKU、证据和公式；点商品名称可进入预览，查看账号视角、监控价、定时计划、素材和买家秀。',
+            '外层“定时”只切换本商品是否进入自动监控；单次时间、循环间隔和“保存计划”都在商品预览顶部，避免误把启用开关当成计划设置。',
+            '外层“飞书”同步当前已验证的 SKU 快照；“抓取”立即更新当前商品；删除会移除商品和该商品的历史记录，执行前会二次确认。',
+            '“完整素材”和“买家秀”默认关闭；首次抓价只抓价格、800 主图和 SKU 图。需要时在新增面板或商品预览中按需打开。',
             '批量自动采集用于多个新链接或 ID，一次最多 30 个；每个商品都会先保存本地证据再解析，买家秀和完整素材选项对整批统一生效。',
-            '商品简称不是必填。抓取成功后优先展示平台真实标题、店铺和型号。',
-            '抓取完成后先检查主图、SKU 数量和各账号视角价格；有疑问时切换账号并打开“核对价格”。',
+            '筛选区支持按店铺、型号、账号、价格通道和排序定位商品；批量选择后可抓取、下载买家秀或删除。',
           ]} />
         </Section>
 
         <Section id="guide-price" title="价格、优惠明细与监控价" summary="不同价格独立核验，监控价按 SKU 设置" icon={BadgeDollarSign}>
           <div className="overflow-x-auto"><table className="w-full border-collapse text-left text-sm"><thead><tr className="border-y border-slate-200 bg-slate-50 text-slate-600"><th className="px-3 py-2">价格</th><th className="px-3 py-2">含义</th><th className="px-3 py-2">未获取时</th></tr></thead><tbody className="divide-y divide-slate-100"><tr><td className="px-3 py-3 font-medium text-sky-700">普通价</td><td className="px-3 py-3">标价减去明确的公共商品优惠，不再被秒杀或百亿补贴价覆盖</td><td className="px-3 py-3">显示未验证，不使用标价猜测</td></tr><tr><td className="px-3 py-3 font-medium text-cyan-700">百亿补贴/淘宝秒杀价</td><td className="px-3 py-3">在普通价基础上减去当前活动的补贴，作为独立价格通道展示</td><td className="px-3 py-3">对应活动价格显示未获取</td></tr><tr><td className="px-3 py-3 font-medium text-teal-700">国补价</td><td className="px-3 py-3">当前公共或活动价格减去当前 SKU 明确返回的政府补贴</td><td className="px-3 py-3">显示未获取国补价</td></tr><tr><td className="px-3 py-3 font-medium text-rose-700">惊喜立减价</td><td className="px-3 py-3">国补价或当前活动价格再减明确的惊喜立减权益</td><td className="px-3 py-3">显示当前 SKU 无或未获取</td></tr><tr><td className="px-3 py-3 font-medium text-amber-700">淘金币价</td><td className="px-3 py-3">当前价格层级再减该账号和 SKU 的淘金币抵扣</td><td className="px-3 py-3">显示无淘金币</td></tr><tr><td className="px-3 py-3 font-medium text-orange-700">礼金价</td><td className="px-3 py-3">当前账号明确可见的礼金资格价，与其他价格独立核对</td><td className="px-3 py-3">显示未获取</td></tr><tr><td className="px-3 py-3 font-medium text-violet-700">88VIP 价</td><td className="px-3 py-3">88VIP 账号专享价格，与其他价格独立核对</td><td className="px-3 py-3">显示未获取</td></tr></tbody></table></div>
           <Checklist items={[
-            '“核对价格”逐 SKU 展示证据、金额和公式；验证不闭合时不会保存猜测值。',
+            '商品工作卡片的“核对”会逐 SKU 展示证据、金额和公式；验证不闭合时不会保存猜测值。',
             '“优惠明细”按标价、商品优惠、账号权益和最终价格分层展示，每个 SKU 独立。',
             '监控价必须按 SKU 单独设置。价格更新不会清除监控价。',
             '只有标记“监控”的主账号视角中，已验证价格低于该 SKU 监控价时，才进入飞书低价提醒判断；切换卡片账号只改变展示。',
@@ -126,7 +127,7 @@ export function HelpCenter({ onNavigate }: { onNavigate: (page: 'settings' | 'mo
         </Section>
 
         <Section id="guide-queue" title="任务中心：监控计划" summary="只看已启用商品、计划时间和执行顺序" icon={ListChecks}>
-          <div className="flex items-start gap-3"><ListChecks className="mt-1 h-5 w-5 shrink-0 text-blue-600" /><p>在“商品监控”右侧打开任务中心并选择“监控计划”，即可查看已启用商品和下次抓取时间。全局暂停时商品仍保留在计划中，但状态会统一显示“等待全局开启”。</p></div>
+          <div className="flex items-start gap-3"><ListChecks className="mt-1 h-5 w-5 shrink-0 text-blue-600" /><p>在商品工作台右上角打开“任务中心”并选择“监控计划”，即可查看已启用商品和下次抓取时间。全局暂停时商品仍保留在计划中，但状态会统一显示“等待全局开启”。</p></div>
           <Checklist items={['计划序号表示当前页面中的执行先后；同一账号严格按顺序抓取，不同账号才会并行。', '“抓取”只立即执行当前商品，优先使用首选账号；不可用时按账号能力回退。', '“移出”只暂停本商品自动监控，商品卡片、历史价格、监控价和计划都保留。', '在商品列表重新点击“启用本商品”，商品会立即回到监控计划。']} />
         </Section>
 

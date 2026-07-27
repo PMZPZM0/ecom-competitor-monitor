@@ -1,12 +1,14 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
-import { AlertTriangle, CheckCircle2, ChevronDown, ChevronLeft, ChevronRight, ChevronUp, Download, FileJson, LoaderCircle, Play, RotateCcw, Search, SlidersHorizontal, Trash2 } from 'lucide-react'
+import { AlertTriangle, BellRing, CalendarClock, CheckCircle2, ChevronLeft, ChevronRight, Download, Eye, FileJson, LoaderCircle, PauseCircle, Play, PlayCircle, RotateCcw, Search, ShieldCheck, SlidersHorizontal, Trash2, X } from 'lucide-react'
 import { Badge } from '../../components/ui/badge'
 import { Button } from '../../components/ui/button'
 import { Input } from '../../components/ui/input'
 import { downloadFile } from '../../lib/download'
+import { api } from '../../lib/api'
 import { currency } from '../../lib/utils'
 import type { MonitorChannel, Overview, Product, ProductCaptureOptions, RunRecord } from '../../types/domain'
 import { ImagePreview, type Preview } from '../products/productDisplay'
+import { PriceVerificationDialog } from '../products/PriceVerificationDialog'
 import { ProductMonitorCard } from '../products/ProductMonitorCard'
 import {
   downloadBuyerShowsBatchHref,
@@ -131,7 +133,7 @@ function accountClass(product: Product) {
 }
 
 function productState(product: Product, monitor: Overview['monitor']) {
-  if (product.lastStatus === 'error' && product.lastSnapshot?.resolutionStatus === 'partial') {
+  if (product.lastSnapshot?.resolutionStatus === 'partial') {
     const total = product.lastSnapshot.skuPrices?.length || 0
     const verified = product.lastSnapshot.skuPrices?.filter((sku) => sku.resolutionStatus === 'verified').length || 0
     return { label: `部分可用 ${verified}/${total}`, detail: product.lastError || '部分 SKU 缺少当前优惠证据', tone: 'amber', rail: 'border-l-amber-400', badge: 'border-amber-100 bg-amber-50 text-amber-700' }
@@ -159,7 +161,9 @@ export function MonitorClassification({ products, monitor, onToggle, onSchedule,
   const [sortKey, setSortKey] = useState<ProductSortKey>('updated-desc')
   const [page, setPage] = useState(1)
   const [mobileFiltersOpen, setMobileFiltersOpen] = useState(false)
-  const [expandedProductId, setExpandedProductId] = useState('')
+  const [previewProductId, setPreviewProductId] = useState('')
+  const [priceVerificationProductId, setPriceVerificationProductId] = useState('')
+  const [quickActionKey, setQuickActionKey] = useState('')
   const [selectedIds, setSelectedIds] = useState<Set<string>>(() => new Set())
   const [batchFeedback, setBatchFeedback] = useState<{ tone: 'progress' | 'success' | 'error'; message: string } | null>(null)
   const searchRef = useRef<HTMLInputElement>(null)
@@ -185,6 +189,8 @@ export function MonitorClassification({ products, monitor, onToggle, onSchedule,
   const selectedOnlineCount = sortedProducts.filter((product) => selectedIds.has(product.id) && product.captureMode !== 'local-only').length
   const allVisibleSelected = pageProducts.length > 0 && selectedVisibleCount === pageProducts.length
   const hasFilters = Boolean(query || shopFilter || modelFilter || accountFilter || benefitFilter)
+  const previewProduct = products.find((product) => product.id === previewProductId) || null
+  const priceVerificationProduct = products.find((product) => product.id === priceVerificationProductId) || null
 
   function resetFilters() {
     setQuery('')
@@ -250,11 +256,68 @@ export function MonitorClassification({ products, monitor, onToggle, onSchedule,
     }
   }
 
+  async function runQuickCapture(product: Product) {
+    const key = `${product.id}:capture`
+    setQuickActionKey(key)
+    setBatchFeedback({ tone: 'progress', message: `正在抓取“${productTitle(product)}”，请保持软件运行。` })
+    try {
+      const captured = await onCapture(product)
+      if (!captured?.lastSnapshot || captured.lastStatus === 'error') throw new Error(captured?.lastError || '没有生成可验证的价格快照。')
+      setBatchFeedback({ tone: 'success', message: `“${productTitle(product)}”已更新，价格证据已保存到本地并完成解析。` })
+    } catch (error) {
+      setBatchFeedback({ tone: 'error', message: error instanceof Error ? error.message : '商品抓取失败。' })
+    } finally {
+      setQuickActionKey('')
+    }
+  }
+
+  async function runQuickSync(product: Product) {
+    const key = `${product.id}:sync`
+    setQuickActionKey(key)
+    setBatchFeedback({ tone: 'progress', message: `正在同步“${productTitle(product)}”到飞书。` })
+    try {
+      await api.syncProductToFeishu(product.id)
+      setBatchFeedback({ tone: 'success', message: `“${productTitle(product)}”已同步到飞书。` })
+    } catch (error) {
+      setBatchFeedback({ tone: 'error', message: error instanceof Error ? error.message : '飞书同步失败。' })
+    } finally {
+      setQuickActionKey('')
+    }
+  }
+
+  async function runQuickToggle(product: Product) {
+    const key = `${product.id}:monitor`
+    setQuickActionKey(key)
+    try {
+      await onToggle(product)
+      setBatchFeedback({ tone: 'success', message: product.enabled ? `已暂停“${productTitle(product)}”的定时监控。` : `已启用“${productTitle(product)}”的定时监控。` })
+    } catch (error) {
+      setBatchFeedback({ tone: 'error', message: error instanceof Error ? error.message : '监控状态更新失败。' })
+    } finally {
+      setQuickActionKey('')
+    }
+  }
+
+  async function runQuickDelete(product: Product) {
+    if (!window.confirm(`确认删除“${productTitle(product)}”？商品历史与监控规则将一并移除。`)) return
+    const key = `${product.id}:delete`
+    setQuickActionKey(key)
+    try {
+      await onDelete(product)
+      setBatchFeedback({ tone: 'success', message: '商品已删除。' })
+    } catch (error) {
+      setBatchFeedback({ tone: 'error', message: error instanceof Error ? error.message : '删除商品失败。' })
+    } finally {
+      setQuickActionKey('')
+    }
+  }
+
   useEffect(() => {
     const existingIds = new Set(products.map((product) => product.id))
     setSelectedIds((current) => new Set([...current].filter((id) => existingIds.has(id))))
-    if (expandedProductId && !existingIds.has(expandedProductId)) setExpandedProductId('')
-  }, [products, expandedProductId])
+    if (previewProductId && !existingIds.has(previewProductId)) setPreviewProductId('')
+    if (priceVerificationProductId && !existingIds.has(priceVerificationProductId)) setPriceVerificationProductId('')
+  }, [products, previewProductId, priceVerificationProductId])
 
   useEffect(() => setPage(1), [query, shopFilter, modelFilter, accountFilter, benefitFilter, sortKey])
 
@@ -270,15 +333,15 @@ export function MonitorClassification({ products, monitor, onToggle, onSchedule,
         event.preventDefault()
         searchRef.current?.focus()
       }
-      if (event.key === 'Escape' && expandedProductId && !preview) setExpandedProductId('')
+      if (event.key === 'Escape' && previewProductId && !preview) setPreviewProductId('')
     }
     window.addEventListener('keydown', handleShortcut)
     return () => window.removeEventListener('keydown', handleShortcut)
-  }, [expandedProductId, preview])
+  }, [previewProductId, preview])
 
   return (
     <>
-      <section className="monitor-surface border-y border-white/70" aria-label="商品筛选与批量操作">
+      <section className="product-workbench-filter" aria-label="商品筛选与批量操作">
         <div className="grid grid-cols-[minmax(0,1fr)_auto] gap-2 p-3 lg:grid-cols-[minmax(280px,1.7fr)_minmax(150px,0.8fr)_minmax(150px,0.8fr)_170px_auto]">
           <label className="relative block">
             <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400" />
@@ -302,12 +365,12 @@ export function MonitorClassification({ products, monitor, onToggle, onSchedule,
 
         <div className={`${mobileFiltersOpen ? 'flex' : 'hidden'} flex-wrap items-center justify-between gap-3 border-t border-slate-100 px-3 py-2.5 lg:flex`}>
           <div className="flex min-w-0 flex-wrap items-center gap-2">
-            <div className="inline-flex h-8 overflow-hidden rounded-md bg-slate-100 p-0.5" aria-label="账号类型筛选">
-              {([{ value: '', label: '全部账号' }, { value: 'normal', label: '普通' }, { value: 'gift', label: '礼金' }, { value: 'vip88', label: '88VIP' }] as const).map((option) => <button key={option.value || 'all'} type="button" onClick={() => setAccountFilter(option.value)} className={`rounded px-2.5 text-xs ${accountFilter === option.value ? 'bg-white font-medium text-slate-900 shadow-sm' : 'text-slate-500 hover:text-slate-800'}`}>{option.label}</button>)}
-            </div>
-            <div className="inline-flex min-h-8 flex-wrap items-center gap-0.5 rounded-md bg-slate-100 p-0.5" aria-label="优惠类型筛选">
+            <div className="flex items-center gap-1.5"><span className="text-[11px] font-medium text-slate-400">账号</span><div className="inline-flex h-8 overflow-hidden rounded-md bg-slate-100 p-0.5" aria-label="账号类型筛选">
+              {([{ value: '', label: '全部' }, { value: 'normal', label: '普通' }, { value: 'gift', label: '礼金' }, { value: 'vip88', label: '88VIP' }] as const).map((option) => <button key={option.value || 'all'} type="button" onClick={() => setAccountFilter(option.value)} className={`rounded px-2.5 text-xs ${accountFilter === option.value ? 'bg-white font-medium text-slate-900 shadow-sm' : 'text-slate-500 hover:text-slate-800'}`}>{option.label}</button>)}
+            </div></div>
+            <div className="flex items-center gap-1.5"><span className="text-[11px] font-medium text-slate-400">价格</span><div className="inline-flex min-h-8 flex-wrap items-center gap-0.5 rounded-md bg-slate-100 p-0.5" aria-label="优惠类型筛选">
               {benefitLabels.map((option) => <button key={option.value || 'all'} type="button" onClick={() => setBenefitFilter(option.value)} className={`h-7 rounded px-2.5 text-xs ${benefitFilter === option.value ? 'bg-white font-medium text-slate-900 shadow-sm' : 'text-slate-500 hover:text-slate-800'}`}>{option.label}</button>)}
-            </div>
+            </div></div>
           </div>
           <div className="flex items-center gap-2 text-xs text-slate-500">
             <span>找到 {filteredProducts.length} 个</span>
@@ -330,71 +393,52 @@ export function MonitorClassification({ products, monitor, onToggle, onSchedule,
 
       {batchFeedback && <div className={`mt-3 flex items-center gap-2 rounded-md px-3 py-2 text-sm ${batchFeedback.tone === 'progress' ? 'bg-blue-50 text-blue-800' : batchFeedback.tone === 'success' ? 'bg-emerald-50 text-emerald-800' : 'bg-red-50 text-red-700'}`} role={batchFeedback.tone === 'error' ? 'alert' : 'status'} aria-live="polite">{batchFeedback.tone === 'progress' ? <LoaderCircle className="h-4 w-4 shrink-0 animate-spin" /> : batchFeedback.tone === 'success' ? <CheckCircle2 className="h-4 w-4 shrink-0" /> : <AlertTriangle className="h-4 w-4 shrink-0" />}<span>{batchFeedback.message}</span></div>}
 
-      <section className="monitor-surface mt-3 overflow-hidden border-y border-white/70" aria-label="商品监控列表">
-        <div className="hidden grid-cols-[28px_minmax(220px,1.7fr)_120px_100px_150px_140px] items-center gap-3 bg-white/25 px-4 py-2.5 text-xs font-semibold text-slate-600 lg:grid">
-          <span />
-          <span>商品</span>
-          <span>价格与阈值</span>
-          <span>主账号</span>
-          <span>监控状态</span>
-          <span className="text-right">快捷操作</span>
+      <section className="product-workbench-list mt-3 overflow-hidden rounded-lg border" aria-label="商品监控列表">
+        <div className="flex items-center justify-between gap-3 border-b border-slate-200 px-4 py-2.5 text-xs text-slate-500">
+          <span><strong className="font-semibold text-slate-800">{filteredProducts.length} 个商品</strong><span className="mx-1.5 text-slate-300">·</span>点击商品预览明细</span>
+          <span className="hidden sm:inline">右侧直接执行操作</span>
         </div>
-        <div className="divide-y divide-slate-100">
+        <div className="space-y-2 p-2 sm:p-3">
           {pageProducts.map((product) => {
-            const expanded = expandedProductId === product.id
             const { primary } = productImages(product)
             const state = productState(product, monitor)
             const currentPrice = verifiedMinimum(product)
             const rules = monitorRuleSummary(product)
             const busy = busyProductId === product.id || Boolean(batchBusy)
+            const captureBusy = quickActionKey === `${product.id}:capture`
+            const syncBusy = quickActionKey === `${product.id}:sync`
+            const monitorBusy = quickActionKey === `${product.id}:monitor`
+            const deleteBusy = quickActionKey === `${product.id}:delete`
             return (
-              <article key={product.id} className={`border-l-4 ${state.rail} bg-white/10 transition-colors hover:bg-white/28`}>
-                <div className="grid grid-cols-[28px_minmax(0,1fr)] gap-x-3 gap-y-2 px-3 py-3 lg:grid-cols-[28px_minmax(220px,1.7fr)_120px_100px_150px_140px] lg:items-center lg:gap-3 lg:px-4">
-                  <label className="flex h-8 items-center justify-center self-start lg:self-center" title="选择商品">
+              <article key={product.id} className={`product-list-card group relative overflow-hidden rounded-lg border bg-white shadow-[0_4px_12px_rgba(15,23,42,0.04)] transition-[border-color,box-shadow,transform] duration-200 hover:-translate-y-px hover:shadow-[0_10px_22px_rgba(15,23,42,0.09)] ${state.rail.replace('border-l-', 'border-')}`}>
+                <span aria-hidden="true" className={`absolute inset-y-0 left-0 w-1 ${state.rail.replace('border-l-', 'bg-')}`} />
+                <div className="product-list-card-grid px-3 py-3 sm:px-4">
+                  <label className="product-list-selection" title="选择商品">
                     <input type="checkbox" checked={selectedIds.has(product.id)} onChange={() => toggleProductSelection(product.id)} className="h-4 w-4 accent-blue-600" aria-label={`选择 ${productTitle(product)}`} />
                   </label>
-                  <button type="button" onClick={() => setExpandedProductId(expanded ? '' : product.id)} className="flex min-w-0 items-center gap-3 rounded-md text-left focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-blue-600" aria-expanded={expanded} aria-controls={`product-detail-${product.id}`}>
-                    <span className="h-14 w-14 shrink-0 overflow-hidden rounded-md bg-slate-100">{primary ? <img src={primary} alt="" loading="lazy" decoding="async" className="h-full w-full object-contain" /> : null}</span>
+                  <button type="button" onClick={() => setPreviewProductId(product.id)} className="product-list-primary flex min-w-0 items-center gap-3 rounded-md text-left focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-blue-600">
+                    <span className="h-14 w-14 shrink-0 overflow-hidden rounded-md border border-slate-100 bg-slate-50">{primary ? <img src={primary} alt="" loading="lazy" decoding="async" className="h-full w-full object-contain" /> : <span className="flex h-full items-center justify-center text-[11px] text-slate-400">无图</span>}</span>
                     <span className="min-w-0 flex-1">
-                      <span className="flex min-w-0 items-center gap-2"><span className="truncate text-sm font-semibold text-slate-950" title={productTitle(product)}>{productTitle(product)}</span>{product.captureMode === 'local-only' && <FileJson className="h-3.5 w-3.5 shrink-0 text-sky-600" />}</span>
+                      <span className="flex min-w-0 items-center gap-2"><span className="truncate text-sm font-semibold leading-5 text-slate-950" title={productTitle(product)}>{productTitle(product)}</span>{product.captureMode === 'local-only' && <FileJson className="h-3.5 w-3.5 shrink-0 text-sky-600" />}</span>
                       <span className="mt-1 flex min-w-0 flex-wrap items-center gap-x-2 gap-y-0.5 text-xs text-slate-500"><span className="max-w-48 truncate">{productShopName(product)}</span><span>{productModel(product)}</span><span className="tabular-nums text-slate-400">ID {productItemId(product) || '未识别'}</span></span>
-                      <span className="mt-1 block text-[11px] text-slate-400">{product.lastSnapshot?.skuPrices?.length || 0} 个 SKU · {product.lastSnapshot?.capturedAt ? `更新于 ${new Date(product.lastSnapshot.capturedAt).toLocaleString('zh-CN', { hour12: false })}` : '尚未成功抓取'}</span>
+                      <span className="mt-1 flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1 text-[11px] text-slate-400"><Badge className={accountClass(product)}>{accountLabel(product)}</Badge><Badge className={state.badge}>{state.label}</Badge><span>{product.lastSnapshot?.skuPrices?.length || 0} 个 SKU</span><span className={state.tone === 'red' ? 'text-red-600' : ''}>{state.detail}</span></span>
                     </span>
-                    {expanded ? <ChevronUp className="h-4 w-4 shrink-0 text-slate-400" /> : <ChevronDown className="h-4 w-4 shrink-0 text-slate-400" />}
+                    <Eye className="h-4 w-4 shrink-0 text-slate-300 transition group-hover:text-sky-600" />
                   </button>
-                  <div className="col-start-2 grid grid-cols-[minmax(0,1fr)_auto] items-start gap-2 lg:contents">
-                    <div>
-                      <div className={`text-base font-semibold tabular-nums ${currentPrice == null ? 'text-slate-400' : 'text-slate-950'}`}>{currentPrice == null ? '--' : currency(currentPrice.value)}</div>
-                      <div className="mt-0.5 text-[11px] text-slate-500">{currentPrice?.label || '尚未验证价格'}{rules.count ? ` · ${rules.count} 项监控 · 最低 ${currency(rules.minimum)}` : ' · 尚未设置监控价'}</div>
-                    </div>
-                    <div><Badge className={accountClass(product)}>{accountLabel(product)}</Badge></div>
-                    <div className="col-span-2 min-w-0 lg:col-span-1"><Badge className={state.badge}>{state.label}</Badge><div className={`mt-1 truncate text-[11px] ${state.tone === 'red' ? 'text-red-600' : 'text-slate-500'}`} title={state.detail}>{state.detail}</div></div>
+                  <div className="product-list-price min-w-0">
+                    <div className={`text-xl font-semibold leading-none tabular-nums ${currentPrice == null ? 'text-slate-400' : 'text-slate-950'}`}>{currentPrice == null ? '--' : currency(currentPrice.value)}</div>
+                    <div className="mt-1 text-[11px] text-slate-500">{currentPrice?.label || '尚未验证价格'}{rules.count ? ` · ${rules.count} 项阈值` : ''}</div>
                   </div>
-                  <div className="col-start-2 flex flex-wrap justify-start gap-2 lg:col-start-auto lg:justify-end">
-                    {product.captureMode === 'local-only' ? <Button type="button" size="sm" onClick={() => onLocalImport(product)}><FileJson className="h-4 w-4" />导入</Button> : <Button type="button" size="sm" onClick={() => void onCapture(product)} disabled={busy}>{busy ? <LoaderCircle className="h-4 w-4 animate-spin" /> : <Play className="h-4 w-4" />}{busy ? '执行中' : '抓取'}</Button>}
-                    <Button type="button" variant="secondary" size="sm" onClick={() => setExpandedProductId(expanded ? '' : product.id)}>{expanded ? <ChevronUp className="h-4 w-4" /> : <ChevronDown className="h-4 w-4" />}{expanded ? '收起' : '详情'}</Button>
+                  <div className="product-list-actions">
+                    <button type="button" onClick={() => setPriceVerificationProductId(product.id)} disabled={!product.lastSnapshot?.skuPrices?.length} className="product-quick-action" title="逐 SKU 核对价格证据、展示金额和计算公式"><ShieldCheck className="h-3.5 w-3.5" /><span>核对</span></button>
+                    {product.captureMode !== 'local-only' && <button type="button" onClick={() => void runQuickToggle(product)} disabled={monitorBusy} className={`product-quick-action ${product.enabled ? 'text-amber-700 hover:border-amber-200 hover:bg-amber-50' : 'text-emerald-700 hover:border-emerald-200 hover:bg-emerald-50'}`} title={product.enabled ? '暂停本商品定时监控' : '启用本商品定时监控'}>{monitorBusy ? <LoaderCircle className="h-3.5 w-3.5 animate-spin" /> : product.enabled ? <PauseCircle className="h-3.5 w-3.5" /> : <CalendarClock className="h-3.5 w-3.5" />}<span>{product.enabled ? '暂停' : '定时'}</span></button>}
+                    <button type="button" onClick={() => void runQuickSync(product)} disabled={syncBusy || !product.lastSnapshot} className="product-quick-action" title="同步当前商品的全部 SKU 价格到飞书">{syncBusy ? <LoaderCircle className="h-3.5 w-3.5 animate-spin" /> : <BellRing className="h-3.5 w-3.5" />}<span>飞书</span></button>
+                    {product.captureMode === 'local-only'
+                      ? <button type="button" onClick={() => onLocalImport(product)} className="product-quick-action product-quick-action-primary" title="导入新的本地数据文件"><FileJson className="h-3.5 w-3.5" /><span>导入</span></button>
+                      : <button type="button" onClick={() => void runQuickCapture(product)} disabled={busy || captureBusy} className="product-quick-action product-quick-action-primary" title="抓取当前商品价格与 SKU">{busy || captureBusy ? <LoaderCircle className="h-3.5 w-3.5 animate-spin" /> : <PlayCircle className="h-3.5 w-3.5" />}<span>{busy || captureBusy ? '抓取中' : '抓取'}</span></button>}
+                    <button type="button" onClick={() => void runQuickDelete(product)} disabled={deleteBusy} className="product-quick-action product-quick-action-danger" title="删除商品" aria-label={`删除 ${productTitle(product)}`}>{deleteBusy ? <LoaderCircle className="h-3.5 w-3.5 animate-spin" /> : <Trash2 className="h-3.5 w-3.5" />}</button>
                   </div>
                 </div>
-                {expanded && (
-                  <div id={`product-detail-${product.id}`} className="border-t border-white/70 bg-white/48 p-2 sm:p-3">
-                    <ProductMonitorCard
-                      product={product}
-                      onToggle={onToggle}
-                      onSchedule={onSchedule}
-                      onMediaPreference={onMediaPreference}
-                      onSaveSkuMonitorPrice={onSaveSkuMonitorPrice}
-                      onCapture={onCapture}
-                      onRetryBuyerShows={onRetryBuyerShows}
-                      onCaptureSearchMainImage={onCaptureSearchMainImage}
-                      onReparseLocalEvidence={onReparseLocalEvidence}
-                      onLocalImport={onLocalImport}
-                      onDelete={onDelete}
-                      busy={busyProductId === product.id}
-                      onPreview={setPreview}
-                      monitor={monitor}
-                    />
-                  </div>
-                )}
               </article>
             )
           })}
@@ -412,6 +456,20 @@ export function MonitorClassification({ products, monitor, onToggle, onSchedule,
           </div>
         </div>
       )}
+      {previewProduct && (
+        <div className="fixed inset-0 z-[80] flex items-end justify-center bg-slate-950/35 p-0 backdrop-blur-[2px] sm:items-center sm:p-5" role="presentation" onMouseDown={() => setPreviewProductId('')}>
+          <section role="dialog" aria-modal="true" aria-label="商品预览" onMouseDown={(event) => event.stopPropagation()} className="flex max-h-[94vh] w-full max-w-[1240px] flex-col overflow-hidden rounded-t-xl bg-slate-50 shadow-2xl sm:rounded-xl">
+            <header className="flex shrink-0 items-center justify-between border-b border-slate-200 bg-white px-4 py-3">
+              <div><div className="text-sm font-semibold text-slate-950">商品预览</div><div className="mt-0.5 text-xs text-slate-500">在这里查看 SKU、优惠公式、定时计划与素材</div></div>
+              <button type="button" onClick={() => setPreviewProductId('')} className="inline-flex h-9 w-9 items-center justify-center rounded-md text-slate-500 transition hover:bg-slate-100 hover:text-slate-950" title="关闭预览" aria-label="关闭预览"><X className="h-4 w-4" /></button>
+            </header>
+            <div className="min-h-0 overflow-y-auto p-2 sm:p-4">
+              <ProductMonitorCard product={previewProduct} onToggle={onToggle} onSchedule={onSchedule} onMediaPreference={onMediaPreference} onSaveSkuMonitorPrice={onSaveSkuMonitorPrice} onCapture={onCapture} onRetryBuyerShows={onRetryBuyerShows} onCaptureSearchMainImage={onCaptureSearchMainImage} onReparseLocalEvidence={onReparseLocalEvidence} onLocalImport={onLocalImport} onDelete={onDelete} busy={busyProductId === previewProduct.id} onPreview={setPreview} monitor={monitor} showPrimaryActions={false} />
+            </div>
+          </section>
+        </div>
+      )}
+      {priceVerificationProduct && <PriceVerificationDialog product={priceVerificationProduct} accountSessionId={priceVerificationProduct.lastSnapshot?.primaryAccountSessionId || priceVerificationProduct.primaryAccountSessionId || ''} accountType={priceVerificationProduct.lastSnapshot?.primaryAccountType || priceVerificationProduct.accountType || 'normal'} accountName={accountLabel(priceVerificationProduct)} onClose={() => setPriceVerificationProductId('')} />}
       <ImagePreview preview={preview} onClose={() => setPreview(null)} />
     </>
   )

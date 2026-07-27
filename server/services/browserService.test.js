@@ -12,6 +12,7 @@ import {
   createTaobaoAccessRestrictedError,
   evaluateBrowserPage,
   findAvailableBrowserPort,
+  hasBrowserSkuSelectionIndex,
   itemIdFromNetworkBody,
   itemIdFromNetworkUrl,
   isBuyerShowResponseUrl,
@@ -35,6 +36,7 @@ import {
   requestTmallSilentLoginBridge,
   waitForBrowserCaptureSignal,
   waitForBrowserDocumentSignal,
+  waitForBrowserSkuSelectionIndex,
 } from "./browserService.js";
 
 test("capture work tabs reuse the exact product, then another product or blank, but never a login page", () => {
@@ -68,6 +70,26 @@ test("browser selection defaults to UC without exposing or falling back to Googl
   assert.equal(catalog.engines.some((engine) => "executablePath" in engine || "env" in engine), false);
 });
 
+test("SKU selection waits past the first empty Tmall shell before deriving selection IDs", async () => {
+  const emptyShell = { html: "<html><body>loading</body></html>", text: "", url: "https://detail.tmall.com/item.htm?id=1" };
+  const readyPage = { html: '<script>window.__DATA__={skuBase:{},skuCore:{sku2info:{"1":{}}}}</script><div id="skuOptionsArea" data-vid="10"></div>', text: "", url: emptyShell.url };
+  const pages = [emptyShell, readyPage];
+  let clock = 0;
+  const waits = [];
+  const result = await waitForBrowserSkuSelectionIndex({}, {
+    timeoutMs: 2_000,
+    pollIntervalMs: 300,
+    now: () => clock,
+    wait: async (milliseconds) => { waits.push(milliseconds); clock += milliseconds; },
+    readDocument: async () => pages.shift() || readyPage,
+  });
+
+  assert.equal(hasBrowserSkuSelectionIndex(emptyShell), false);
+  assert.equal(hasBrowserSkuSelectionIndex(readyPage), true);
+  assert.equal(result, readyPage);
+  assert.deepEqual(waits, [300]);
+});
+
 test("one SKU runtime timeout does not erase successful sibling selections", async () => {
   let responseSequence = 0;
   let calls = 0;
@@ -76,7 +98,7 @@ test("one SKU runtime timeout does not erase successful sibling selections", asy
     async send(method, params, timeoutMs) {
       assert.equal(method, "Runtime.evaluate");
       assert.match(params.expression, /hydrationDeadline = Date\.now\(\) \+ 1500/);
-      assert.match(params.expression, /interactionDeadline = Date\.now\(\) \+ 6000/);
+      assert.match(params.expression, /interactionDeadline = Date\.now\(\) \+ 8000/);
       assert.match(params.expression, /pointer\('pointerdown'\)/);
       assert.match(params.expression, /dispatchEvent\(new MouseEvent\('mousedown'/);
       assert.match(params.expression, /pointer\('pointerup'\)/);
@@ -105,13 +127,45 @@ test("one SKU runtime timeout does not erase successful sibling selections", asy
   });
 
   assert.equal(calls, 3);
-  assert.deepEqual(observedTimeouts, [8000, 8000, 8000]);
+  assert.deepEqual(observedTimeouts, [10500, 10500, 10500]);
   assert.deepEqual(results.map(({ skuId, reason }) => ({ skuId, reason })), [
     { skuId: "sku-success-before", reason: "response-received" },
     { skuId: "sku-timeout", reason: "runtime-timeout" },
     { skuId: "sku-success-after", reason: "response-received" },
     { skuId: "sku-missing-path", reason: "missing-selection-ids" },
   ]);
+});
+
+test("a large SKU matrix skips warmup and stops cleanly when its shared capture budget is spent", async () => {
+  let clock = 0;
+  let responseSequence = 0;
+  const selectedValueIds = [];
+  const cdp = {
+    async send(_method, params, timeoutMs) {
+      const valueId = ["one", "two", "three", "four", "five"].find((value) => params.expression.includes(`\"${value}\"`));
+      selectedValueIds.push({ valueId, timeoutMs });
+      clock += 700;
+      responseSequence += 1;
+      return { result: { value: { selected: true, clicked: [valueId] } } };
+    },
+  };
+
+  const results = await captureRequestedSkuSelections({
+    cdp,
+    requestedSelections: ["one", "two", "three", "four", "five"].map((value) => ({ skuId: `sku-${value}`, valueIds: [value] })),
+    captureRunId: "selection-budget-run",
+    getResponseSequence: () => responseSequence,
+    now: () => clock,
+    wait: async (milliseconds) => { clock += milliseconds; },
+    responseTimeoutMs: 0,
+    responseRetryTimeoutMs: 0,
+    responseSettleMs: 0,
+    totalTimeoutMs: 1000,
+  });
+
+  assert.deepEqual(selectedValueIds, [{ valueId: "one", timeoutMs: 1000 }]);
+  assert.equal(results[0].reason, "response-received");
+  assert.deepEqual(results.slice(1).map((item) => item.reason), ["capture-budget-exhausted", "capture-budget-exhausted", "capture-budget-exhausted", "capture-budget-exhausted"]);
 });
 
 test("an out-of-stock SKU is recorded without clicking it or blocking sibling SKU capture", async () => {

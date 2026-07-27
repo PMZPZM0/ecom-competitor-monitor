@@ -33,12 +33,13 @@ test("login sync starts with an unknown Tmall price capability", () => {
   assert.equal(tmallPriceCircuitOpen(account, 1_001), false);
 });
 
-test("partial SKU evidence degrades only price capability without expiring login", () => {
+test("partial SKU evidence keeps the account usable without expiring login", () => {
   const account = { ...session(), loginStatus: "valid" };
   markTmallPricePartial(account, { now: 2_000, verifiedSkuCount: 1, totalSkuCount: 3 });
 
   assert.equal(account.loginStatus, "valid");
-  assert.equal(account.tmallPriceStatus, "degraded");
+  assert.equal(account.tmallPriceStatus, "partial");
+  assert.equal(account.tmallPriceFailureCount, 0);
   assert.equal(account.tmallPriceFailureReason, "PARTIAL_SKU_PRICE_EVIDENCE:1/3");
   assert.equal(account.tmallPriceCooldownUntil, null);
 });

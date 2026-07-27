@@ -1,7 +1,6 @@
 import { useState } from 'react'
-import { Archive, CircleAlert, CircleCheck, Crown, Gift, Hash, Images, Link2, LoaderCircle, Plus, Search, UserRound } from 'lucide-react'
+import { Archive, CircleAlert, CircleCheck, Crown, Gift, Hash, Images, Link2, LoaderCircle, Plus, UserRound } from 'lucide-react'
 import { Button } from '../../components/ui/button'
-import { Card, CardContent, CardHeader, CardTitle } from '../../components/ui/card'
 import { Input } from '../../components/ui/input'
 import { itemIdFromProductInput, normalizeProductUrl, normalizeProductUrlIfPossible, productUrlForItemId, type ProductPlatform } from '../../lib/productUrl'
 import type { AuthSession, Product } from '../../types/domain'
@@ -78,17 +77,9 @@ export function ProductForm({ sessions, onAdd, onRequireAuth }: Props) {
   const itemId = itemIdFromProductInput(productInput)
 
   return (
-    <Card className="flex h-full flex-col">
-      <CardHeader className="min-h-[78px]">
-        <div className="min-w-0">
-          <CardTitle className="flex items-center gap-2"><Search className="h-4 w-4 text-blue-600" />添加监控商品</CardTitle>
-          <div className="mt-1 text-sm leading-5 text-slate-500">输入链接或商品 ID，软件会使用已授权账号在后台打开商品；采集结果先脱敏保存到本机，再从本地文件解析。</div>
-        </div>
-      </CardHeader>
-      <CardContent className="flex flex-1 flex-col">
-        <form className="flex h-full flex-col gap-3" onSubmit={submit}>
+    <form className="flex h-full flex-col gap-3" onSubmit={submit}>
           <div className="flex flex-col gap-2 border-b border-slate-100 pb-3 sm:flex-row sm:items-center sm:justify-between">
-            <div><div className="text-sm font-semibold text-slate-800">自动采集 + 本地解析</div><div className="mt-0.5 text-xs text-slate-500">使用已授权账号在后台打开商品页；每个账号视角可能分别访问</div></div>
+            <div><div className="text-sm font-semibold text-slate-800">自动采集并本地解析</div><div className="mt-0.5 text-xs text-slate-500">输入商品链接或 ID，抓取结果会自动保存到本机后再解析。</div></div>
             <div className="inline-flex w-full rounded-md bg-slate-100 p-1 sm:w-auto" aria-label="自动采集输入方式">
               <button type="button" onClick={() => setInputMode('link')} className={`inline-flex h-8 flex-1 items-center justify-center gap-1.5 whitespace-nowrap rounded px-3 text-xs font-medium ${inputMode === 'link' ? 'bg-white text-blue-700 shadow-sm' : 'text-slate-500 hover:text-slate-800'}`}><Link2 className="h-3.5 w-3.5" />商品链接</button>
               <button type="button" onClick={() => setInputMode('id')} className={`inline-flex h-8 flex-1 items-center justify-center gap-1.5 whitespace-nowrap rounded px-3 text-xs font-medium ${inputMode === 'id' ? 'bg-white text-blue-700 shadow-sm' : 'text-slate-500 hover:text-slate-800'}`}><Hash className="h-3.5 w-3.5" />商品 ID</button>
@@ -169,8 +160,6 @@ export function ProductForm({ sessions, onAdd, onRequireAuth }: Props) {
             <Button type="submit" disabled={submitting || !itemId} className="w-full"><Plus className="h-4 w-4" />{submitting ? '自动采集与解析中' : '自动采集并本地解析'}</Button>
             {status && <div className={`flex min-w-0 items-start gap-1.5 text-xs leading-5 ${status.tone === 'progress' ? 'text-blue-700' : status.tone === 'success' ? 'text-emerald-700' : 'text-red-700'}`} role={status.tone === 'error' ? 'alert' : 'status'} aria-live="polite">{status.tone === 'progress' ? <LoaderCircle className="mt-0.5 h-4 w-4 shrink-0 animate-spin" /> : status.tone === 'success' ? <CircleCheck className="mt-0.5 h-4 w-4 shrink-0" /> : <CircleAlert className="mt-0.5 h-4 w-4 shrink-0" />}<span className="min-w-0 break-all">{status.message}</span></div>}
           </div>
-        </form>
-      </CardContent>
-    </Card>
+    </form>
   )
 }

@@ -10,6 +10,7 @@ process.env.ECOM_MONITOR_DATA_DIR = dataDir;
 
 const {
   accountCaptureDiagnostic,
+  backfillMissingProductModelsFromLocalEvidence,
   buildRunRecord,
   captureAttemptProductIds,
   captureCommitConflict,
@@ -808,6 +809,61 @@ function partialPriceSnapshot({ productId, itemId, evidenceId, evidenceFile, sku
   });
 }
 
+test("missing product models are backfilled only from saved browser evidence", async () => {
+  const productId = "model-backfill-product";
+  const itemId = "880099";
+  const skuId = "62749714800991";
+  const evidence = browserPriceEvidence(itemId, [{ skuId, name: "标准款", price: 139 }]);
+  evidence.page.html += `<script>window.__INIT_DATA__=${JSON.stringify({
+    industryParamVO: { basicParamList: [{ propertyName: "型号", valueName: "CFXB50FC816" }] },
+  })};</script>`;
+  const saved = await saveBrowserCaptureSource(evidence);
+  const snapshot = completePriceSnapshot([verifiedSku({ skuId, name: "标准款", price: 139, normalPrice: 139 })], {
+    id: `${productId}-snapshot`,
+    productId,
+    itemId,
+    title: "苏泊尔电压力锅",
+    shopName: "苏泊尔官方旗舰店",
+    browserEvidenceId: saved.captureId,
+    browserEvidenceFile: saved.sourceFile,
+  });
+  await updateDb((db) => {
+    db.products.push({
+      id: productId,
+      itemId,
+      url: `https://detail.tmall.com/item.htm?id=${itemId}`,
+      name: "苏泊尔电压力锅",
+      model: "",
+      accountType: "normal",
+      enabled: false,
+      lastSnapshot: structuredClone(snapshot),
+    });
+    db.snapshots.push(structuredClone(snapshot));
+    return db;
+  });
+
+  const originalFetch = globalThis.fetch;
+  let networkCalls = 0;
+  globalThis.fetch = async () => {
+    networkCalls += 1;
+    throw new Error("model backfill must remain local");
+  };
+  try {
+    const result = await backfillMissingProductModelsFromLocalEvidence();
+    const after = await readDb();
+    const product = after.products.find((item) => item.id === productId);
+    const history = after.snapshots.find((item) => item.id === snapshot.id);
+    assert.deepEqual(result, { checked: 1, repaired: 1 });
+    assert.equal(networkCalls, 0);
+    assert.equal(product.model, "CFXB50FC816");
+    assert.equal(product.lastSnapshot.model, "CFXB50FC816");
+    assert.equal(history.model, "CFXB50FC816");
+    assert.equal(product.lastSnapshot.skuPrices[0].normalPrice, 139);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
 test("local price reparse repairs a partial card only from its saved browser evidence", async () => {
   const productId = "local-reparse-price-product";
   const itemId = "880014";
@@ -1539,10 +1595,10 @@ test("a partial SKU round saves verified SKUs while keeping unresolved SKUs unav
 
   const second = await runProductOnce(productId, { source: "partial-after-complete", authSessions: [session], scraper: async () => incomplete });
   assert.ok(second.snapshot, second.product.lastError);
-  assert.equal(second.product.lastStatus, "error");
+  assert.equal(second.product.lastStatus, "ok");
   assert.match(second.product.lastError, /2 个 SKU 中仅 1 个/);
   assert.equal(session.loginStatus, "valid");
-  assert.equal(session.tmallPriceStatus, "degraded");
+  assert.equal(session.tmallPriceStatus, "partial");
   assert.equal(session.tmallPriceFailureReason, "PARTIAL_SKU_PRICE_EVIDENCE:1/2");
   assert.equal(second.snapshot.resolutionStatus, "partial");
   assert.equal(second.snapshot.skuPrices.find((sku) => sku.skuId === `${itemId}-sku`).normalPrice, 89);

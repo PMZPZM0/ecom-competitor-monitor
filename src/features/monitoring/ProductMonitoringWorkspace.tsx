@@ -152,11 +152,11 @@ export function ProductMonitoringWorkspace({
         </div>
       </section>
 
-      <div className="monitor-title-bar flex flex-wrap items-center justify-between gap-2 rounded-md border border-white/60 px-3 py-2">
+      <div className="monitor-title-bar product-workbench-titlebar flex flex-wrap items-center justify-between gap-2 rounded-md border px-3 py-2">
         <div className="flex items-center gap-2 text-sm text-slate-600">
-          <span className="font-semibold text-slate-950">商品列表</span>
-          <span className="text-slate-300">/</span>
-          <span>筛选、批量操作并展开核对详情</span>
+          <span className="font-semibold text-slate-950">商品工作台</span>
+          <span className="text-slate-300">·</span>
+          <span>筛选、批量操作与商品预览</span>
         </div>
         <div className="flex flex-wrap items-center gap-2">
           <Button type="button" variant="secondary" onClick={() => openTasks('monitor')}><ListTodo className="h-4 w-4" />任务中心{queueStatus.pendingCount || runningJobs ? ` ${queueStatus.pendingCount + runningJobs}` : ''}</Button>

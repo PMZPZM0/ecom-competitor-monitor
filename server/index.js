@@ -13,7 +13,7 @@ import { loadEnv } from "./utils/env.js";
 import { dbRuntimeInfo, newId, readDb, updateDb } from "./storage/db.js";
 import { analyzeData } from "./services/analysisService.js";
 import { buildTaobaoOAuthUrl } from "./services/authService.js";
-import { clearFailedCaptureJobs, clearFinishedCaptureJobs, clearStaleCaptureQueueJobs, deleteCaptureQueueJob, getCaptureQueueStatus, recoverCaptureQueue, reparseProductLocalEvidence, rescheduleMonitor, resumeAuthRequiredCaptureJobs, resumeCaptureJob, runBuyerShowOnce, runCaptureBatchOnce, runProductOnce, runSearchMainImageOnce, scheduleProduct, sessionsForProduct, setSkuMonitorPrice, snapshotHasVerifiedNormalPrice, startScheduler, stopCaptureQueue, stopScheduler, withProtectedBrowserCapture } from "./services/monitorService.js";
+import { backfillMissingProductModelsFromLocalEvidence, clearFailedCaptureJobs, clearFinishedCaptureJobs, clearStaleCaptureQueueJobs, deleteCaptureQueueJob, getCaptureQueueStatus, recoverCaptureQueue, reparseProductLocalEvidence, rescheduleMonitor, resumeAuthRequiredCaptureJobs, resumeCaptureJob, runBuyerShowOnce, runCaptureBatchOnce, runProductOnce, runSearchMainImageOnce, scheduleProduct, sessionsForProduct, setSkuMonitorPrice, snapshotHasVerifiedNormalPrice, startScheduler, stopCaptureQueue, stopScheduler, withProtectedBrowserCapture } from "./services/monitorService.js";
 import { monitorChannelSupported } from "./services/monitorRuleService.js";
 import { createNotificationLog, effectivePriceForSku, publicFeishuConfig, sendFeishuNotification, sendFeishuOperationsReport, updateFeishuConfig } from "./services/feishuService.js";
 import { appendPriceDocument, cliStatus, createPriceDocument, readAuthQr, startCliLogin, startCliSetup } from "./services/larkCliService.js";
@@ -216,7 +216,7 @@ const operationsUpload = multer({
   limits: { fileSize: OPERATIONS_MAX_UPLOAD_BYTES, files: 1, fields: 8, parts: 10 },
   fileFilter: (_req, file, callback) => {
     if (isSupportedOperationsFile(file)) return callback(null, true);
-    return callback(Object.assign(new Error("运营助手只支持 XLSX、CSV、JSON、PNG、JPG 或 WEBP。"), {
+    return callback(Object.assign(new Error("运营助手只支持 XLS、XLSX、CSV、JSON、PNG、JPG 或 WEBP。"), {
       status: 400,
       code: "OPERATIONS_UPLOAD_TYPE_INVALID",
     }));
@@ -289,14 +289,16 @@ function publicAuthSession(session) {
     Date.parse(String(session.tmallPriceDeviceCooldownUntil || "")) || 0,
   );
   const accessRestricted = session.tmallPriceFailureReason === "TAOBAO_ACCESS_RESTRICTED" && restrictionUntil > Date.now();
-  const priceUsable = identityOnline && session.tmallPriceStatus === TMALL_PRICE_STATUS.VALID && !accessRestricted;
+  const priceUsable = identityOnline && [TMALL_PRICE_STATUS.VALID, TMALL_PRICE_STATUS.PARTIAL].includes(session.tmallPriceStatus) && !accessRestricted;
   const availabilityStatus = accessRestricted
     ? "access-restricted"
     : session.loginStatus === "expired"
     ? "login-expired"
     : priceUsable
       ? "ready"
-      : session.tmallPriceStatus === TMALL_PRICE_STATUS.DEGRADED
+      : session.tmallPriceStatus === TMALL_PRICE_STATUS.PARTIAL
+        ? "price-partial"
+        : session.tmallPriceStatus === TMALL_PRICE_STATUS.DEGRADED
         ? "price-unavailable"
         : "price-unverified";
   const result = {
@@ -312,6 +314,8 @@ function publicAuthSession(session) {
         ? `当前浏览器环境已被淘宝限制，应用采集暂停至 ${new Date(restrictionUntil).toLocaleString("zh-CN", { hour12: false })}。登录和历史价格均已保留。`
       : availabilityStatus === "login-expired"
         ? "淘宝登录已失效，需要重新扫码。"
+      : availabilityStatus === "price-partial"
+        ? "淘宝身份在线，已有部分 SKU 当前价格证据；其余 SKU 正在等待补全，不需要重新授权。"
         : availabilityStatus === "price-unavailable"
           ? "淘宝身份仍在，但商品页价格能力不可用。"
           : "淘宝身份已同步，尚未用真实商品价格响应完成验证。",
@@ -526,6 +530,9 @@ app.get("/api/health", async (_req, res) => {
 });
 
 app.get("/api/overview", async (_req, res) => {
+  // This is a disk-only metadata repair for older captures. It never opens a
+  // browser, changes a price, or causes any external traffic.
+  await backfillMissingProductModelsFromLocalEvidence();
   const db = await readDb();
   const latestSnapshots = db.snapshots.slice(-100).reverse();
   res.json({
@@ -757,6 +764,7 @@ app.post("/api/operations/reports/preview", parseOperationsUpload, async (req, r
     fileName: req.file.originalname,
     kind: parsed.kind,
     columns: parsed.columns,
+    rowCount: parsed.rows.length,
     sampleRows: parsed.rows.slice(0, 12),
   });
 });
@@ -2731,7 +2739,7 @@ async function checkAuthSession(session) {
       ? TMALL_PRICE_STATUS.UNKNOWN
       : session.tmallPriceStatus || TMALL_PRICE_STATUS.UNKNOWN;
   const identityOnline = loginStatus === "valid";
-  const priceUsable = identityOnline && tmallPriceStatus === TMALL_PRICE_STATUS.VALID && !accessRestricted;
+  const priceUsable = identityOnline && [TMALL_PRICE_STATUS.VALID, TMALL_PRICE_STATUS.PARTIAL].includes(tmallPriceStatus) && !accessRestricted;
   if (status === "valid") {
     resetTmallSsoRefreshWindow({ profileKey: session.browserProfileKey, port: session.browserPort, browserEngine: session.browserEngine });
   }
@@ -2765,7 +2773,9 @@ async function checkAuthSession(session) {
       ? "登录已明确失效，请重新扫码。"
       : identityOnline && tmallPriceStatus === TMALL_PRICE_STATUS.DEGRADED
         ? "淘宝身份仍在线，但天猫商品查价会话异常，当前不能采价；请重新授权后再抓取。"
-        : identityOnline && tmallPriceStatus === TMALL_PRICE_STATUS.VALID
+      : identityOnline && tmallPriceStatus === TMALL_PRICE_STATUS.PARTIAL
+          ? "淘宝身份在线，部分 SKU 已获得当前价格；这不是掉线，无需重新授权。"
+          : identityOnline && tmallPriceStatus === TMALL_PRICE_STATUS.VALID
           ? "淘宝身份在线，天猫商品查价能力可用。"
           : identityOnline
             ? "淘宝身份在线；天猫商品查价能力尚未通过真实商品验证。"

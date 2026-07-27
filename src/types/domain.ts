@@ -392,7 +392,7 @@ export type AuthSession = {
   lastFailureAt?: string | null
   consecutiveFailures?: number
   loginStatus?: 'valid' | 'expired'
-  tmallPriceStatus?: 'unknown' | 'valid' | 'cooldown' | 'degraded'
+  tmallPriceStatus?: 'unknown' | 'valid' | 'partial' | 'cooldown' | 'degraded'
   tmallPriceCheckedAt?: string | null
   tmallPriceCooldownUntil?: string | null
   tmallPriceDeviceCooldownUntil?: string | null
@@ -401,7 +401,7 @@ export type AuthSession = {
   tmallPriceFailureCount?: number
   identityOnline?: boolean
   priceUsable?: boolean
-  availabilityStatus?: 'ready' | 'login-expired' | 'price-unavailable' | 'price-unverified' | 'access-restricted'
+  availabilityStatus?: 'ready' | 'price-partial' | 'login-expired' | 'price-unavailable' | 'price-unverified' | 'access-restricted'
   availabilityReason?: string
   lastCheckedAt?: string | null
   createdAt: string
@@ -450,7 +450,7 @@ export type OperationsReport = {
   reportDate: string
   sourceName: string
   fileName: string
-  kind: 'xlsx' | 'csv' | 'json' | 'screenshot'
+  kind: 'xls' | 'xlsx' | 'csv' | 'json' | 'screenshot'
   columns: string[]
   rows: Array<Record<string, unknown>>
   screenshotPath: string
@@ -492,6 +492,27 @@ export type OperationsMetric = {
   conversionRate: number | null
 }
 
+export type OperationsArchiveSnapshot = {
+  key: string
+  date: string
+  type: OperationsReportType
+  storeName: string
+  reportCount: number
+  rowCount: number
+  sources: string[]
+  metrics: OperationsMetric
+  comparison: { previousDate: string | null, spendChange: number | null, revenueChange: number | null, roiChange: number | null, feeRateChange: number | null }
+}
+
+export type OperationsArchiveDay = {
+  date: string
+  reportCount: number
+  rowCount: number
+  types: OperationsReportType[]
+  stores: string[]
+  snapshots: OperationsArchiveSnapshot[]
+}
+
 export type OperationsGroup = OperationsMetric & {
   name: string
   count: number
@@ -531,6 +552,8 @@ export type QwenPawAlertSettings = {
 
 export type OperationsWorkspace = {
   reports: OperationsReport[]
+  currentDate: string
+  archive: { days: OperationsArchiveDay[], totalReports: number, totalRows: number }
   profile: {
     principles: string
     dailyReport: { enabled: boolean, time: string, lastRunAt: string | null, lastSentAt: string | null, lastError: string }

@@ -156,6 +156,73 @@ function promotionFormula(baseLabel, baseCents, promotions, resultLabel, resultC
   return `${baseLabel} ${(baseCents / 100).toFixed(2)}${reductions} = ${resultLabel} ${(resultCents / 100).toFixed(2)}`;
 }
 
+function resolveSelectedSkuDirectPrice(parsed, options = {}) {
+  const itemId = String(options.itemId || "");
+  const skuId = String(options.skuId || "");
+  const accountType = options.accountType || "normal";
+  const selectedSku = parsed?.data?.skuCore?.sku2info?.[skuId];
+  const price = selectedSku?.price;
+  if (!price || typeof price !== "object") {
+    const hasSkuMatrix = parsed?.data?.skuCore?.sku2info && typeof parsed.data.skuCore.sku2info === "object";
+    return hasSkuMatrix ? ambiguous("response-sku-mismatch", { expectedSkuId: skuId }) : { matched: false };
+  }
+
+  const currentCents = yuanToCents(price.priceText);
+  const moneyCents = Number(price.priceMoney);
+  if (!currentCents) return ambiguous("missing-current-sku-price");
+  if (Number.isFinite(moneyCents) && moneyCents > 0 && moneyCents !== currentCents) {
+    return ambiguous("current-sku-price-cent-mismatch");
+  }
+  if (!options.selectedSkuVerified) return ambiguous("sku-selection-unverified");
+
+  // Some Tmall responses return an exact current SKU price but omit the
+  // promotion component and repeat a generic "login to see more offers"
+  // action. The selected SKU response is still valid normal-price evidence;
+  // only the unavailable offer layers remain unavailable.
+  const formula = `当前 SKU 可售价 ${(currentCents / 100).toFixed(2)} = 普通价 ${(currentCents / 100).toFixed(2)}`;
+  const evidence = [makeEvidence({
+    itemId,
+    skuId,
+    accountType,
+    endpoint,
+    selectedSkuVerified: true,
+    capturedAt: options.capturedAt || new Date().toISOString(),
+    promotionCodes: [],
+  }, {
+    kind: "normal",
+    valueCents: currentCents,
+    source: "api-explicit",
+    sourcePath: `$.data.skuCore.sku2info.${skuId}.price.priceText`,
+    formula,
+  })];
+  return {
+    matched: true,
+    status: "verified",
+    parserVersion: PRICE_PARSER_VERSION,
+    endpoint,
+    source: "pcdetail-selected-sku-direct",
+    itemId,
+    skuId,
+    accountType,
+    channels: {
+      normal: resolvedChannel(currentCents, formula, evidence.map((item) => item.id)),
+      billion: unavailableChannel(),
+      seckill: unavailableChannel(),
+      government: unavailableChannel(),
+      surprise: unavailableChannel(),
+      gift: unavailableChannel(),
+      vip88: unavailableChannel(),
+      coin: unavailableChannel(),
+    },
+    evidence,
+    promotions: [],
+    campaignKind: null,
+    normalLabel: "普通价",
+    displayedCents: currentCents,
+    evidenceHash: evidenceId(evidence.map(({ id }) => id)),
+  };
+}
+
 export function resolvePcdetailAdjustPayload(payload, options = {}) {
   if (!/mtop\.taobao\.pcdetail\.data\.adjust/i.test(String(payload?.url || ""))) return { matched: false };
   const parsed = parseBody(payload?.body);
@@ -172,6 +239,13 @@ export function resolvePcdetailAdjustPayload(payload, options = {}) {
   const displayedSourcePath = options.displayedSourcePath || `${componentPath}.trackParams.price2`;
   const identity = requestIdentity(payload.url);
   const component = parsed?.data?.componentsVO?.xsRedPacketParamVO;
+  const hasUmpPriceLog = Boolean(parsed?.data?.componentsVO?.umpPriceLogVO);
+  if (!component && !hasUmpPriceLog) {
+    const directResolution = resolveSelectedSkuDirectPrice(parsed, options);
+    return directResolution.matched
+      ? directResolution
+      : ambiguous("response-sku-mismatch", { expectedSkuId: skuId, responseSkuId: "" });
+  }
   const trackParams = decodeJson(component?.trackParams) || {};
   const responseSkuId = String(trackParams.skuId || "");
   const identitySummary = { expectedSkuId: skuId, requestSkuId: identity.skuId, responseSkuId, capturedRequestSkuId: payload.requestSkuId || "", capturedResponseSkuId: payload.responseSkuId || "" };

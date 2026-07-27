@@ -106,7 +106,9 @@ test("price capture never performs an extra Taobao navigation and never persists
   const bridgeAt = captureSource.indexOf("refreshTmallSsoFromCapturedLogin(cdp, tmallSsoResponses");
   const firstRestrictionCheckAt = captureSource.indexOf("await assertNoAccessRestriction();", bridgeAt);
   const selectionAt = captureSource.indexOf("captureRequestedSkuSelections({");
+  const skuIndexWaitAt = captureSource.indexOf("waitForBrowserSkuSelectionIndex(cdp");
   assert.ok(requestBridgeAt >= 0 && bridgeAt > requestBridgeAt && firstRestrictionCheckAt > bridgeAt && selectionAt > firstRestrictionCheckAt, "天猫同浏览器会话必须先由浏览器请求并同步，再校验最终页面并开始 SKU 交互");
+  assert.ok(skuIndexWaitAt > firstRestrictionCheckAt && selectionAt > skuIndexWaitAt, "首次页面壳未形成 SKU 索引时，必须在同一浏览器会话中等待，不能生成空 SKU 抓取");
   assert.doesNotMatch(captureSource, /Page\.navigate", \{ url: "https:\/\/www\.taobao\.com\/" \}/);
   assert.match(captureSource, /prepareSelectionsFromLocalEvidence/);
   assert.doesNotMatch(source, /\bfetch\s*\(\s*[`'"]https?:\/\/(?:[^/]*\.)?(?:taobao|tmall)\.com/i);
@@ -163,7 +165,7 @@ test("session checks are passive while completed authorization tabs stay alive a
   assert.doesNotMatch(serverSource, /ECOM_MONITOR_EAGER_BROWSER_WARMUP !== "0"/);
   const checkEnd = serverSource.indexOf('app.post("/api/auth/sessions/check-all"', checkSessionAt);
   const checkSessionSource = serverSource.slice(checkSessionAt, checkEnd);
-  assert.match(checkSessionSource, /const priceUsable = identityOnline && tmallPriceStatus === TMALL_PRICE_STATUS\.VALID/);
+  assert.match(checkSessionSource, /const priceUsable = identityOnline && \[TMALL_PRICE_STATUS\.VALID, TMALL_PRICE_STATUS\.PARTIAL\]\.includes\(tmallPriceStatus\)/);
   assert.match(checkSessionSource, /淘宝身份仍在线，但天猫商品查价会话异常/);
 });
 
