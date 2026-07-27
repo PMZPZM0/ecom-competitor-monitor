@@ -299,7 +299,6 @@ export function MonitorClassification({ products, monitor, onToggle, onSchedule,
   }
 
   async function runQuickDelete(product: Product) {
-    if (!window.confirm(`确认删除“${productTitle(product)}”？商品历史与监控规则将一并移除。`)) return
     const key = `${product.id}:delete`
     setQuickActionKey(key)
     try {

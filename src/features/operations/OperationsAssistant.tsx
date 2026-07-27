@@ -51,11 +51,29 @@ function editableTarget(target: EventTarget | null) {
 }
 
 function money(value: number | null | undefined) {
-  return Number.isFinite(value) ? `¥${Number(value).toFixed(2)}` : '--'
+  const numeric = Number(value)
+  return Number.isFinite(numeric) ? `¥${numeric.toFixed(2)}` : '--'
 }
 
 function percent(value: number | null | undefined) {
-  return Number.isFinite(value) ? `${(Number(value) * 100).toFixed(1)}%` : '--'
+  const numeric = Number(value)
+  return Number.isFinite(numeric) ? `${(numeric * 100).toFixed(1)}%` : '--'
+}
+
+function fixed(value: number | null | undefined, digits = 2) {
+  const numeric = Number(value)
+  return Number.isFinite(numeric) ? numeric.toFixed(digits) : '--'
+}
+
+function normalizedTarget(target: OperationsTarget): OperationsTarget {
+  const targetRoi = Number(target?.targetRoi)
+  const maxFeeRate = Number(target?.maxFeeRate)
+  const dailyBudgetCap = Number(target?.dailyBudgetCap)
+  return {
+    targetRoi: Number.isFinite(targetRoi) && targetRoi > 0 ? targetRoi : defaultTarget.targetRoi,
+    maxFeeRate: Number.isFinite(maxFeeRate) && maxFeeRate > 0 && maxFeeRate < 1 ? maxFeeRate : defaultTarget.maxFeeRate,
+    dailyBudgetCap: Number.isFinite(dailyBudgetCap) && dailyBudgetCap >= 0 ? dailyBudgetCap : defaultTarget.dailyBudgetCap,
+  }
 }
 
 function timestamp(value: string | null | undefined) {
@@ -65,8 +83,8 @@ function timestamp(value: string | null | undefined) {
 }
 
 function relative(value: number | null | undefined) {
-  if (!Number.isFinite(value)) return '暂无可比数据'
   const numeric = Number(value)
+  if (!Number.isFinite(numeric)) return '暂无可比数据'
   return `${numeric > 0 ? '+' : ''}${(numeric * 100).toFixed(1)}%`
 }
 
@@ -279,7 +297,7 @@ export function OperationsAssistant({
       <section className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
         <Metric label="推广消耗" value={money(workspace.totals.spend)} detail={`${workspace.products.length} 个单品`} />
         <Metric label="成交金额" value={money(workspace.totals.revenue)} detail={`${Math.round(workspace.totals.orders || 0)} 个订单`} />
-        <Metric label="整体 ROI" value={Number.isFinite(workspace.totals.roi) ? Number(workspace.totals.roi).toFixed(2) : '--'} detail={`转化率 ${percent(workspace.totals.conversionRate)}`} />
+        <Metric label="整体 ROI" value={fixed(workspace.totals.roi)} detail={`转化率 ${percent(workspace.totals.conversionRate)}`} />
         <Metric label="整体费率" value={percent(workspace.totals.feeRate)} detail={`${workspace.suggestions.length} 条推广建议`} />
       </section>
 
@@ -329,7 +347,7 @@ export function OperationsAssistant({
 
         <Card>
           <CardHeader><CardTitle>推广建议</CardTitle></CardHeader>
-          <div className="overflow-x-auto"><table className="w-full min-w-[820px] text-left text-sm"><thead className="border-y border-slate-100 bg-slate-50 text-xs text-slate-500"><tr><th className="px-4 py-3 font-medium">单品</th><th className="px-4 py-3 font-medium">消耗 / 成交</th><th className="px-4 py-3 font-medium">ROI / 费率</th><th className="px-4 py-3 font-medium">建议</th><th className="px-4 py-3 font-medium">依据</th><th className="px-4 py-3 font-medium text-right">反馈</th></tr></thead><tbody>{workspace.suggestions.length ? workspace.suggestions.map((item) => <tr key={item.id} className="border-b border-slate-100 last:border-0"><td className="px-4 py-3"><div className="font-medium text-slate-900">{item.productName}</div><div className="mt-1 text-xs text-slate-400">{item.productStage === 'new' ? '新品' : item.productStage === 'mature' ? '老品' : '阶段未标记'}</div></td><td className="px-4 py-3 text-slate-700">{money(item.spend)}<span className="mx-1 text-slate-300">/</span>{money(item.revenue)}</td><td className="px-4 py-3 text-slate-700">{Number.isFinite(item.roi) ? Number(item.roi).toFixed(2) : '--'}<span className="mx-1 text-slate-300">/</span>{percent(item.feeRate)}</td><td className="px-4 py-3"><span className={`inline-flex rounded-md px-2 py-1 text-xs font-medium ring-1 ${actionTone(item.action)}`}>{item.action}{item.change ? ` ${item.change > 0 ? '+' : ''}${item.change}%` : ''}</span></td><td className="max-w-sm px-4 py-3 text-xs leading-5 text-slate-500">{item.reason}</td><td className="px-4 py-3 text-right">{item.feedback ? <span className="inline-flex items-center gap-1 text-xs text-emerald-700"><Check className="h-3.5 w-3.5" />{item.feedback.status === 'adopted' ? '已采纳' : item.feedback.status === 'skipped' ? '未采纳' : '已复盘'}</span> : <div className="inline-flex gap-1"><Button type="button" size="sm" variant="secondary" onClick={() => void run(`feedback-${item.id}`, () => onFeedback(item.id, 'adopted'))}>采纳</Button><Button type="button" size="sm" variant="ghost" onClick={() => void run(`feedback-${item.id}`, () => onFeedback(item.id, 'skipped'))}>跳过</Button></div>}</td></tr>) : <tr><td colSpan={6} className="px-4 py-10 text-center text-sm text-slate-400">导入最新推广报表后生成建议</td></tr>}</tbody></table></div>
+          <div className="overflow-x-auto"><table className="w-full min-w-[820px] text-left text-sm"><thead className="border-y border-slate-100 bg-slate-50 text-xs text-slate-500"><tr><th className="px-4 py-3 font-medium">单品</th><th className="px-4 py-3 font-medium">消耗 / 成交</th><th className="px-4 py-3 font-medium">ROI / 费率</th><th className="px-4 py-3 font-medium">建议</th><th className="px-4 py-3 font-medium">依据</th><th className="px-4 py-3 font-medium text-right">反馈</th></tr></thead><tbody>{workspace.suggestions.length ? workspace.suggestions.map((item) => <tr key={item.id} className="border-b border-slate-100 last:border-0"><td className="px-4 py-3"><div className="font-medium text-slate-900">{item.productName}</div><div className="mt-1 text-xs text-slate-400">{item.productStage === 'new' ? '新品' : item.productStage === 'mature' ? '老品' : '阶段未标记'}</div></td><td className="px-4 py-3 text-slate-700">{money(item.spend)}<span className="mx-1 text-slate-300">/</span>{money(item.revenue)}</td><td className="px-4 py-3 text-slate-700">{fixed(item.roi)}<span className="mx-1 text-slate-300">/</span>{percent(item.feeRate)}</td><td className="px-4 py-3"><span className={`inline-flex rounded-md px-2 py-1 text-xs font-medium ring-1 ${actionTone(item.action)}`}>{item.action}{item.change ? ` ${item.change > 0 ? '+' : ''}${item.change}%` : ''}</span></td><td className="max-w-sm px-4 py-3 text-xs leading-5 text-slate-500">{item.reason}</td><td className="px-4 py-3 text-right">{item.feedback ? <span className="inline-flex items-center gap-1 text-xs text-emerald-700"><Check className="h-3.5 w-3.5" />{item.feedback.status === 'adopted' ? '已采纳' : item.feedback.status === 'skipped' ? '未采纳' : '已复盘'}</span> : <div className="inline-flex gap-1"><Button type="button" size="sm" variant="secondary" onClick={() => void run(`feedback-${item.id}`, () => onFeedback(item.id, 'adopted'))}>采纳</Button><Button type="button" size="sm" variant="ghost" onClick={() => void run(`feedback-${item.id}`, () => onFeedback(item.id, 'skipped'))}>跳过</Button></div>}</td></tr>) : <tr><td colSpan={6} className="px-4 py-10 text-center text-sm text-slate-400">导入最新推广报表后生成建议</td></tr>}</tbody></table></div>
         </Card>
       </div>}
 
@@ -339,7 +357,7 @@ export function OperationsAssistant({
       </div>}
 
       {view === 'audiences' && <div className="space-y-5">
-        <Card><CardHeader className="flex flex-row items-center justify-between gap-3"><CardTitle>人群表现</CardTitle><span className="text-xs text-slate-400">达摩盘 / 单品人群 / 竞品人群</span></CardHeader><div className="overflow-x-auto"><table className="w-full min-w-[700px] text-left text-sm"><thead className="border-y border-slate-100 bg-slate-50 text-xs text-slate-500"><tr><th className="px-4 py-3 font-medium">人群</th><th className="px-4 py-3 font-medium">消耗</th><th className="px-4 py-3 font-medium">成交</th><th className="px-4 py-3 font-medium">ROI</th><th className="px-4 py-3 font-medium">费率</th></tr></thead><tbody>{workspace.audiences.length ? workspace.audiences.map((item) => <tr key={item.name} className="border-b border-slate-100 last:border-0"><td className="px-4 py-3 font-medium text-slate-900">{item.name}</td><td className="px-4 py-3 text-slate-700">{money(item.spend)}</td><td className="px-4 py-3 text-slate-700">{money(item.revenue)}</td><td className="px-4 py-3 text-slate-700">{Number.isFinite(item.roi) ? Number(item.roi).toFixed(2) : '--'}</td><td className="px-4 py-3 text-slate-700">{percent(item.feeRate)}</td></tr>) : <tr><td colSpan={5} className="px-4 py-10 text-center text-slate-400">导入达摩盘或人群报表后显示分析</td></tr>}</tbody></table></div></Card>
+        <Card><CardHeader className="flex flex-row items-center justify-between gap-3"><CardTitle>人群表现</CardTitle><span className="text-xs text-slate-400">达摩盘 / 单品人群 / 竞品人群</span></CardHeader><div className="overflow-x-auto"><table className="w-full min-w-[700px] text-left text-sm"><thead className="border-y border-slate-100 bg-slate-50 text-xs text-slate-500"><tr><th className="px-4 py-3 font-medium">人群</th><th className="px-4 py-3 font-medium">消耗</th><th className="px-4 py-3 font-medium">成交</th><th className="px-4 py-3 font-medium">ROI</th><th className="px-4 py-3 font-medium">费率</th></tr></thead><tbody>{workspace.audiences.length ? workspace.audiences.map((item) => <tr key={item.name} className="border-b border-slate-100 last:border-0"><td className="px-4 py-3 font-medium text-slate-900">{item.name}</td><td className="px-4 py-3 text-slate-700">{money(item.spend)}</td><td className="px-4 py-3 text-slate-700">{money(item.revenue)}</td><td className="px-4 py-3 text-slate-700">{fixed(item.roi)}</td><td className="px-4 py-3 text-slate-700">{percent(item.feeRate)}</td></tr>) : <tr><td colSpan={5} className="px-4 py-10 text-center text-slate-400">导入达摩盘或人群报表后显示分析</td></tr>}</tbody></table></div></Card>
       </div>}
 
       {view === 'archive' && <div className="space-y-5">
@@ -350,7 +368,7 @@ export function OperationsAssistant({
         <section className="flex flex-wrap items-end gap-3 border-b border-slate-200 pb-3"><label className="space-y-1 text-xs font-medium text-slate-600"><span>报表类型</span><select value={archiveType} onChange={(event) => setArchiveType(event.target.value as OperationsReportType | 'all')} className="h-9 min-w-32 rounded-md border border-slate-200 bg-white px-3 text-sm text-slate-800 outline-none focus:border-blue-500"><option value="all">全部类型</option>{Object.entries(reportTypeLabels).map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select></label><label className="space-y-1 text-xs font-medium text-slate-600"><span>店铺</span><select value={archiveStore} onChange={(event) => setArchiveStore(event.target.value)} className="h-9 min-w-36 rounded-md border border-slate-200 bg-white px-3 text-sm text-slate-800 outline-none focus:border-blue-500"><option value="all">全部店铺</option>{archiveStores.map((store) => <option key={store} value={store}>{store}</option>)}</select></label></section>
         <Card>
           <CardHeader><CardTitle>按日快照</CardTitle></CardHeader>
-          <div className="divide-y divide-slate-100">{filteredArchiveDays.length ? filteredArchiveDays.map((day) => <section key={day.date} className="grid gap-3 px-5 py-4 lg:grid-cols-[120px_minmax(0,1fr)]"><div><div className="text-base font-semibold text-slate-900">{day.date}</div><div className="mt-1 text-xs text-slate-400">{day.reportCount} 份 · {day.rowCount} 行</div></div><div className="divide-y divide-slate-100">{day.snapshots.map((snapshot) => <div key={snapshot.key} className="grid gap-x-4 gap-y-1 py-2 text-sm sm:grid-cols-[120px_minmax(120px,1fr)_minmax(160px,auto)] sm:items-center"><div className="min-w-0"><div className="font-medium text-slate-800">{reportTypeLabels[snapshot.type]}</div><div className="mt-0.5 truncate text-xs text-slate-400">{snapshot.storeName} · {snapshot.rowCount} 行</div></div><div className="text-xs text-slate-600">消耗 {money(snapshot.metrics.spend)} · 成交 {money(snapshot.metrics.revenue)} · ROI {Number.isFinite(snapshot.metrics.roi) ? Number(snapshot.metrics.roi).toFixed(2) : '--'}</div><div className="text-xs text-slate-500">{snapshot.comparison.previousDate ? <span>对比 {snapshot.comparison.previousDate}：成交 <span className={Number(snapshot.comparison.revenueChange) < 0 ? 'text-red-600' : 'text-emerald-700'}>{relative(snapshot.comparison.revenueChange)}</span></span> : '暂无同口径前序数据'}</div></div>)}</div></section>) : <div className="px-5 py-10 text-center text-sm text-slate-400">没有符合筛选条件的历史数据。</div>}</div>
+          <div className="divide-y divide-slate-100">{filteredArchiveDays.length ? filteredArchiveDays.map((day) => <section key={day.date} className="grid gap-3 px-5 py-4 lg:grid-cols-[120px_minmax(0,1fr)]"><div><div className="text-base font-semibold text-slate-900">{day.date}</div><div className="mt-1 text-xs text-slate-400">{day.reportCount} 份 · {day.rowCount} 行</div></div><div className="divide-y divide-slate-100">{day.snapshots.map((snapshot) => <div key={snapshot.key} className="grid gap-x-4 gap-y-1 py-2 text-sm sm:grid-cols-[120px_minmax(120px,1fr)_minmax(160px,auto)] sm:items-center"><div className="min-w-0"><div className="font-medium text-slate-800">{reportTypeLabels[snapshot.type]}</div><div className="mt-0.5 truncate text-xs text-slate-400">{snapshot.storeName} · {snapshot.rowCount} 行</div></div><div className="text-xs text-slate-600">消耗 {money(snapshot.metrics.spend)} · 成交 {money(snapshot.metrics.revenue)} · ROI {fixed(snapshot.metrics.roi)}</div><div className="text-xs text-slate-500">{snapshot.comparison.previousDate ? <span>对比 {snapshot.comparison.previousDate}：成交 <span className={Number(snapshot.comparison.revenueChange) < 0 ? 'text-red-600' : 'text-emerald-700'}>{relative(snapshot.comparison.revenueChange)}</span></span> : '暂无同口径前序数据'}</div></div>)}</div></section>) : <div className="px-5 py-10 text-center text-sm text-slate-400">没有符合筛选条件的历史数据。</div>}</div>
         </Card>
         <Card>
           <CardHeader><CardTitle>归档原始记录</CardTitle></CardHeader>
@@ -363,11 +381,11 @@ export function OperationsAssistant({
 }
 
 function GroupLine({ item }: { item: OperationsWorkspace['stores'][number] }) {
-  return <div className="flex items-center justify-between gap-3"><div className="min-w-0"><div className="truncate text-sm font-medium text-slate-800">{item.name}</div><div className="mt-1 text-xs text-slate-400">消耗 {money(item.spend)} · 成交 {money(item.revenue)}</div></div><div className="text-right"><div className="text-sm font-semibold text-slate-800">{Number.isFinite(item.roi) ? Number(item.roi).toFixed(2) : '--'}</div><div className="mt-1 text-xs text-slate-400">费率 {percent(item.feeRate)}</div></div></div>
+  return <div className="flex items-center justify-between gap-3"><div className="min-w-0"><div className="truncate text-sm font-medium text-slate-800">{item.name}</div><div className="mt-1 text-xs text-slate-400">消耗 {money(item.spend)} · 成交 {money(item.revenue)}</div></div><div className="text-right"><div className="text-sm font-semibold text-slate-800">{fixed(item.roi)}</div><div className="mt-1 text-xs text-slate-400">费率 {percent(item.feeRate)}</div></div></div>
 }
 
 function ProductTargetRow({ item, target, busy, onSave }: { item: OperationsWorkspace['products'][number], target: OperationsTarget, busy: string, onSave: (target: OperationsTarget) => void }) {
-  const [draft, setDraft] = useState(target)
-  useEffect(() => setDraft(target), [target])
-  return <tr className="border-b border-slate-100 last:border-0"><td className="px-4 py-3 font-medium text-slate-900">{item.name}</td><td className="px-4 py-3 text-slate-700">{money(item.spend)}</td><td className="px-4 py-3 text-slate-700">{money(item.revenue)}</td><td className="px-4 py-3 text-slate-700">{Number.isFinite(item.roi) ? Number(item.roi).toFixed(2) : '--'}</td><td className="px-4 py-3 text-slate-700">{percent(item.feeRate)}</td><td className="px-4 py-3"><div className="flex items-center gap-2"><input aria-label={`${item.name} 保本 ROI`} type="number" min="0.01" step="0.01" value={draft.targetRoi} onChange={(event) => setDraft({ ...draft, targetRoi: Number(event.target.value) })} className="h-8 w-16 rounded border border-slate-200 px-2 text-xs" title="保本 ROI" /><input aria-label={`${item.name} 费率上限`} type="number" min="0.01" max="100" step="0.1" value={Number((draft.maxFeeRate * 100).toFixed(2))} onChange={(event) => setDraft({ ...draft, maxFeeRate: Number(event.target.value) / 100 })} className="h-8 w-16 rounded border border-slate-200 px-2 text-xs" title="费率上限（%）" /><input aria-label={`${item.name} 单日预算上限`} type="number" min="0" step="1" value={draft.dailyBudgetCap} onChange={(event) => setDraft({ ...draft, dailyBudgetCap: Number(event.target.value) })} className="h-8 w-20 rounded border border-slate-200 px-2 text-xs" title="单日预算上限" /><Button type="button" size="sm" variant="secondary" disabled={busy.startsWith('target-')} onClick={() => onSave(draft)}>保存</Button></div><div className="mt-1 text-[11px] text-slate-400">ROI · 费率% · 预算</div></td></tr>
+  const [draft, setDraft] = useState(() => normalizedTarget(target))
+  useEffect(() => setDraft(normalizedTarget(target)), [target])
+  return <tr className="border-b border-slate-100 last:border-0"><td className="px-4 py-3 font-medium text-slate-900">{item.name}</td><td className="px-4 py-3 text-slate-700">{money(item.spend)}</td><td className="px-4 py-3 text-slate-700">{money(item.revenue)}</td><td className="px-4 py-3 text-slate-700">{fixed(item.roi)}</td><td className="px-4 py-3 text-slate-700">{percent(item.feeRate)}</td><td className="px-4 py-3"><div className="flex items-center gap-2"><input aria-label={`${item.name} 保本 ROI`} type="number" min="0.01" step="0.01" value={draft.targetRoi} onChange={(event) => setDraft({ ...draft, targetRoi: Number(event.target.value) })} className="h-8 w-16 rounded border border-slate-200 px-2 text-xs" title="保本 ROI" /><input aria-label={`${item.name} 费率上限`} type="number" min="0.01" max="100" step="0.1" value={Number((draft.maxFeeRate * 100).toFixed(2))} onChange={(event) => setDraft({ ...draft, maxFeeRate: Number(event.target.value) / 100 })} className="h-8 w-16 rounded border border-slate-200 px-2 text-xs" title="费率上限（%）" /><input aria-label={`${item.name} 单日预算上限`} type="number" min="0" step="1" value={draft.dailyBudgetCap} onChange={(event) => setDraft({ ...draft, dailyBudgetCap: Number(event.target.value) })} className="h-8 w-20 rounded border border-slate-200 px-2 text-xs" title="单日预算上限" /><Button type="button" size="sm" variant="secondary" disabled={busy.startsWith('target-')} onClick={() => onSave(draft)}>保存</Button></div><div className="mt-1 text-[11px] text-slate-400">ROI · 费率% · 预算</div></td></tr>
 }

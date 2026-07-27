@@ -8,6 +8,7 @@ import {
   QWENPAW_CDN_ORIGIN,
   defaultQwenPawInstallDirectory,
   downloadQwenPawOfficialPackage,
+  qwenPawBundledPluginSource,
   qwenPawLocalRuntimeStatus,
   qwenPawOfficialPackagePlan,
   qwenPawRuntimeStatus,
@@ -39,6 +40,28 @@ test("QwenPaw defaults to the agreed Windows D drive directory", () => {
     defaultQwenPawInstallDirectory({ platform: "darwin", homeDirectory: "/Users/tester" }),
     path.join("/Users/tester", "Library", "Application Support", "电商竞品监控", "QwenPaw"),
   );
+});
+
+test("packaged QwenPaw plugin resolves from Electron's unpacked resource directory", () => {
+  const source = qwenPawBundledPluginSource({
+    sourceDirectory: "D:/workspace/server/services",
+    unpackedDirectory: "D:/Program Files/电商竞品监控/resources/app.asar.unpacked",
+  });
+  assert.equal(
+    source,
+    path.join("D:/Program Files/电商竞品监控/resources/app.asar.unpacked", "server", "qwenpaw-plugins", "ecommerce-qr-delivery"),
+  );
+  assert.equal(
+    qwenPawBundledPluginSource({ sourceDirectory: "D:/workspace/server/services", unpackedDirectory: "" }),
+    path.resolve("D:/workspace/server/qwenpaw-plugins/ecommerce-qr-delivery"),
+  );
+});
+
+test("Electron packaging keeps the QwenPaw plugin outside app.asar for the local runtime", async () => {
+  const builderConfig = await fs.readFile(new URL("../../electron-builder.yml", import.meta.url), "utf8");
+  const electronMain = await fs.readFile(new URL("../../electron/main.mjs", import.meta.url), "utf8");
+  assert.match(builderConfig, /asarUnpack:[\s\S]*server\/qwenpaw-plugins\/\*\*\/\*/);
+  assert.match(electronMain, /ECOM_MONITOR_UNPACKED_DIR/);
 });
 
 test("an older QwenPaw installation without metadata is offered an in-place verified update", async () => {

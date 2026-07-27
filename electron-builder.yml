@@ -24,6 +24,9 @@ files:
   - '!output/**'
   - '!canvas/**'
 asarUnpack:
+  # QwenPaw loads this Python plugin from its own local runtime. It cannot
+  # import or copy a plugin directory from Electron's app.asar archive.
+  - server/qwenpaw-plugins/**/*
   - node_modules/sharp/**/*
   - node_modules/@img/**/*
   - node_modules/@larksuite/cli/**/*

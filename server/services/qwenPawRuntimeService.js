@@ -13,7 +13,6 @@ const QWENPAW_DESKTOP_INDEX = `${QWENPAW_CDN_ORIGIN}/metadata/apps/desktop/index
 const INSTALL_METADATA_FILE = ".ecom-qwenpaw-install.json";
 const ECOMMERCE_QR_PLUGIN_ID = "ecommerce-qr-delivery";
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const ECOMMERCE_QR_PLUGIN_SOURCE = path.resolve(__dirname, "../qwenpaw-plugins", ECOMMERCE_QR_PLUGIN_ID);
 const BACKEND_READY_TIMEOUT_MS = 60_000;
 const INSTALL_TIMEOUT_MS = 30 * 60_000;
 
@@ -127,9 +126,20 @@ export function qwenPawWorkingDirectory(installDirectory) {
   return path.join(normalizeQwenPawInstallDirectory(installDirectory), "data");
 }
 
+export function qwenPawBundledPluginSource({ sourceDirectory = __dirname, unpackedDirectory = process.env.ECOM_MONITOR_UNPACKED_DIR } = {}) {
+  // Electron keeps source files in app.asar. QwenPaw's Python runtime needs
+  // a normal directory, so production uses Electron's app.asar.unpacked copy.
+  if (String(unpackedDirectory || "").trim()) {
+    return path.join(path.resolve(String(unpackedDirectory)), "server", "qwenpaw-plugins", ECOMMERCE_QR_PLUGIN_ID);
+  }
+  return path.resolve(sourceDirectory, "../qwenpaw-plugins", ECOMMERCE_QR_PLUGIN_ID);
+}
+
 async function installBundledQwenPawPlugins(installDirectory) {
-  const source = ECOMMERCE_QR_PLUGIN_SOURCE;
-  if (!existsSync(path.join(source, "plugin.json"))) throw new Error("内置 QwenPaw 二维码插件缺失。");
+  const source = qwenPawBundledPluginSource();
+  if (!existsSync(path.join(source, "plugin.json"))) {
+    throw new Error(`内置 QwenPaw 二维码插件缺失：${source}`);
+  }
   const destination = path.join(qwenPawWorkingDirectory(installDirectory), "plugins", ECOMMERCE_QR_PLUGIN_ID);
   await fs.mkdir(path.dirname(destination), { recursive: true });
   await fs.cp(source, destination, { recursive: true, force: true });
