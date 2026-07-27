@@ -18,7 +18,10 @@ import {
 import { normalizeQwenPawAlerts } from "./qwenPawFeishuService.js";
 
 export const OPERATIONS_REPORT_TYPES = Object.freeze(["promotion", "market", "audience", "competitor"]);
-export const OPERATIONS_MAX_UPLOAD_BYTES = 16 * 1024 * 1024;
+// Exported operational reports can be large, especially when WPS includes
+// full campaign dimensions. Keep this high enough for normal exports while
+// retaining a bounded in-memory upload.
+export const OPERATIONS_MAX_UPLOAD_BYTES = 64 * 1024 * 1024;
 const MAX_REPORTS = 180;
 const MAX_ROWS_PER_REPORT = 5_000;
 const MAX_SCREENSHOTS_PER_ANALYSIS = 3;
@@ -83,17 +86,29 @@ function percentNumber(value, digits = 1, fallback = "--") {
 export function normalizeUploadedFilename(value = "") {
   const raw = String(value || "").trim();
   if (!raw) return "未命名文件";
-  // Multer may expose UTF-8 Chinese names as a Latin-1 string. Only accept a
-  // recovered value when it clearly restores Chinese text, leaving ordinary
-  // ASCII and non-recoverable names untouched.
-  if (/[\u4E00-\u9FFF]/.test(raw)) return raw;
-  try {
-    const recovered = Buffer.from(raw, "latin1").toString("utf8");
-    if (recovered && !recovered.includes("\uFFFD") && /[\u4E00-\u9FFF]/.test(recovered)) return recovered;
-  } catch {
-    // Keep the original name when the browser did not provide a recoverable string.
+  // Multipart implementations do not agree on whether a non-ASCII filename
+  // is raw UTF-8, Latin-1 decoded UTF-8, or double-decoded. Select the best
+  // recovery instead of assuming a single browser/server pairing.
+  const score = (candidate) => {
+    const value = String(candidate || "");
+    const chinese = (value.match(/[\u3400-\u9FFF]/g) || []).length;
+    const mojibake = (value.match(/[\u00C2\u00C3\u00E5\u00E6\u00E7\u00E8\u00E9]/g) || []).length;
+    const replacement = (value.match(/\uFFFD/g) || []).length;
+    return chinese * 12 - mojibake * 5 - replacement * 40;
+  };
+  const candidates = new Set([raw]);
+  let current = raw;
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    try {
+      const recovered = Buffer.from(current, "latin1").toString("utf8");
+      if (!recovered || recovered.includes("\uFFFD") || recovered === current) break;
+      candidates.add(recovered);
+      current = recovered;
+    } catch {
+      break;
+    }
   }
-  return raw;
+  return [...candidates].sort((left, right) => score(right) - score(left) || left.length - right.length)[0] || raw;
 }
 
 function headerKey(value) {
@@ -166,29 +181,68 @@ function normalizedRows(rows) {
     .filter((row) => Object.values(row).some((value) => value !== "" && value !== null && value !== "unknown"));
 }
 
-function parseCsv(textValue) {
-  const lines = String(textValue || "").replace(/^\uFEFF/, "").split(/\r?\n/).filter((line) => line.trim());
-  if (!lines.length) return [];
-  const parseLine = (line) => {
-    const values = [];
-    let current = "";
-    let quoted = false;
-    for (let index = 0; index < line.length; index += 1) {
-      const character = line[index];
-      if (character === '"' && quoted && line[index + 1] === '"') {
-        current += '"';
-        index += 1;
-      } else if (character === '"') quoted = !quoted;
-      else if (character === "," && !quoted) {
-        values.push(current);
-        current = "";
-      } else current += character;
+function decodeCsv(buffer) {
+  const candidates = ["utf-8", "gb18030", "gbk"].flatMap((encoding) => {
+    try {
+      return [{ encoding, value: new TextDecoder(encoding, { fatal: false }).decode(buffer).replace(/^\uFEFF/, "") }];
+    } catch {
+      return [];
     }
-    values.push(current);
-    return values.map((value) => value.trim());
+  });
+  const score = (value) => {
+    const printable = (value.match(/[\u4E00-\u9FFFA-Za-z0-9_\s,;|\t]/g) || []).length;
+    const replacement = (value.match(/\uFFFD/g) || []).length;
+    const mojibake = (value.match(/[\u00C2\u00C3\u00E5\u00E6\u00E7\u00E8\u00E9]/g) || []).length;
+    return printable - replacement * 120 - mojibake * 8;
   };
-  const headers = parseLine(lines[0]).map((value, index) => value || `column_${index + 1}`);
-  return lines.slice(1).map((line) => Object.fromEntries(parseLine(line).map((value, index) => [headers[index], value])));
+  return candidates.sort((left, right) => score(right.value) - score(left.value))[0]?.value || "";
+}
+
+function csvDelimiter(textValue) {
+  const firstLine = String(textValue || "").split(/\r?\n/, 1)[0] || "";
+  const candidates = [",", "\t", ";", "|"];
+  return candidates.map((delimiter) => ({ delimiter, count: firstLine.split(delimiter).length }))
+    .sort((left, right) => right.count - left.count)[0]?.delimiter || ",";
+}
+
+function parseCsv(textValue) {
+  const source = String(textValue || "").replace(/^\uFEFF/, "");
+  if (!source.trim()) return [];
+  const delimiter = csvDelimiter(source);
+  const records = [];
+  let row = [];
+  let current = "";
+  let quoted = false;
+  for (let index = 0; index < source.length; index += 1) {
+    const character = source[index];
+    if (character === '"' && quoted && source[index + 1] === '"') {
+      current += '"';
+      index += 1;
+    } else if (character === '"') {
+      quoted = !quoted;
+    } else if (character === delimiter && !quoted) {
+      row.push(current.trim());
+      current = "";
+    } else if ((character === "\n" || character === "\r") && !quoted) {
+      if (character === "\r" && source[index + 1] === "\n") index += 1;
+      row.push(current.trim());
+      if (row.some(Boolean)) records.push(row);
+      row = [];
+      current = "";
+    } else {
+      current += character;
+    }
+  }
+  row.push(current.trim());
+  if (row.some(Boolean)) records.push(row);
+  if (!records.length) return [];
+  const headerIndex = records.slice(0, 60).map((values, index) => ({ index, matches: headerMatchCount(values), populated: values.filter(Boolean).length }))
+    .filter((candidate) => candidate.populated > 0)
+    .sort((left, right) => (right.matches - left.matches) || (right.populated - left.populated) || (left.index - right.index))[0]?.index ?? 0;
+  const headers = uniqueHeaders(records[headerIndex]);
+  return records.slice(headerIndex + 1)
+    .filter((values) => values.some((value) => String(value || "").trim()))
+    .map((values) => Object.fromEntries(headers.map((header, index) => [header, values[index] ?? ""])));
 }
 
 function spreadsheetCellValue(value) {
@@ -238,16 +292,22 @@ function parseSpreadsheetRows(grid) {
 }
 
 async function parseWorkbook(buffer) {
-  const workbook = new ExcelJS.Workbook();
-  await workbook.xlsx.load(buffer);
-  const sheet = workbook.worksheets[0];
-  if (!sheet) return [];
-  const grid = [];
-  sheet.eachRow({ includeEmpty: false }, (row, index) => {
-    const values = row.values.slice(1).map(spreadsheetCellValue);
-    grid[index - 1] = values;
-  });
-  return parseSpreadsheetRows(grid);
+  try {
+    const workbook = new ExcelJS.Workbook();
+    await workbook.xlsx.load(buffer);
+    const sheet = workbook.worksheets[0];
+    if (!sheet) return [];
+    const grid = [];
+    sheet.eachRow({ includeEmpty: false }, (row, index) => {
+      const values = row.values.slice(1).map(spreadsheetCellValue);
+      grid[index - 1] = values;
+    });
+    return parseSpreadsheetRows(grid);
+  } catch {
+    // WPS can label an otherwise valid workbook as XLSM/XLSX while using
+    // features ExcelJS does not load. SheetJS is our compatibility fallback.
+    return parseLegacyWorkbook(buffer);
+  }
 }
 
 function parseLegacyWorkbook(buffer) {
@@ -264,16 +324,17 @@ function parseLegacyWorkbook(buffer) {
 }
 
 function extensionOf(file = {}) {
-  const match = String(file.originalname || "").toLowerCase().match(/\.([a-z0-9]+)$/);
+  const name = normalizeUploadedFilename(file.originalname || "");
+  const match = String(name).toLowerCase().match(/\.([a-z0-9]+)$/);
   return match?.[1] || "";
 }
 
 function reportKind(file) {
   const extension = extensionOf(file);
   if (["png", "jpg", "jpeg", "webp"].includes(extension)) return "screenshot";
-  if (extension === "xlsx") return "xlsx";
-  if (extension === "xls") return "xls";
-  if (extension === "csv") return "csv";
+  if (["xlsx", "xlsm", "xltx", "xltm"].includes(extension)) return "xlsx";
+  if (["xls", "xlsb", "ods"].includes(extension)) return "xls";
+  if (["csv", "tsv", "txt"].includes(extension)) return "csv";
   if (extension === "json") return "json";
   return "";
 }
@@ -284,14 +345,14 @@ export function isSupportedOperationsFile(file) {
 
 export async function parseOperationsFile(file) {
   if (!file?.buffer?.length) throw Object.assign(new Error("请选择有效的数据文件或截图。"), { status: 400 });
-  if (file.buffer.length > OPERATIONS_MAX_UPLOAD_BYTES) throw Object.assign(new Error("运营数据文件不能超过 16 MB。"), { status: 413 });
+  if (file.buffer.length > OPERATIONS_MAX_UPLOAD_BYTES) throw Object.assign(new Error("运营数据文件不能超过 64 MB。"), { status: 413 });
   const kind = reportKind(file);
-  if (!kind) throw Object.assign(new Error("只支持 XLS、XLSX、CSV、JSON、PNG、JPG 或 WEBP。"), { status: 400 });
+  if (!kind) throw Object.assign(new Error("支持 Excel、WPS、CSV、TSV、TXT、JSON、PNG、JPG 或 WEBP。"), { status: 400 });
   if (kind === "screenshot") return { kind, columns: [], rows: [] };
   let rows;
   if (kind === "xlsx") rows = await parseWorkbook(file.buffer);
   else if (kind === "xls") rows = parseLegacyWorkbook(file.buffer);
-  else if (kind === "csv") rows = parseCsv(file.buffer.toString("utf8"));
+  else if (kind === "csv") rows = parseCsv(decodeCsv(file.buffer));
   else {
     const parsed = JSON.parse(file.buffer.toString("utf8"));
     rows = Array.isArray(parsed) ? parsed : Array.isArray(parsed?.data) ? parsed.data : [];

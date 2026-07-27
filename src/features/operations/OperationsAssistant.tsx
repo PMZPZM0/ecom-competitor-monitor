@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { BarChart3, Check, CircleAlert, ClipboardPaste, Clock3, Database, FileSpreadsheet, Image as ImageIcon, LoaderCircle, Send, Sparkles, Target, Trash2, Upload, UsersRound, X } from 'lucide-react'
+import { ArrowDownRight, ArrowUpRight, BarChart3, Check, CircleAlert, ClipboardPaste, Clock3, Database, FileSpreadsheet, Image as ImageIcon, LoaderCircle, Send, Sparkles, Target, Trash2, Upload, UsersRound, X } from 'lucide-react'
+import { Bar, BarChart, Cell, ResponsiveContainer, Tooltip, XAxis } from 'recharts'
 import { Button } from '../../components/ui/button'
 import { Card, CardContent, CardHeader, CardTitle } from '../../components/ui/card'
 import type { OperationsAnalysis, OperationsReportType, OperationsTarget, OperationsWorkspace } from '../../types/domain'
@@ -95,16 +96,41 @@ function actionTone(action: string) {
   return 'bg-slate-100 text-slate-600 ring-slate-200'
 }
 
-function Metric({ label, value, detail }: { label: string, value: string, detail: string }) {
+function Metric({ label, value, detail, tone = 'blue' }: { label: string, value: string, detail: string, tone?: 'blue' | 'green' | 'amber' | 'rose' }) {
+  const styles = {
+    blue: 'border-blue-200/80 bg-blue-50/75 text-blue-700',
+    green: 'border-emerald-200/80 bg-emerald-50/75 text-emerald-700',
+    amber: 'border-amber-200/80 bg-amber-50/75 text-amber-700',
+    rose: 'border-rose-200/80 bg-rose-50/75 text-rose-700',
+  }[tone]
   return (
-    <Card className="min-w-0">
-      <CardContent className="p-4">
-        <div className="text-xs text-slate-500">{label}</div>
-        <div className="mt-1 truncate text-2xl font-semibold text-slate-950">{value}</div>
-        <div className="mt-1 truncate text-xs text-slate-400">{detail}</div>
-      </CardContent>
-    </Card>
+    <div className={`min-w-0 border px-4 py-3 ${styles}`}>
+      <div className="text-xs font-medium opacity-80">{label}</div>
+      <div className="mt-1 truncate text-2xl font-semibold text-slate-950">{value}</div>
+      <div className="mt-1 truncate text-xs text-slate-500">{detail}</div>
+    </div>
   )
+}
+
+function TrendChart({ title, hint, data, valueKey, valueFormatter, color }: {
+  title: string
+  hint: string
+  data: Array<{ name: string, value: number }>
+  valueKey: string
+  valueFormatter: (value: number) => string
+  color: string
+}) {
+  if (!data.length) return <div className="flex h-48 items-center justify-center text-sm text-slate-400">导入可计算报表后展示</div>
+  return <div className="h-48">
+    <div className="mb-3 flex items-start justify-between gap-3"><div><div className="text-sm font-semibold text-slate-900">{title}</div><div className="mt-0.5 text-xs text-slate-500">{hint}</div></div></div>
+    <ResponsiveContainer width="100%" height="100%">
+      <BarChart data={data} margin={{ top: 0, right: 4, left: -16, bottom: 0 }}>
+        <XAxis dataKey="name" tickLine={false} axisLine={false} tick={{ fill: '#64748b', fontSize: 11 }} interval={0} />
+        <Tooltip cursor={{ fill: '#f1f5f9' }} formatter={(value) => [valueFormatter(Number(value)), valueKey]} labelStyle={{ color: '#0f172a' }} contentStyle={{ borderRadius: 6, borderColor: '#e2e8f0', boxShadow: '0 12px 30px rgba(15, 23, 42, 0.10)' }} />
+        <Bar dataKey="value" radius={[4, 4, 0, 0]} maxBarSize={40}>{data.map((item) => <Cell key={item.name} fill={color} fillOpacity={0.88} />)}</Bar>
+      </BarChart>
+    </ResponsiveContainer>
+  </div>
 }
 
 function RecentImportList({ reports, imageOnly, busy, onDelete }: { reports: OperationsWorkspace['reports'], imageOnly: boolean, busy: string, onDelete: (id: string) => void }) {
@@ -278,27 +304,32 @@ export function OperationsAssistant({
   const archiveStores = [...new Set(archive.days.flatMap((day) => day.snapshots.map((snapshot) => snapshot.storeName)))].sort()
   const filteredArchiveDays = archive.days.map((day) => ({ ...day, snapshots: day.snapshots.filter((snapshot) => (archiveType === 'all' || snapshot.type === archiveType) && (archiveStore === 'all' || snapshot.storeName === archiveStore)) })).filter((day) => day.snapshots.length)
   const filteredReports = workspace.reports.filter((report) => (archiveType === 'all' || report.type === archiveType) && (archiveStore === 'all' || (report.storeName || '未标记店铺') === archiveStore))
+  const productRevenueData = workspace.products.slice(0, 6).map((product) => ({ name: product.name.length > 8 ? `${product.name.slice(0, 8)}…` : product.name, value: Number(product.revenue) || 0 }))
+  const productSpendData = workspace.products.slice(0, 6).map((product) => ({ name: product.name.length > 8 ? `${product.name.slice(0, 8)}…` : product.name, value: Number(product.spend) || 0 }))
+  const actionCount = (action: string) => workspace.suggestions.filter((item) => item.action === action).length
+  const prioritySuggestions = workspace.suggestions.filter((item) => item.action !== '保持').slice(0, 3)
+  const importedDataCount = workspace.reports.filter((report) => report.kind !== 'screenshot').length
 
   return (
     <div className="space-y-5">
-      <section className="grid gap-3 xl:grid-cols-[minmax(0,1fr)_auto] xl:items-center">
-        <div className="min-w-0">
-          <div className="flex flex-wrap items-center gap-2">
-            <span className={`inline-flex items-center gap-1 rounded-md px-2 py-1 text-xs font-medium ring-1 ${workspace.freshness.fresh ? 'bg-emerald-50 text-emerald-700 ring-emerald-200' : 'bg-amber-50 text-amber-700 ring-amber-200'}`}><Clock3 className="h-3.5 w-3.5" />{freshLabel}</span>
-            <span className="text-xs text-slate-400">最近导入 {timestamp(workspace.freshness.latestAt)}</span>
+      <section className="overflow-hidden border border-slate-200 bg-white/80 shadow-sm backdrop-blur">
+        <div className="grid gap-5 px-5 py-4 lg:grid-cols-[minmax(0,1fr)_auto] lg:items-center">
+          <div className="min-w-0">
+            <div className="flex flex-wrap items-center gap-2"><span className="text-sm font-semibold text-slate-950">经营数据中心</span><span className={`inline-flex items-center gap-1 rounded-md px-2 py-1 text-xs font-medium ring-1 ${workspace.freshness.fresh ? 'bg-emerald-50 text-emerald-700 ring-emerald-200' : 'bg-amber-50 text-amber-700 ring-amber-200'}`}><Clock3 className="h-3.5 w-3.5" />{freshLabel}</span></div>
+            <div className="mt-1 flex flex-wrap gap-x-4 gap-y-1 text-xs text-slate-500"><span>最近导入 {timestamp(workspace.freshness.latestAt)}</span><span>{importedDataCount} 份可计算报表</span><span>{recentImageReports.length} 份图片分析素材</span></div>
           </div>
-        </div>
-        <div className="flex flex-wrap gap-2">
-          <Button type="button" variant="secondary" onClick={() => void run('daily', async () => { const result = await onRunDailyReport(); setAnalysis(result.analysis); if (!result.sent && result.sendError) setError(result.sendError) })} disabled={Boolean(busy)}><Send className="h-4 w-4" />发送日报</Button>
-          <Button type="button" onClick={() => void run('analyze', async () => setAnalysis(await onAnalyze()))} disabled={Boolean(busy) || !workspace.reports.length}>{busy === 'analyze' ? <LoaderCircle className="h-4 w-4 animate-spin" /> : <Sparkles className="h-4 w-4" />}运行分析</Button>
+          <div className="flex flex-wrap gap-2">
+            <Button type="button" variant="secondary" onClick={() => void run('daily', async () => { const result = await onRunDailyReport(); setAnalysis(result.analysis); if (!result.sent && result.sendError) setError(result.sendError) })} disabled={Boolean(busy)}><Send className="h-4 w-4" />发送日报</Button>
+            <Button type="button" onClick={() => void run('analyze', async () => setAnalysis(await onAnalyze()))} disabled={Boolean(busy) || !workspace.reports.length}>{busy === 'analyze' ? <LoaderCircle className="h-4 w-4 animate-spin" /> : <Sparkles className="h-4 w-4" />}运行分析</Button>
+          </div>
         </div>
       </section>
 
-      <section className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
-        <Metric label="推广消耗" value={money(workspace.totals.spend)} detail={`${workspace.products.length} 个单品`} />
-        <Metric label="成交金额" value={money(workspace.totals.revenue)} detail={`${Math.round(workspace.totals.orders || 0)} 个订单`} />
-        <Metric label="整体 ROI" value={fixed(workspace.totals.roi)} detail={`转化率 ${percent(workspace.totals.conversionRate)}`} />
-        <Metric label="整体费率" value={percent(workspace.totals.feeRate)} detail={`${workspace.suggestions.length} 条推广建议`} />
+      <section className="grid gap-px overflow-hidden border border-slate-200 bg-slate-200 sm:grid-cols-2 xl:grid-cols-4">
+        <Metric label="推广消耗" value={money(workspace.totals.spend)} detail={`${workspace.products.length} 个单品参与计算`} tone="blue" />
+        <Metric label="成交金额" value={money(workspace.totals.revenue)} detail={`${Math.round(workspace.totals.orders || 0)} 个订单`} tone="green" />
+        <Metric label="整体 ROI" value={fixed(workspace.totals.roi)} detail={`转化率 ${percent(workspace.totals.conversionRate)}`} tone="amber" />
+        <Metric label="需要处理" value={`${actionCount('降预算') + actionCount('暂停观察')} 项`} detail={`加预算 ${actionCount('加预算')} 项`} tone="rose" />
       </section>
 
       <section className="flex flex-wrap gap-1 border-b border-slate-200">
@@ -312,10 +343,20 @@ export function OperationsAssistant({
       {error && <div className="flex items-center gap-2 rounded-md border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700"><CircleAlert className="h-4 w-4 shrink-0" />{error}</div>}
 
       {view === 'overview' && <div className="space-y-5">
-        <Card>
-          <CardHeader className="flex flex-row flex-wrap items-center justify-between gap-3">
-            <div><CardTitle>导入运营数据</CardTitle><p className="mt-1 text-xs text-slate-500">数据文件用于本地计算；截图只交给 AI 做内容分析</p></div>
-            <div className="flex items-center gap-2"><span className="inline-flex items-center gap-2 text-xs text-slate-500"><FileSpreadsheet className="h-4 w-4" />本地保存</span><Button type="button" size="sm" variant="secondary" onClick={() => setPasteOpen((value) => !value)}><ClipboardPaste className="h-4 w-4" />粘贴数据</Button></div>
+        <section className="grid gap-4 xl:grid-cols-[minmax(0,1.25fr)_minmax(280px,0.75fr)]">
+          <div className="border border-slate-200 bg-white/80 p-5 shadow-sm backdrop-blur"><TrendChart title="成交贡献" hint="当前数据日 Top 6 单品" data={productRevenueData} valueKey="成交金额" valueFormatter={(value) => money(value)} color="#0f766e" /></div>
+          <div className="border border-slate-200 bg-white/80 p-5 shadow-sm backdrop-blur"><TrendChart title="消耗分布" hint="确认预算优先级前先看投入集中度" data={productSpendData} valueKey="推广消耗" valueFormatter={(value) => money(value)} color="#d97706" /></div>
+        </section>
+
+        <section className="grid gap-px overflow-hidden border border-slate-200 bg-slate-200 lg:grid-cols-[minmax(0,1fr)_minmax(320px,0.75fr)]">
+          <div className="bg-white/85 px-5 py-4"><div className="mb-3 flex items-center justify-between gap-3"><div><div className="text-sm font-semibold text-slate-900">优先处理</div><div className="mt-0.5 text-xs text-slate-500">建议由本地 ROI、费率和预算规则计算</div></div><span className="text-xs text-slate-400">{prioritySuggestions.length} 项</span></div>{prioritySuggestions.length ? <div className="grid gap-2 sm:grid-cols-3">{prioritySuggestions.map((item) => <div key={item.id} className="min-w-0 border border-slate-200 bg-slate-50 px-3 py-2"><div className="flex items-center justify-between gap-2"><span className="truncate text-sm font-medium text-slate-800">{item.productName}</span>{item.change > 0 ? <ArrowUpRight className="h-4 w-4 shrink-0 text-emerald-600" /> : <ArrowDownRight className="h-4 w-4 shrink-0 text-rose-600" />}</div><div className="mt-1 text-xs font-medium text-slate-600">{item.action}{item.change ? ` ${item.change > 0 ? '+' : ''}${item.change}%` : ''}</div><div className="mt-1 line-clamp-2 text-xs leading-5 text-slate-500">{item.reason}</div></div>)}</div> : <div className="flex min-h-20 items-center text-sm text-slate-400">导入当日推广报表后，这里会列出需要处理的单品。</div>}</div>
+          <div className="bg-emerald-50/70 px-5 py-4"><div className="text-sm font-semibold text-emerald-950">数据使用状态</div><div className="mt-3 grid grid-cols-3 gap-3"><div><div className="text-xl font-semibold text-emerald-900">{importedDataCount}</div><div className="text-xs text-emerald-700">可计算报表</div></div><div><div className="text-xl font-semibold text-emerald-900">{workspace.archive.totalRows}</div><div className="text-xs text-emerald-700">本机数据行</div></div><div><div className="text-xl font-semibold text-emerald-900">{recentImageReports.length}</div><div className="text-xs text-emerald-700">待分析图片</div></div></div></div>
+        </section>
+
+        <Card className="border-slate-200 bg-white/85 shadow-sm backdrop-blur">
+          <CardHeader className="flex flex-row flex-wrap items-center justify-between gap-3 border-b border-slate-100">
+            <div><CardTitle>导入运营数据</CardTitle><p className="mt-1 text-xs text-slate-500">文件只在本机解析；自动识别 Excel、WPS、CSV 的编码、表头和数据区。</p></div>
+            <div className="flex items-center gap-2"><span className="inline-flex items-center gap-2 rounded-md bg-emerald-50 px-2 py-1 text-xs text-emerald-700"><FileSpreadsheet className="h-4 w-4" />本地保存</span><Button type="button" size="sm" variant="secondary" onClick={() => setPasteOpen((value) => !value)}><ClipboardPaste className="h-4 w-4" />粘贴数据</Button></div>
           </CardHeader>
           <CardContent className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4 xl:items-end">
             <label className="space-y-1 text-xs font-medium text-slate-600"><span>数据类型</span><select value={reportType} onChange={(event) => setReportType(event.target.value as OperationsReportType)} className="h-10 w-full rounded-md border border-slate-200 bg-white px-3 text-sm text-slate-800 outline-none focus:border-blue-500">{Object.entries(reportTypeLabels).map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select></label>
@@ -324,10 +365,10 @@ export function OperationsAssistant({
             <label className="space-y-1 text-xs font-medium text-slate-600"><span>来源</span><input value={sourceName} onChange={(event) => setSourceName(event.target.value)} placeholder="万相台 / 达摩盘" className="h-10 w-full rounded-md border border-slate-200 bg-white px-3 text-sm text-slate-800 outline-none focus:border-blue-500" /></label>
           </CardContent>
           <div className="grid divide-y border-t border-slate-100 lg:grid-cols-2 lg:divide-x lg:divide-y-0">
-            <section className="space-y-3 p-5"><div><div className="text-sm font-medium text-slate-900">可计算报表</div><div className="mt-1 text-xs text-slate-500">XLS、XLSX、CSV、JSON 将参与本地 ROI、费率和推广建议计算。</div></div><div className="flex flex-wrap gap-2"><button type="button" onClick={() => reportFileInput.current?.click()} className="flex h-10 min-w-0 flex-1 items-center gap-2 rounded-md border border-dashed border-emerald-300 bg-emerald-50/60 px-3 text-left text-sm text-emerald-800 hover:border-emerald-400 hover:bg-emerald-50"><FileSpreadsheet className="h-4 w-4 shrink-0" /><span className="truncate">{selectedReport?.name || '选择数据文件'}</span></button><input ref={reportFileInput} type="file" accept=".xls,.xlsx,.csv,.json,application/vnd.ms-excel,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,text/csv,application/json" className="hidden" onChange={(event) => { const file = event.target.files?.[0] || null; event.target.value = ''; void inspectReport(file) }} /><Button type="button" onClick={() => void uploadReport()} disabled={busy === 'upload' || busy === 'preview-report' || !reportPreview}>{busy === 'upload' ? <LoaderCircle className="h-4 w-4 animate-spin" /> : <Upload className="h-4 w-4" />}导入报表</Button></div></section>
-            <section className="space-y-3 p-5"><div><div className="text-sm font-medium text-slate-900">截图分析</div><div className="mt-1 text-xs text-slate-500">图片仅交给 Agent 识图和分析，不会参与 ROI、费率或推广建议计算。</div></div><div className="flex flex-wrap gap-2"><button type="button" onClick={() => screenshotFileInput.current?.click()} className="flex h-10 min-w-0 flex-1 items-center gap-2 rounded-md border border-dashed border-blue-300 bg-blue-50/60 px-3 text-left text-sm text-blue-800 hover:border-blue-400 hover:bg-blue-50"><Upload className="h-4 w-4 shrink-0" /><span className="truncate">{selectedScreenshot?.name || '选择数据截图'}</span></button><input ref={screenshotFileInput} type="file" accept="image/png,image/jpeg,image/webp" className="hidden" onChange={(event) => { setSelectedScreenshot(event.target.files?.[0] || null); event.target.value = '' }} /><Button type="button" variant="secondary" onClick={() => void importClipboardScreenshot()} disabled={busy === 'upload-screenshot'}><ClipboardPaste className="h-4 w-4" />粘贴导入</Button><Button type="button" onClick={() => void uploadScreenshot()} disabled={busy === 'upload-screenshot' || !selectedScreenshot}>{busy === 'upload-screenshot' ? <LoaderCircle className="h-4 w-4 animate-spin" /> : <Upload className="h-4 w-4" />}导入截图</Button></div></section>
+            <section className="space-y-3 bg-emerald-50/45 p-5"><div className="flex items-start gap-3"><span className="mt-0.5 rounded-md bg-emerald-100 p-2 text-emerald-700"><FileSpreadsheet className="h-4 w-4" /></span><div><div className="text-sm font-semibold text-slate-900">可计算报表</div><div className="mt-1 text-xs leading-5 text-slate-500">Excel、WPS、CSV、TSV、TXT、JSON 都可导入；导入前会展示识别到的数据行和字段。</div></div></div><div className="flex flex-wrap gap-2"><button type="button" onClick={() => reportFileInput.current?.click()} className="flex h-10 min-w-0 flex-1 items-center gap-2 rounded-md border border-dashed border-emerald-300 bg-white/80 px-3 text-left text-sm text-emerald-800 hover:border-emerald-500 hover:bg-white"><FileSpreadsheet className="h-4 w-4 shrink-0" /><span className="truncate">{selectedReport?.name || '选择数据文件'}</span></button><input ref={reportFileInput} type="file" accept=".xls,.xlsx,.xlsm,.xlsb,.ods,.csv,.tsv,.txt,.json,application/vnd.ms-excel,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,text/csv,text/plain,application/json" className="hidden" onChange={(event) => { const file = event.target.files?.[0] || null; event.target.value = ''; void inspectReport(file) }} /><Button type="button" onClick={() => void uploadReport()} disabled={busy === 'upload' || busy === 'preview-report' || !reportPreview}>{busy === 'upload' ? <LoaderCircle className="h-4 w-4 animate-spin" /> : <Upload className="h-4 w-4" />}导入报表</Button></div></section>
+            <section className="space-y-3 bg-blue-50/45 p-5"><div className="flex items-start gap-3"><span className="mt-0.5 rounded-md bg-blue-100 p-2 text-blue-700"><ImageIcon className="h-4 w-4" /></span><div><div className="text-sm font-semibold text-slate-900">截图分析</div><div className="mt-1 text-xs leading-5 text-slate-500">图片会保存在本机，供 Agent 识图和分析，不参与 ROI、费率或推广建议计算。</div></div></div><div className="flex flex-wrap gap-2"><button type="button" onClick={() => screenshotFileInput.current?.click()} className="flex h-10 min-w-0 flex-1 items-center gap-2 rounded-md border border-dashed border-blue-300 bg-white/80 px-3 text-left text-sm text-blue-800 hover:border-blue-500 hover:bg-white"><Upload className="h-4 w-4 shrink-0" /><span className="truncate">{selectedScreenshot?.name || '选择数据截图'}</span></button><input ref={screenshotFileInput} type="file" accept="image/png,image/jpeg,image/webp" className="hidden" onChange={(event) => { setSelectedScreenshot(event.target.files?.[0] || null); event.target.value = '' }} /><Button type="button" variant="secondary" onClick={() => void importClipboardScreenshot()} disabled={busy === 'upload-screenshot'}><ClipboardPaste className="h-4 w-4" />粘贴导入</Button><Button type="button" onClick={() => void uploadScreenshot()} disabled={busy === 'upload-screenshot' || !selectedScreenshot}>{busy === 'upload-screenshot' ? <LoaderCircle className="h-4 w-4 animate-spin" /> : <Upload className="h-4 w-4" />}导入截图</Button></div></section>
           </div>
-          {reportPreview && <div className="mx-6 mb-4 flex flex-wrap items-center gap-x-3 gap-y-1 rounded-md border border-emerald-200 bg-emerald-50 px-3 py-2 text-xs text-emerald-800"><Check className="h-4 w-4 shrink-0" /><span className="font-medium">已识别 {reportPreview.exactRowCount ? reportPreview.rowCount : `至少 ${reportPreview.rowCount}`} 条数据</span><span>列：{reportPreview.columns.slice(0, 8).join('、')}{reportPreview.columns.length > 8 ? ` 等 ${reportPreview.columns.length} 列` : ''}</span><span>导入后会立即参与本地 ROI、费率和推广建议计算。</span></div>}
+          {reportPreview && <div className="mx-6 mb-4 grid gap-2 border border-emerald-200 bg-emerald-50 px-4 py-3 text-xs text-emerald-900 sm:grid-cols-[auto_minmax(0,1fr)]"><span className="flex h-7 w-7 items-center justify-center rounded-full bg-emerald-600 text-white"><Check className="h-4 w-4" /></span><div><div className="font-semibold">预检通过：已识别 {reportPreview.exactRowCount ? reportPreview.rowCount : `至少 ${reportPreview.rowCount}`} 条数据</div><div className="mt-1 leading-5 text-emerald-800">字段：{reportPreview.columns.slice(0, 8).join('、')}{reportPreview.columns.length > 8 ? ` 等 ${reportPreview.columns.length} 列` : ''}。导入后立即参与本地 ROI、费率和推广建议计算。</div></div></div>}
           {uploadFeedback && <div role="status" className="mx-6 mb-4 flex flex-wrap items-center gap-x-3 gap-y-1 rounded-md border border-blue-200 bg-blue-50 px-3 py-2 text-xs text-blue-800"><Check className="h-4 w-4 shrink-0" /><span className="font-medium">已导入 {uploadFeedback.fileName}</span><span>{uploadFeedback.kind === 'screenshot' ? '截图已保存，可供 Agent 分析' : `已识别 ${uploadFeedback.rowCount} 条可计算数据`}</span>{uploadFeedback.id && <button type="button" onClick={() => void deleteImportedReport(uploadFeedback.id)} className="ml-auto inline-flex items-center gap-1 text-red-700 hover:text-red-900"><Trash2 className="h-3.5 w-3.5" />删除</button>}</div>}
           <div className="grid divide-y border-t border-slate-100 bg-slate-50/60 lg:grid-cols-2 lg:divide-x lg:divide-y-0"><section className="px-6 py-3"><div className="mb-2 flex items-center justify-between gap-3"><div><div className="text-sm font-medium text-slate-800">已导入报表</div><div className="mt-0.5 text-xs text-slate-400">参与本地指标计算</div></div><span className="text-xs text-slate-400">{workspace.reports.filter((report) => report.kind !== 'screenshot').length} 项</span></div><RecentImportList reports={recentDataReports} imageOnly={false} busy={busy} onDelete={(id) => void deleteImportedReport(id)} /></section><section className="px-6 py-3"><div className="mb-2 flex items-center justify-between gap-3"><div><div className="text-sm font-medium text-slate-800">已导入图片</div><div className="mt-0.5 text-xs text-slate-400">仅供 Agent 识图分析</div></div><span className="text-xs text-slate-400">{workspace.reports.filter((report) => report.kind === 'screenshot').length} 项</span></div><RecentImportList reports={recentImageReports} imageOnly busy={busy} onDelete={(id) => void deleteImportedReport(id)} /></section></div>
           {pasteOpen && <div className="border-t border-slate-100 bg-slate-50/70 p-4">

@@ -68,9 +68,26 @@ test("operations assistant parses uploaded XLSX reports into locally computable 
 
 test("operations assistant restores UTF-8 Chinese filenames and keeps ordinary ASCII names unchanged", () => {
   const garbled = Buffer.from("推广报表.xls", "utf8").toString("latin1");
+  const doubleGarbled = Buffer.from(garbled, "utf8").toString("latin1");
   assert.equal(normalizeUploadedFilename(garbled), "推广报表.xls");
+  assert.equal(normalizeUploadedFilename(doubleGarbled), "推广报表.xls");
   assert.equal(normalizeUploadedFilename("promotion-report.xlsx"), "promotion-report.xlsx");
   assert.equal(normalizeOperationsState({ reports: [{ id: "ops-1", type: "promotion", fileName: garbled, rows: [] }] }).reports[0].fileName, "推广报表.xls");
+});
+
+test("operations assistant imports WPS GBK CSV exports and tabular text with a detected header", async () => {
+  const gbkCsv = Buffer.from([
+    0xc9, 0xcc, 0xc6, 0xb7, 0xc3, 0xfb, 0xb3, 0xc6, 0x2c, 0xcf, 0xfb, 0xba, 0xc4,
+    0x2c, 0xb3, 0xc9, 0xbd, 0xbb, 0xbd, 0xf0, 0xb6, 0xee, 0x0a, 0xb9, 0xf8, 0xbe,
+    0xdf, 0x2c, 0x31, 0x30, 0x30, 0x2c, 0x35, 0x30, 0x30,
+  ]);
+  const parsed = await parseOperationsFile({ originalname: "营销场景报表.csv", buffer: gbkCsv });
+
+  assert.equal(parsed.kind, "csv");
+  assert.equal(parsed.rows.length, 1);
+  assert.equal(parsed.rows[0].productName, "锅具");
+  assert.equal(parsed.rows[0].spend, 100);
+  assert.equal(parsed.rows[0].revenue, 500);
 });
 
 test("operations analysis safely handles incomplete targets and missing numeric fields", async () => {
