@@ -301,6 +301,8 @@ export function AuthPanel({ sessions, onSaved, onActivate, onDelete }: Props) {
                 ? '浏览器受限'
                 : session.tmallPriceStatus === 'valid'
                   ? '天猫查价可用'
+                  : session.tmallPriceStatus === 'partial'
+                    ? '天猫部分价格可用'
                   : session.tmallPriceStatus === 'degraded'
                     ? '天猫查价异常'
                     : '天猫查价待验证'
@@ -313,7 +315,7 @@ export function AuthPanel({ sessions, onSaved, onActivate, onDelete }: Props) {
                       <div className="flex min-w-0 items-center gap-2"><span className="truncate text-sm font-semibold text-slate-950" title={session.name}>{session.name}</span><span className="shrink-0 text-[11px] text-slate-500">{group.title}</span></div>
                       <div className="mt-1 flex flex-wrap gap-1 text-[11px] font-medium">
                         <span title={checkedTitle} className={`inline-flex items-center rounded px-1.5 py-0.5 ${session.loginStatus === 'valid' ? 'bg-emerald-100 text-emerald-800' : session.loginStatus === 'expired' ? 'bg-red-100 text-red-800' : 'bg-amber-100 text-amber-800'}`}>{session.source !== 'taobao-browser' ? '旧 Cookie' : identityLabel}</span>
-                        {session.source === 'taobao-browser' && <span title={session.availabilityReason || checkedTitle} className={`inline-flex items-center rounded px-1.5 py-0.5 ${session.priceUsable ? 'bg-blue-100 text-blue-800' : session.tmallPriceStatus === 'degraded' || session.availabilityStatus === 'access-restricted' ? 'bg-red-100 text-red-800' : 'bg-amber-100 text-amber-800'}`}>{priceLabel}</span>}
+                        {session.source === 'taobao-browser' && <span title={session.availabilityReason || checkedTitle} className={`inline-flex items-center rounded px-1.5 py-0.5 ${session.tmallPriceStatus === 'partial' ? 'bg-amber-100 text-amber-800' : session.priceUsable ? 'bg-blue-100 text-blue-800' : session.tmallPriceStatus === 'degraded' || session.availabilityStatus === 'access-restricted' ? 'bg-red-100 text-red-800' : 'bg-amber-100 text-amber-800'}`}>{priceLabel}</span>}
                         <span className={`inline-flex items-center rounded px-1.5 py-0.5 ${session.enabled ?? session.active ? 'bg-blue-50 text-blue-700' : 'bg-white/80 text-slate-500'}`}>{session.enabled ?? session.active ? '参与采价' : '已停用'}</span>
                       </div>
                     </div>

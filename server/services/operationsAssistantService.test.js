@@ -2,6 +2,8 @@ import assert from "node:assert/strict";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
+import ExcelJS from "exceljs";
+import * as XLSX from "xlsx";
 import {
   analyzeOperationsWorkspace,
   askOperationsAgent,
@@ -14,6 +16,7 @@ import {
   qwenPawBootstrapPlan,
   qwenPawRuntimeStatus,
   qwenPawSyncPlan,
+  qwenPawWorkspaceAgentInstructions,
 } from "./operationsAssistantService.js";
 import { updateModelConfig } from "./modelConfigService.js";
 
@@ -45,6 +48,64 @@ test("operations assistant calculates local fee rate and budget advice from impo
   assert.equal(workspace.products.find((item) => item.name === "成熟锅具")?.productStage, "mature");
   assert.equal(workspace.suggestions.find((item) => item.productName === "新品锅具")?.action, "降预算");
   assert.equal(workspace.suggestions.find((item) => item.productName === "成熟锅具")?.action, "加预算");
+});
+
+test("operations assistant parses uploaded XLSX reports into locally computable rows", async () => {
+  const workbook = new ExcelJS.Workbook();
+  const sheet = workbook.addWorksheet("推广报表");
+  sheet.addRow(["商品名称", "消耗", "成交金额", "订单数"]);
+  sheet.addRow(["测试锅具", 120, 600, 6]);
+  const buffer = await workbook.xlsx.writeBuffer();
+  const parsed = await parseOperationsFile({ originalname: "推广报表.xlsx", buffer: Buffer.from(buffer) });
+
+  assert.equal(parsed.kind, "xlsx");
+  assert.equal(parsed.rows.length, 1);
+  assert.equal(parsed.rows[0].productName, "测试锅具");
+  assert.equal(parsed.rows[0].spend, 120);
+  assert.equal(parsed.rows[0].revenue, 600);
+});
+
+test("operations data archive keeps daily snapshots separate and compares only the matching store and report type", async () => {
+  const dayOne = await promotionReport(["锅具A,新品,100,300,3,100,计划A,店铺A"]);
+  dayOne.reportDate = "2026-07-24";
+  const dayTwo = await promotionReport(["锅具A,新品,120,480,5,130,计划A,店铺A"]);
+  dayTwo.reportDate = "2026-07-25";
+  const otherStore = await promotionReport(["锅具B,新品,80,160,2,80,计划B,店铺B"]);
+  otherStore.reportDate = "2026-07-25";
+  const workspace = buildOperationsWorkspace({ reports: [dayOne, dayTwo, otherStore] }, { now: new Date("2026-07-25T12:00:00.000Z") });
+
+  assert.equal(workspace.currentDate, "2026-07-25");
+  assert.equal(workspace.totals.spend, 200);
+  assert.equal(workspace.archive.days.length, 2);
+  const currentDay = workspace.archive.days.find((item) => item.date === "2026-07-25");
+  const storeASnapshot = currentDay?.snapshots.find((item) => item.storeName === "店铺A");
+  const storeBSnapshot = currentDay?.snapshots.find((item) => item.storeName === "店铺B");
+  assert.equal(storeASnapshot?.comparison.previousDate, "2026-07-24");
+  assert.equal(storeASnapshot?.comparison.revenueChange, 0.6);
+  assert.equal(storeBSnapshot?.comparison.previousDate, null);
+  const context = JSON.parse(operationsAgentContextText(workspace));
+  assert.equal(context.archive.currentDate, "2026-07-25");
+  assert.equal(context.archive.days.length, 2);
+});
+
+test("operations assistant parses legacy XLS reports with export notes before the real header", async () => {
+  const workbook = XLSX.utils.book_new();
+  const sheet = XLSX.utils.aoa_to_sheet([
+    ["数据说明：从生意参谋导出的报表"],
+    [],
+    ["统计日期", "一级类目名称", "商品访客数", "支付金额", "支付转化率"],
+    ["2026-07-26", "厨房电器", 25333, 265002.84, "1.46%"],
+  ]);
+  XLSX.utils.book_append_sheet(workbook, sheet, "类目报表");
+  const buffer = XLSX.write(workbook, { bookType: "biff8", type: "buffer" });
+  const parsed = await parseOperationsFile({ originalname: "品类报表.xls", buffer: Buffer.from(buffer) });
+
+  assert.equal(parsed.kind, "xls");
+  assert.equal(parsed.rows.length, 1);
+  assert.equal(parsed.rows[0].category, "厨房电器");
+  assert.equal(parsed.rows[0].revenue, 265002.84);
+  assert.equal(parsed.rows[0].conversionRate, 0.0146);
+  assert.equal(parsed.rows[0].productName, "");
 });
 
 test("operations assistant stops producing budget advice when local data is stale", async () => {
@@ -169,6 +230,14 @@ test("QwenPaw sync plan changes when the saved operating principles change", () 
   const second = qwenPawSyncPlan("C:/temp/ecom-qwenpaw", config, "新品先验证转化率。");
 
   assert.notEqual(first.signature, second.signature);
+});
+
+test("QwenPaw instructions require complete per-SKU verified price reporting", () => {
+  const instructions = qwenPawWorkspaceAgentInstructions("新品先验证转化，再逐步放量。");
+  assert.match(instructions, /完整 SKU 价格矩阵/);
+  assert.match(instructions, /全部 skuRows/);
+  assert.match(instructions, /每个 SKU 的每个账号视角/);
+  assert.match(instructions, /不得猜测/);
 });
 
 test("QwenPaw official bootstrap selects Windows x64 and Apple Silicon without cross-architecture fallback", () => {

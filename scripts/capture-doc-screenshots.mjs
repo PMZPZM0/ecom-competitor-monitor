@@ -258,8 +258,8 @@ try {
   await cdp.send("Emulation.setDeviceMetricsOverride", { width: 1440, height: 900, deviceScaleFactor: 1, mobile: false });
   await navigate(cdp, appUrl);
 
-  await capture(cdp, sensitive, "dashboard-home.png", { page: "overview", action: "scrollTo(0, 0)" });
-  await capture(cdp, sensitive, "product-workbench.png", { page: "overview", action: `(() => { const article = ${featuredArticle}; article?.scrollIntoView({ block: 'start' }); scrollBy(0, -76); })()`, requireRedaction: true, redactPrices: true });
+  await capture(cdp, sensitive, "dashboard-home.png", { page: "monitoring", action: "scrollTo(0, 0)" });
+  await capture(cdp, sensitive, "product-workbench.png", { page: "monitoring", action: `(() => { const article = ${featuredArticle}; article?.scrollIntoView({ block: 'start' }); scrollBy(0, -76); })()`, requireRedaction: true, redactPrices: true });
   await capture(cdp, sensitive, "sku-monitor-overview.png", { page: "overview", action: `(() => { const article = ${featuredArticle}; const label = [...(article?.querySelectorAll('*') || [])].find((item) => item.textContent?.trim() === '最近抓取'); (label?.parentElement?.parentElement || article)?.scrollIntoView({ block: 'start' }); scrollBy(0, -76); })()`, requireRedaction: true, redactPrices: true });
   await capture(cdp, sensitive, "product-monitor-trend.png", { page: "overview", action: `(async () => { const article = ${featuredArticle}; article?.scrollIntoView({ block: 'start' }); await new Promise((resolve) => setTimeout(resolve, 900)); article?.querySelector('.product-price-trend')?.scrollIntoView({ block: 'start' }); scrollBy(0, -76); })()`, requireRedaction: true, redactPrices: true });
   await capture(cdp, sensitive, "sku-monitor-detail.png", { page: "overview", action: `(() => { const article = ${featuredArticle}; article?.scrollIntoView({ block: 'start' }); const button = [...(article?.querySelectorAll('button') || [])].find((item) => item.textContent?.trim() === '明细'); button?.click(); })()`, requireRedaction: true, redactPrices: true });

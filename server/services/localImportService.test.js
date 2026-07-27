@@ -18,6 +18,7 @@ const {
   LOCAL_IMPORT_MAX_BYTES,
   LOCAL_IMPORT_MAX_FILES,
   mergeLocalImportSnapshot,
+  readBrowserCaptureMetadata,
   readBrowserCaptureSource,
   reparseBrowserCaptureSource,
   saveBrowserCaptureSource,
@@ -521,6 +522,26 @@ test("schema v2 reparses every SKU only from its own local HTML snapshot", async
   assert.equal(bySku.get(skuIds[2]).normalPrice, null);
   assert.equal(bySku.get(skuIds[2]).resolutionStatus, "unavailable");
   assert.equal(reparsed.snapshot.rawSignals.skuHtmlSnapshotCount, 2);
+});
+
+test("browser evidence restores the model from local product parameters", async () => {
+  const fixture = newUserGiftBrowserCapture();
+  fixture.capture.page.html += `<script>window.__INIT_DATA__=${JSON.stringify({
+    industryParamVO: {
+      basicParamList: [{ propertyName: "产品型号", valueName: "SF50FC816" }],
+    },
+  })};</script>`;
+
+  const saved = await saveBrowserCaptureSource(fixture.capture);
+  const metadata = await readBrowserCaptureMetadata(saved.captureId);
+  const reparsed = await reparseBrowserCaptureSource(saved.captureId, {
+    accountType: "normal",
+    itemIdHint: fixture.itemId,
+  });
+
+  assert.equal(metadata.localFirst.parsedFromDisk, true);
+  assert.equal(metadata.model, "SF50FC816");
+  assert.equal(reparsed.snapshot.model, "SF50FC816");
 });
 
 test("schema v2 without a current-SKU snapshot cannot reuse final-page or response prices", async () => {

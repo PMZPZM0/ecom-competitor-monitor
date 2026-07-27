@@ -4,6 +4,7 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import ExcelJS from "exceljs";
+import * as XLSX from "xlsx";
 import { requestModelApiJson, resolveModelConfig } from "./modelConfigService.js";
 import {
   qwenPawBackendUrl,
@@ -38,7 +39,7 @@ const FIELD_ALIASES = Object.freeze({
   productName: ["商品名称", "宝贝名称", "推广商品", "产品名称", "productname", "商品", "宝贝", "product"],
   productStage: ["商品阶段", "产品阶段", "新品老品", "productstage", "stage"],
   campaignName: ["计划名称", "推广计划", "campaignname", "计划", "campaign"],
-  category: ["类目", "商品类目", "一级类目", "category"],
+  category: ["类目名称", "一级类目名称", "二级类目名称", "类目", "商品类目", "一级类目", "category"],
   audienceName: ["人群名称", "定向人群", "audiencename", "人群", "audience"],
   spend: ["消耗", "花费", "推广花费", "广告消耗", "cost", "spend"],
   revenue: ["成交金额", "支付金额", "成交额", "成交金额元", "gmv", "revenue"],
@@ -49,6 +50,8 @@ const FIELD_ALIASES = Object.freeze({
   conversionRate: ["转化率", "成交转化率", "conversionrate", "cvr"],
   audienceSize: ["人群规模", "覆盖人数", "人群数", "覆盖量", "audiencesize"],
 });
+
+const EXACT_MATCH_ALIASES = new Set(["商品", "宝贝", "product", "店铺", "shop", "计划", "campaign", "类目", "category", "人群", "audience"]);
 
 function nowIso(now = new Date()) {
   return now.toISOString();
@@ -82,7 +85,7 @@ function rowValue(row, aliases) {
     const key = headerKey(header);
     if (!key) continue;
     if (value === "" || value === null || value === undefined) continue;
-    if (normalizedAliases.some((alias) => key === alias || key.includes(alias) || alias.includes(key))) return value;
+    if (normalizedAliases.some((alias) => key === alias || (!EXACT_MATCH_ALIASES.has(alias) && (key.includes(alias) || alias.includes(key))))) return value;
   }
   return undefined;
 }
@@ -157,24 +160,76 @@ function parseCsv(textValue) {
   return lines.slice(1).map((line) => Object.fromEntries(parseLine(line).map((value, index) => [headers[index], value])));
 }
 
+function spreadsheetCellValue(value) {
+  if (!value || typeof value !== "object") return value;
+  if ("text" in value) return value.text;
+  if ("result" in value) return value.result;
+  if ("richText" in value && Array.isArray(value.richText)) return value.richText.map((item) => item.text || "").join("");
+  return value;
+}
+
+function uniqueHeaders(values) {
+  const seen = new Map();
+  return values.map((value, column) => {
+    const base = text(value, 80) || `column_${column + 1}`;
+    const count = (seen.get(base) || 0) + 1;
+    seen.set(base, count);
+    return count === 1 ? base : `${base}_${count}`;
+  });
+}
+
+function headerMatchCount(values) {
+  const aliases = Object.values(FIELD_ALIASES).flat().map((alias) => headerKey(alias));
+  return values.reduce((count, value) => {
+    const key = headerKey(value);
+    return key && aliases.some((alias) => key === alias || (!EXACT_MATCH_ALIASES.has(alias) && (key.includes(alias) || alias.includes(key)))) ? count + 1 : count;
+  }, 0);
+}
+
+function parseSpreadsheetRows(grid) {
+  const rows = (Array.isArray(grid) ? grid : []).map((row) => Array.isArray(row) ? row : []);
+  const candidates = rows.slice(0, 60).map((values, index) => {
+    const populated = values.filter((value) => text(value)).length;
+    const matches = headerMatchCount(values);
+    return { index, populated, matches, score: matches * 100 + populated };
+  }).filter((candidate) => candidate.populated > 0);
+  if (!candidates.length) return [];
+
+  // 生意参谋等导出文件常在前面放说明行；选择最像字段名的一行，而不是盲目拿第一行。
+  const ranked = candidates.filter((candidate) => candidate.matches > 0 && candidate.populated >= 2)
+    .sort((left, right) => right.score - left.score || left.index - right.index);
+  const headerIndex = (ranked[0] || candidates[0]).index;
+  const headers = uniqueHeaders(rows[headerIndex]);
+
+  return rows.slice(headerIndex + 1)
+    .filter((values) => values.some((value) => value !== null && value !== undefined && text(value)))
+    .map((values) => Object.fromEntries(headers.map((header, column) => [header, values[column] ?? ""])));
+}
+
 async function parseWorkbook(buffer) {
   const workbook = new ExcelJS.Workbook();
   await workbook.xlsx.load(buffer);
   const sheet = workbook.worksheets[0];
   if (!sheet) return [];
-  const rows = [];
-  let headers = [];
+  const grid = [];
   sheet.eachRow({ includeEmpty: false }, (row, index) => {
-    const values = row.values.slice(1).map((value) => (value && typeof value === "object" && "text" in value ? value.text : value));
-    if (index === 1) {
-      headers = values.map((value, column) => text(value, 80) || `column_${column + 1}`);
-      return;
-    }
-    if (headers.length && values.some((value) => value !== null && value !== undefined && text(value))) {
-      rows.push(Object.fromEntries(headers.map((header, column) => [header, values[column] ?? ""])));
-    }
+    const values = row.values.slice(1).map(spreadsheetCellValue);
+    grid[index - 1] = values;
   });
-  return rows;
+  return parseSpreadsheetRows(grid);
+}
+
+function parseLegacyWorkbook(buffer) {
+  let workbook;
+  try {
+    workbook = XLSX.read(buffer, { type: "buffer", cellDates: true });
+  } catch {
+    throw Object.assign(new Error("无法读取此 XLS 文件，请从 Excel/WPS 重新导出后再上传。"), { status: 400 });
+  }
+  const sheetName = workbook.SheetNames.find((name) => workbook.Sheets[name]);
+  if (!sheetName) return [];
+  const grid = XLSX.utils.sheet_to_json(workbook.Sheets[sheetName], { header: 1, defval: "", raw: false });
+  return parseSpreadsheetRows(grid);
 }
 
 function extensionOf(file = {}) {
@@ -186,6 +241,7 @@ function reportKind(file) {
   const extension = extensionOf(file);
   if (["png", "jpg", "jpeg", "webp"].includes(extension)) return "screenshot";
   if (extension === "xlsx") return "xlsx";
+  if (extension === "xls") return "xls";
   if (extension === "csv") return "csv";
   if (extension === "json") return "json";
   return "";
@@ -199,10 +255,11 @@ export async function parseOperationsFile(file) {
   if (!file?.buffer?.length) throw Object.assign(new Error("请选择有效的数据文件或截图。"), { status: 400 });
   if (file.buffer.length > OPERATIONS_MAX_UPLOAD_BYTES) throw Object.assign(new Error("运营数据文件不能超过 16 MB。"), { status: 413 });
   const kind = reportKind(file);
-  if (!kind) throw Object.assign(new Error("只支持 XLSX、CSV、JSON、PNG、JPG 或 WEBP。"), { status: 400 });
+  if (!kind) throw Object.assign(new Error("只支持 XLS、XLSX、CSV、JSON、PNG、JPG 或 WEBP。"), { status: 400 });
   if (kind === "screenshot") return { kind, columns: [], rows: [] };
   let rows;
   if (kind === "xlsx") rows = await parseWorkbook(file.buffer);
+  else if (kind === "xls") rows = parseLegacyWorkbook(file.buffer);
   else if (kind === "csv") rows = parseCsv(file.buffer.toString("utf8"));
   else {
     const parsed = JSON.parse(file.buffer.toString("utf8"));
@@ -224,7 +281,7 @@ export function normalizeOperationsState(value = {}) {
       reportDate: dateOnly(report.reportDate),
       sourceName: text(report.sourceName, 80),
       fileName: text(report.fileName, 160),
-      kind: ["xlsx", "csv", "json", "screenshot"].includes(report.kind) ? report.kind : "csv",
+      kind: ["xls", "xlsx", "csv", "json", "screenshot"].includes(report.kind) ? report.kind : "csv",
       columns: uniqueStrings(report.columns, 200),
       rows: normalizedRows(report.rows),
       screenshotPath: typeof report.screenshotPath === "string" ? report.screenshotPath : "",
@@ -298,8 +355,22 @@ export function createOperationsReport(input, parsed, { file, screenshotPath = "
   };
 }
 
-function promotionRows(state) {
-  const rows = state.reports.filter((report) => report.type === "promotion").flatMap((report) => report.rows.map((row) => ({ ...row, report })));
+function reportSnapshotDate(report) {
+  const candidate = String(report?.reportDate || "").trim();
+  return /^\d{4}-\d{2}-\d{2}$/.test(candidate) ? candidate : dateOnly(report?.importedAt);
+}
+
+function reportSnapshotStore(report) {
+  const explicit = text(report?.storeName, 80);
+  if (explicit) return explicit;
+  const inferred = uniqueStrings((report?.rows || []).map((row) => row?.storeName), 2);
+  return inferred.length === 1 ? inferred[0] : "未标记店铺";
+}
+
+function promotionRows(state, reportDate = "") {
+  const rows = state.reports
+    .filter((report) => report.type === "promotion" && (!reportDate || reportSnapshotDate(report) === reportDate))
+    .flatMap((report) => report.rows.map((row) => ({ ...row, report })));
   const details = rows.filter((item) => !totalRow(item));
   return details.length ? details : rows;
 }
@@ -389,9 +460,78 @@ function hasFreshData(reports, now) {
   return { latestAt: latest ? new Date(latest).toISOString() : null, fresh: latest > 0 && now.getTime() - latest <= 36 * 60 * 60 * 1_000 };
 }
 
+function relativeChange(current, previous) {
+  if (!Number.isFinite(current) || !Number.isFinite(previous) || previous === 0) return null;
+  return (current - previous) / Math.abs(previous);
+}
+
+function buildOperationsArchive(reports) {
+  const groups = new Map();
+  for (const report of reports) {
+    const date = reportSnapshotDate(report);
+    const storeName = reportSnapshotStore(report);
+    const key = [date, report.type, storeName].join("|");
+    if (!groups.has(key)) groups.set(key, { key, date, type: report.type, storeName, reports: [], rows: [] });
+    const group = groups.get(key);
+    group.reports.push(report);
+    group.rows.push(...report.rows);
+  }
+
+  const snapshots = [...groups.values()].map((group) => ({
+    key: group.key,
+    date: group.date,
+    type: group.type,
+    storeName: group.storeName,
+    reportCount: group.reports.length,
+    rowCount: group.rows.length,
+    sources: uniqueStrings(group.reports.map((report) => report.sourceName || report.fileName), 8),
+    metrics: aggregate(group.rows),
+    comparison: { previousDate: null, spendChange: null, revenueChange: null, roiChange: null, feeRateChange: null },
+  }));
+
+  const tracks = new Map();
+  for (const snapshot of snapshots) {
+    const key = [snapshot.type, snapshot.storeName].join("|");
+    if (!tracks.has(key)) tracks.set(key, []);
+    tracks.get(key).push(snapshot);
+  }
+  for (const items of tracks.values()) {
+    items.sort((left, right) => left.date.localeCompare(right.date));
+    for (let index = 1; index < items.length; index += 1) {
+      const current = items[index];
+      const previous = items[index - 1];
+      current.comparison = {
+        previousDate: previous.date,
+        spendChange: relativeChange(current.metrics.spend, previous.metrics.spend),
+        revenueChange: relativeChange(current.metrics.revenue, previous.metrics.revenue),
+        roiChange: Number.isFinite(current.metrics.roi) && Number.isFinite(previous.metrics.roi) ? current.metrics.roi - previous.metrics.roi : null,
+        feeRateChange: Number.isFinite(current.metrics.feeRate) && Number.isFinite(previous.metrics.feeRate) ? current.metrics.feeRate - previous.metrics.feeRate : null,
+      };
+    }
+  }
+
+  const dayGroups = new Map();
+  for (const snapshot of snapshots) {
+    if (!dayGroups.has(snapshot.date)) dayGroups.set(snapshot.date, { date: snapshot.date, snapshots: [] });
+    dayGroups.get(snapshot.date).snapshots.push(snapshot);
+  }
+  const days = [...dayGroups.values()]
+    .map((day) => ({
+      date: day.date,
+      reportCount: day.snapshots.reduce((sum, snapshot) => sum + snapshot.reportCount, 0),
+      rowCount: day.snapshots.reduce((sum, snapshot) => sum + snapshot.rowCount, 0),
+      types: uniqueStrings(day.snapshots.map((snapshot) => snapshot.type), 8),
+      stores: uniqueStrings(day.snapshots.map((snapshot) => snapshot.storeName).filter((name) => name !== "未标记店铺"), 12),
+      snapshots: day.snapshots.sort((left, right) => left.type.localeCompare(right.type) || left.storeName.localeCompare(right.storeName)),
+    }))
+    .sort((left, right) => right.date.localeCompare(left.date));
+  return { days, totalReports: reports.length, totalRows: reports.reduce((sum, report) => sum + report.rows.length, 0) };
+}
+
 export function buildOperationsWorkspace(value = {}, { now = new Date() } = {}) {
   const state = normalizeOperationsState(value);
-  const rows = promotionRows(state);
+  const currentDate = state.reports.map(reportSnapshotDate).sort().at(-1) || "";
+  const rows = promotionRows(state, currentDate);
   const total = aggregate(rows);
   const productGroups = groupedRows(rows, "productName", (row) => row.campaignName || row.productId).map((item) => {
     const members = rows.filter((row) => (row.productName || row.campaignName || row.productId || "未归类") === item.name);
@@ -399,15 +539,16 @@ export function buildOperationsWorkspace(value = {}, { now = new Date() } = {}) 
     return { ...item, key: representative.productId || item.name, productStage: representative.productStage || "unknown" };
   }).sort((left, right) => right.spend - left.spend);
   const freshness = hasFreshData(state.reports, now);
-  const reportDate = now.toISOString().slice(0, 10);
-  const suggestions = freshness.fresh ? buildSuggestions(productGroups, state, reportDate) : [];
-  const audienceReports = state.reports.filter((report) => ["audience", "competitor"].includes(report.type));
+  const suggestions = freshness.fresh ? buildSuggestions(productGroups, state, currentDate || now.toISOString().slice(0, 10)) : [];
+  const audienceReports = state.reports.filter((report) => ["audience", "competitor"].includes(report.type) && (!currentDate || reportSnapshotDate(report) === currentDate));
   const audienceRows = audienceReports.flatMap((report) => report.rows.map((row) => ({ ...row, report })));
   const audienceGroups = groupedRows(audienceRows, "audienceName", (row) => row.productName || row.campaignName)
     .sort((left, right) => (right.revenue - left.revenue) || (right.audienceSize || 0) - (left.audienceSize || 0)).slice(0, 12);
   const feedbackBySuggestion = Object.fromEntries(state.feedback.map((item) => [item.suggestionId, item]));
   return {
     reports: state.reports.slice().sort((left, right) => Date.parse(right.importedAt) - Date.parse(left.importedAt)),
+    currentDate,
+    archive: buildOperationsArchive(state.reports),
     profile: { principles: state.principles, dailyReport: state.dailyReport, targets: state.targets },
     freshness,
     totals: total,
@@ -434,6 +575,7 @@ export function operationsAgentContextText(workspace) {
     categories: workspace.categories.slice(0, 12),
     audiences: workspace.audiences.slice(0, 12),
     suggestions: workspace.suggestions.slice(0, 15),
+    archive: { currentDate: workspace.currentDate, days: workspace.archive?.days?.slice(0, 30) || [] },
     principles: text(workspace.profile?.principles, 2_000),
   });
 }
@@ -504,6 +646,7 @@ export async function analyzeOperationsWorkspace(modelConfig, workspace, { princ
     categories: workspace.categories.slice(0, 12),
     audiences: workspace.audiences.slice(0, 12),
     deterministicSuggestions: workspace.suggestions.slice(0, 12),
+    archive: { currentDate: workspace.currentDate, days: workspace.archive?.days?.slice(0, 30) || [] },
     operatingPrinciples: text(principles, 4_000),
   };
   const response = await requestModelApiJson(`${resolved.baseUrl}/responses`, {
@@ -516,7 +659,7 @@ export async function analyzeOperationsWorkspace(modelConfig, workspace, { princ
         role: "system",
         content: [{
           type: "input_text",
-          text: "你是严谨的电商运营助手。只能根据提供的数据与截图分析，不得补造数据或声称看到了未给出的后台信息。金额、费率与 ROI 已由本地公式计算，你只解释原因、风险和优先级。尊重运营人员的经营原则。输出 JSON：{summary:string,insights:string[],actions:string[]}。每条行动都应包含对象、建议动作和依据。",
+          text: "你是严谨的电商运营助手。只能根据提供的数据与截图分析，不得补造数据或声称看到了未给出的后台信息。金额、费率与 ROI 已由本地公式计算，你只解释原因、风险和优先级。历史对比只能使用 archive 中同店铺、同报表类型、comparison.previousDate 存在的记录；口径不一致或没有前日记录必须明确说明无法比较。尊重运营人员的经营原则。输出 JSON：{summary:string,insights:string[],actions:string[]}。每条行动都应包含对象、建议动作和依据。",
         }],
       }, {
         role: "user",
@@ -542,6 +685,7 @@ export async function askOperationsAgent(modelConfig, workspace, question, { pri
     categories: workspace.categories.slice(0, 12),
     audiences: workspace.audiences.slice(0, 12),
     deterministicSuggestions: workspace.suggestions.slice(0, 20),
+    archive: { currentDate: workspace.currentDate, days: workspace.archive?.days?.slice(0, 30) || [] },
     operatingPrinciples: text(principles, 4_000),
   };
   const messages = (Array.isArray(history) ? history : []).slice(-12)
@@ -558,7 +702,7 @@ export async function askOperationsAgent(modelConfig, workspace, question, { pri
         role: "system",
         content: [{
           type: "input_text",
-          text: "你是电商运营 Agent。只能基于提供的本地运营数据、截图和对话上下文回答。不要补造数据、不要访问任何平台、不要修改预算或发送消息。金额、ROI 和费率以本地计算结果为准。数据过期时，明确说明不能给出预算调整结论。用简洁中文回答，先给结论，再给可核对依据和下一步。",
+          text: "你是电商运营 Agent。只能基于提供的本地运营数据、截图和对话上下文回答。不要补造数据、不要访问任何平台、不要修改预算或发送消息。金额、ROI 和费率以本地计算结果为准。对比历史数据时，只能比较 archive 中同店铺、同报表类型且带有 comparison.previousDate 的记录；没有可比口径时明确说明。数据过期时，明确说明不能给出预算调整结论。用简洁中文回答，先给结论，再给可核对依据和下一步。",
         }],
       }, ...messages.map((item) => ({ role: item.role, content: [{ type: "input_text", text: item.content }] })), {
         role: "user",
@@ -670,15 +814,28 @@ async function qwenPawApi(runtime, pathname, options = {}) {
   return body ? JSON.parse(body) : null;
 }
 
-async function writeQwenPawWorkspace(installDirectory, operatingPrinciples) {
-  const workspace = qwenPawOperationsWorkspace(installDirectory);
-  await fs.mkdir(workspace, { recursive: true });
-  await fs.rm(path.join(workspace, "BOOTSTRAP.md"), { force: true });
+export function qwenPawWorkspaceAgentInstructions(operatingPrinciples = "") {
   const principles = text(operatingPrinciples, 4_000);
   const principlesBlock = principles
     ? `## 当前运营思路（必须遵循）\n\n${principles}\n\n每一项运营建议都必须按上述思路作为判断约束。若它与当前本地数据冲突，要明确指出冲突、说明依据并给出替代方案。\n\n`
     : "## 当前运营思路\n\n暂未设置额外运营思路；仍须严格依据本地数据回答。\n\n";
-  await fs.writeFile(path.join(workspace, "AGENTS.md"), `# 电商运营助手\n\n${principlesBlock}你是电商竞品监控应用的本机运营 Agent。通过 ecommerce_monitor MCP 工具查询和执行应用任务。\n普通业务动作可直接执行并说明结果，包括查价、启停监控、设置监控价、重试本地解析、导入报表、经营分析和创建生图任务。\n删除商品、清空记录、删除账号、修改模型密钥和账号登录资料必须要求用户明确确认。\n价格任务必须调用 capture_product_price 或 get_product_prices，严禁访问淘宝、天猫、浏览器、Cookie、外部网页或任意本地文件。\n查价完成后必须注明账号范围、SKU 覆盖、证据时间和不可用原因；未验证价格不得猜测、不得用历史价替代当前价。\n所有金额、费率和 ROI 以工具返回的本地计算结果为准；数据过期或缺失时必须明确说明。\n回答使用简洁中文：先给结论，再列依据、执行回执、风险和下一步。\n`, "utf8");
+  return `# 电商运营助手\n\n${principlesBlock}你是电商竞品监控应用的本机运营 Agent。通过 ecommerce_monitor MCP 工具查询和执行应用任务。
+普通业务动作可直接执行并说明结果，包括查价、启停监控、设置监控价、重试本地解析、导入报表、经营分析和创建生图任务。
+删除商品、清空记录、删除账号、修改模型密钥和账号登录资料必须要求用户明确确认。
+价格任务必须调用 capture_product_price 或 get_product_prices，严禁访问淘宝、天猫、浏览器、Cookie、外部网页或任意本地文件。
+查价工具返回 current_verified_sku_price_matrix 时，它是当前本地快照的完整 SKU 价格矩阵。必须逐条处理全部 skuRows，不能只报最低价、部分 SKU、第一条 SKU 或历史快照。
+每个 SKU 的每个账号视角都必须完整列出 verifiedChannels 中的所有渠道和金额；只有 verifiedChannels 可以报为价格。若一个 SKU 没有已验证渠道，也要单独列出并说明 unavailableChannels 的原因。
+查价完成后必须注明账号范围、SKU 覆盖（已列出数/工具返回 skuCount）、证据时间和不可用原因；未验证价格不得猜测、不得用历史价替代当前价。
+所有金额、费率和 ROI 以工具返回的本地计算结果为准；历史数据只能按相同店铺、相同报表类型和相同统计口径比较，口径不一致或没有前序数据时必须明确说明；数据过期或缺失时必须明确说明。
+回答使用简洁中文：先给结论，再列依据、执行回执、风险和下一步。
+`;
+}
+
+async function writeQwenPawWorkspace(installDirectory, operatingPrinciples) {
+  const workspace = qwenPawOperationsWorkspace(installDirectory);
+  await fs.mkdir(workspace, { recursive: true });
+  await fs.rm(path.join(workspace, "BOOTSTRAP.md"), { force: true });
+  await fs.writeFile(path.join(workspace, "AGENTS.md"), qwenPawWorkspaceAgentInstructions(operatingPrinciples), "utf8");
   await fs.writeFile(path.join(workspace, "SOUL.md"), "你是严谨的电商运营助手。把已导入的经营数据转成可核对、可执行的建议，不能补造数据或把推测说成事实。\n", "utf8");
 
   const skillsDirectory = path.join(workspace, "skills");

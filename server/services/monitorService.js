@@ -3,7 +3,7 @@ import { checkTaobaoSession } from "./browserService.js";
 import { itemIdFromProductUrl } from "../utils/productUrl.js";
 import { parseSearchMainImageEvidence, parseTmallBuyerShowEvidence, parseTmallMaterialsEvidence, scrapeTaobaoSearchMainImage, scrapeTmallBuyerShows, scrapeTmallMaterials, scrapeTmallProduct } from "./tmallScraper.js";
 import { createNotificationLog, sendFeishuNotification } from "./feishuService.js";
-import { readBrowserCaptureSource, reparseBrowserCaptureSource, saveCapturedSnapshotLocalEvidence } from "./localImportService.js";
+import { readBrowserCaptureMetadata, readBrowserCaptureSource, reparseBrowserCaptureSource, saveCapturedSnapshotLocalEvidence } from "./localImportService.js";
 import {
   CAPTURE_JOB_RETENTION_MS,
   clearFinishedCaptureJobs as clearPersistedCaptureJobs,
@@ -316,6 +316,60 @@ export function mergeCapturedProduct(current, captured) {
     lastSnapshot: captured.lastSnapshot,
     updatedAt: captured.updatedAt,
   };
+}
+
+// Older captures already have a sanitized browser-evidence file. Repair only
+// the missing metadata from that local file, without reopening a browser or
+// recalculating prices. A failed recognition deliberately leaves the model
+// blank instead of guessing from another product or a historical snapshot.
+export async function backfillMissingProductModelsFromLocalEvidence() {
+  const initial = await readDb();
+  const candidates = initial.products.filter((product) => (
+    !String(product.model || product.lastSnapshot?.model || "").trim()
+    && /^capture_[a-f0-9]{32}$/i.test(String(product.lastSnapshot?.browserEvidenceId || ""))
+  ));
+  if (!candidates.length) return { checked: 0, repaired: 0 };
+
+  const resolved = await Promise.all(candidates.map(async (product) => {
+    const evidenceId = String(product.lastSnapshot?.browserEvidenceId || "");
+    try {
+      const metadata = await readBrowserCaptureMetadata(evidenceId);
+      return metadata.model ? { productId: product.id, evidenceId, model: metadata.model } : null;
+    } catch {
+      // Evidence cleanup or a malformed legacy file must never prevent the
+      // workspace from loading. The next capture will provide fresh evidence.
+      return null;
+    }
+  }));
+  const byProductId = new Map(resolved.filter(Boolean).map((item) => [item.productId, item]));
+  if (!byProductId.size) return { checked: candidates.length, repaired: 0 };
+
+  let repaired = 0;
+  await updateDb((current) => {
+    current.products = current.products.map((product) => {
+      const recovered = byProductId.get(product.id);
+      if (!recovered
+        || String(product.model || product.lastSnapshot?.model || "").trim()
+        || String(product.lastSnapshot?.browserEvidenceId || "") !== recovered.evidenceId) return product;
+      repaired += 1;
+      return {
+        ...product,
+        model: recovered.model,
+        lastSnapshot: { ...product.lastSnapshot, model: recovered.model },
+        updatedAt: new Date().toISOString(),
+      };
+    });
+    current.snapshots = current.snapshots.map((snapshot) => {
+      const recovered = byProductId.get(snapshot.productId);
+      return recovered
+        && !String(snapshot.model || "").trim()
+        && String(snapshot.browserEvidenceId || "") === recovered.evidenceId
+        ? { ...snapshot, model: recovered.model }
+        : snapshot;
+    });
+    return current;
+  });
+  return { checked: candidates.length, repaired };
 }
 
 function mergeCapturedSnapshotState(currentProduct, result) {
@@ -1559,7 +1613,10 @@ export async function captureProduct(product, authSessions = [], { scraper = scr
         mainImage: snapshot.mainImage || product.mainImage,
         accountType: primaryAccountType,
         primaryAccountSessionId: primaryEntry.session.id,
-        lastStatus: primaryCoverage.complete ? "ok" : "error",
+        // A partial snapshot still contains current, verified prices. Keep it
+        // out of the failure and authorization paths; resolutionStatus carries
+        // the remaining SKU coverage information.
+        lastStatus: "ok",
         lastError: partialMessage,
         lastSnapshot: snapshot,
         updatedAt: new Date().toISOString(),
@@ -1593,7 +1650,7 @@ async function runMonitorUnlocked({ source = "manual", productIds = null, includ
     session.source === "taobao-browser"
     && (session.enabled ?? session.active ?? true)
     && session.loginStatus !== "expired"
-    && (!requireVerifiedAccount || (session.loginStatus === "valid" && session.tmallPriceStatus === "valid"))
+    && (!requireVerifiedAccount || (session.loginStatus === "valid" && ["valid", "partial"].includes(session.tmallPriceStatus)))
   ));
   const candidates = orderedCaptureCandidates(data.products, productIds, includeDisabled);
   const activeProductIds = new Set();

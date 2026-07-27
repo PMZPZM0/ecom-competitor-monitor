@@ -27,7 +27,7 @@ export function browserRuntimeInfo() {
 export function shouldRefreshTmallSso(authSession = {}, { lastRefreshAt = 0, now = Date.now() } = {}) {
   if (authSession.tmallPriceStatus === "degraded") return true;
   const checkedAt = Date.parse(authSession.tmallPriceCheckedAt || "");
-  const priceCapabilityFresh = authSession.tmallPriceStatus === "valid"
+  const priceCapabilityFresh = ["valid", "partial"].includes(authSession.tmallPriceStatus)
     && Number.isFinite(checkedAt)
     && now >= checkedAt
     && now - checkedAt < TMALL_PRICE_CAPABILITY_FRESH_MS;
@@ -1234,18 +1234,23 @@ export async function captureRequestedSkuSelections({
   assertNoAccessRestriction = async () => {},
   wait = (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds)),
   now = () => Date.now(),
-  responseTimeoutMs = 6500,
+  responseTimeoutMs = 8000,
+  responseRetryTimeoutMs = 3500,
   responseSettleMs = 900,
+  selectionRuntimeTimeoutMs = 10500,
+  totalTimeoutMs = 90000,
   warmupSelection = true,
 }) {
-  const selectValues = (valueIds) => cdp.send("Runtime.evaluate", {
+  const captureDeadline = now() + Math.max(1, totalTimeoutMs);
+  const remainingCaptureBudget = () => Math.max(0, captureDeadline - now());
+  const selectValues = (valueIds, timeoutMs) => cdp.send("Runtime.evaluate", {
     expression: `(async () => {
       const valueIds = ${JSON.stringify(valueIds)};
       const pause = (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds));
       const findValue = (valueId) => document.querySelector('#skuOptionsArea [data-vid="' + valueId + '"]')
         || Array.from(document.querySelectorAll('[data-vid]')).find((element) => element.getAttribute('data-vid') === valueId);
       const hydrationDeadline = Date.now() + 1500;
-      const interactionDeadline = Date.now() + 6000;
+      const interactionDeadline = Date.now() + 8000;
       let targets = [];
       while (Date.now() < hydrationDeadline) {
         targets = valueIds.map(findValue);
@@ -1286,9 +1291,10 @@ export async function captureRequestedSkuSelections({
     })()`,
     returnByValue: true,
     awaitPromise: true,
-  }, 8000);
+  }, timeoutMs);
   const waitForResponseSettle = async (responseSequenceStartExclusive) => {
-    const deadline = now() + responseTimeoutMs;
+    const initialDeadline = Math.min(captureDeadline, now() + Math.max(0, responseTimeoutMs));
+    const deadline = Math.min(captureDeadline, initialDeadline + Math.max(0, responseRetryTimeoutMs));
     let observedSequence = Number(getResponseSequence());
     while (now() < deadline && observedSequence <= responseSequenceStartExclusive) {
       await wait(100);
@@ -1327,10 +1333,18 @@ export async function captureRequestedSkuSelections({
         reason: "missing-selection-ids",
       };
     }
+    const remainingBeforeSelection = remainingCaptureBudget();
+    if (remainingBeforeSelection < 1000) {
+      return {
+        ...baseResult,
+        responseSequenceEndInclusive: Number(getResponseSequence()),
+        reason: "capture-budget-exhausted",
+      };
+    }
 
     let selectionResult;
     try {
-      selectionResult = await selectValues(valueIds);
+      selectionResult = await selectValues(valueIds, Math.max(1, Math.min(selectionRuntimeTimeoutMs, remainingBeforeSelection)));
     } catch (error) {
       return {
         ...baseResult,
@@ -1394,7 +1408,9 @@ export async function captureRequestedSkuSelections({
     && Array.from(new Set((selection?.valueIds || []).map(String).filter(Boolean))).length
   ));
   let warmedSelection;
-  if (warmupSelection && selectable.length > 1) {
+  // A warmup can help small variant sets, but it is redundant on a large SKU
+  // matrix and consumes time that should go to real selections.
+  if (warmupSelection && selectable.length > 1 && selectable.length <= 4) {
     const selection = selectable.at(-1);
     try {
       const result = await captureSelection(selection);
@@ -1518,6 +1534,39 @@ export async function readBrowserDocument(cdp, {
   return result.result?.value || { html: "", text: "", url: "", readyState: "" };
 }
 
+export function hasBrowserSkuSelectionIndex(document = {}) {
+  const html = String(document?.html || document || "");
+  // Do not start SKU capture from the SSR shell. On first Tmall navigation the
+  // page can be "complete" before the SKU matrix is hydrated, which used to
+  // create an empty selection list and a false price-gate error.
+  return /skuBase/i.test(html)
+    && /(?:sku2info|skuOptionsArea|data-vid)/i.test(html);
+}
+
+export async function waitForBrowserSkuSelectionIndex(cdp, {
+  timeoutMs = 12_000,
+  pollIntervalMs = 300,
+  readDocument = readBrowserDocument,
+  wait = (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds)),
+  now = () => Date.now(),
+} = {}) {
+  const deadline = now() + Math.max(0, timeoutMs);
+  let latest = { html: "", text: "", url: "", readyState: "" };
+  do {
+    latest = await readDocument(cdp, {
+      attempts: 2,
+      timeoutMs: 10_000,
+      retryDelayMs: 300,
+      stage: "等待商品 SKU 索引就绪",
+    });
+    if (hasBrowserSkuSelectionIndex(latest)) return latest;
+    const remaining = deadline - now();
+    if (remaining <= 0) break;
+    await wait(Math.min(Math.max(50, pollIntervalMs), remaining));
+  } while (now() < deadline);
+  return latest;
+}
+
 export async function getRenderedHtml(url, authSession = {}, renderOptions = {}) {
   assertAccountBrowserConfigured(authSession);
   const context = browserContext({ profileKey: authSession.browserProfileKey, port: authSession.browserPort, browserEngine: authSession.browserEngine, headless: false, background: true });
@@ -1578,6 +1627,10 @@ export async function getRenderedHtml(url, authSession = {}, renderOptions = {})
       const limit = buyerShowUrl ? 80 : priceResponseLimit();
       const isPcdetailResponse = /mtop\.taobao\.pcdetail\.data\.adjust/i.test(responseUrl);
       const responseSequence = isPcdetailResponse ? ++pcdetailResponseSequence : null;
+      // The full request URL can contain cookies and signatures, so it is
+      // stripped before local persistence. Retain only the non-secret product
+      // and SKU identity needed to bind a later local parse to this response.
+      const requestIdentity = isPcdetailResponse ? identityFromNetworkUrl(responseUrl) : { itemId: "", skuId: "" };
       if (target.size < limit) {
         target.set(requestId, {
           url: responseUrl,
@@ -1585,6 +1638,8 @@ export async function getRenderedHtml(url, authSession = {}, renderOptions = {})
           responseKind: buyerShowUrl ? "buyer-show" : "price",
           captureRunId,
           ...(responseSequence ? { responseSequence } : {}),
+          ...(/^\d{6,20}$/.test(requestIdentity.itemId) ? { requestItemId: requestIdentity.itemId } : {}),
+          ...(/^\d{5,30}$/.test(requestIdentity.skuId) ? { requestSkuId: requestIdentity.skuId } : {}),
         });
       }
     });
@@ -1647,7 +1702,9 @@ export async function getRenderedHtml(url, authSession = {}, renderOptions = {})
     await assertNoAccessRestriction();
     if (!requestedSelections.length && typeof renderOptions.prepareSelectionsFromLocalEvidence === "function") {
       const [documentState, authState] = await Promise.all([
-        readBrowserDocument(cdp, { attempts: 3, timeoutMs: 70000, stage: "读取 SKU 索引证据" }),
+        waitForBrowserSkuSelectionIndex(cdp, {
+          timeoutMs: Number(renderOptions.skuIndexReadyTimeoutMs || 12_000),
+        }),
         getTaobaoAuthState(context),
       ]);
       const prepared = await renderOptions.prepareSelectionsFromLocalEvidence({

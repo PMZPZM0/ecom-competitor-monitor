@@ -709,6 +709,22 @@ function extractModel(html, jsonData, domData) {
   return candidates.map(cleanText).find((candidate) => candidate && candidate.length <= 80 && !/型号|产品型号|货号/.test(candidate)) || "";
 }
 
+// Product metadata is intentionally derived from the sanitized, reloaded
+// browser document. Price and metadata consumers must not diverge after the
+// local-evidence boundary, otherwise a successful price refresh can erase a
+// previously discoverable model number.
+export function extractProductMetadataFromLocalEvidence(html, pageUrl = "") {
+  const source = String(html || "");
+  const jsonData = extractFromJson(parseJsonBlobs(source));
+  const domData = extractFromDom(source);
+  return {
+    title: cleanTitle(jsonData.title || domData.title || ""),
+    shopName: extractShopName(source, jsonData, domData, pageUrl),
+    shopLogo: extractShopLogo(source, jsonData, domData),
+    model: extractModel(source, jsonData, domData),
+  };
+}
+
 function extractVideoUrls(html, jsonData, productImages) {
   const matches = [
     ...(jsonData.videoUrls || []),
@@ -1762,6 +1778,8 @@ export function resolveCaptureAccessMode(authSession, page = {}) {
 function compactBrowserPayload(payload) {
   const captureRunId = String(payload?.captureRunId || "");
   const responseSequence = Number(payload?.responseSequence);
+  const requestItemId = String(payload?.requestItemId || "");
+  const requestSkuId = String(payload?.requestSkuId || "");
   return {
     url: String(payload?.url || ""),
     mimeType: String(payload?.mimeType || ""),
@@ -1769,6 +1787,8 @@ function compactBrowserPayload(payload) {
     body: String(payload?.body || ""),
     ...(/^[a-z0-9_-]{1,80}$/i.test(captureRunId) ? { captureRunId } : {}),
     ...(Number.isSafeInteger(responseSequence) && responseSequence > 0 ? { responseSequence } : {}),
+    ...(/^\d{6,20}$/.test(requestItemId) ? { requestItemId } : {}),
+    ...(/^\d{5,30}$/.test(requestSkuId) ? { requestSkuId } : {}),
   };
 }
 
@@ -1920,15 +1940,16 @@ export function hydrateBrowserCapturePage(record) {
   const stored = record?.page || {};
   const expectedItemId = String(record?.itemId || "");
   const networkPayloads = Array.isArray(stored.networkPayloads) ? stored.networkPayloads.map(compactBrowserPayload).map((payload) => {
-    const requestItemId = itemIdFromNetworkUrl(payload.url);
+    const requestItemId = String(payload.requestItemId || itemIdFromNetworkUrl(payload.url) || "");
     const responseItemId = itemIdFromNetworkBody(payload.body);
-    const requestSkuId = skuIdFromNetworkUrl(payload.url);
+    const requestSkuId = String(payload.requestSkuId || skuIdFromNetworkUrl(payload.url) || "");
     const responseSkuId = skuIdFromNetworkBody(payload.body);
     const itemMatches = Boolean(expectedItemId && (requestItemId || responseItemId))
       && (!requestItemId || requestItemId === expectedItemId)
       && (!responseItemId || responseItemId === expectedItemId);
-    const skuMatches = Boolean(responseSkuId) && (!requestSkuId || requestSkuId === responseSkuId);
-    const skuId = itemMatches && skuMatches ? responseSkuId : "";
+    const skuMatches = Boolean(responseSkuId || requestSkuId)
+      && (!responseSkuId || !requestSkuId || requestSkuId === responseSkuId);
+    const skuId = itemMatches && skuMatches ? (responseSkuId || requestSkuId) : "";
     return { ...payload, requestItemId, responseItemId, requestSkuId, responseSkuId, skuId };
   }) : [];
   const allSkuNetworkPayloads = Object.fromEntries(Array.from(new Set(networkPayloads.map((payload) => payload.skuId).filter(Boolean))).map((skuId) => [

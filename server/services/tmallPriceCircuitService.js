@@ -5,6 +5,7 @@
 export const TMALL_PRICE_STATUS = Object.freeze({
   UNKNOWN: "unknown",
   VALID: "valid",
+  PARTIAL: "partial",
   COOLDOWN: "cooldown",
   DEGRADED: "degraded",
 });
@@ -162,13 +163,15 @@ export function markTmallPricePartial(session, {
     session.tmallPriceFailureReason = ACCESS_RESTRICTION_REASON;
     return session;
   }
-  session.tmallPriceStatus = TMALL_PRICE_STATUS.DEGRADED;
+  // Some current-SKU evidence is enough to prove the account is usable. The
+  // missing SKU evidence belongs to product coverage, not account health.
+  session.tmallPriceStatus = TMALL_PRICE_STATUS.PARTIAL;
   session.tmallPriceCheckedAt = new Date(now).toISOString();
   session.tmallPriceCooldownUntil = null;
   session.tmallPriceDeviceCooldownUntil = null;
-  session.tmallPriceLastFailureAt = new Date(now).toISOString();
+  session.tmallPriceLastFailureAt = null;
   session.tmallPriceFailureReason = `PARTIAL_SKU_PRICE_EVIDENCE:${verifiedSkuCount}/${totalSkuCount}`;
-  session.tmallPriceFailureCount = Number(session.tmallPriceFailureCount || 0) + 1;
+  session.tmallPriceFailureCount = 0;
   return session;
 }
 

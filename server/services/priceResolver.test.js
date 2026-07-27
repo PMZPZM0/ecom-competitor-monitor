@@ -94,6 +94,44 @@ test("single-stage UMP verifies only the current normal price after exact baseli
   assert.match(sku.priceCalculation.normal, /当前 SKU 可售价 705\.88/);
 });
 
+test("a selected SKU keeps its direct normal price when the response only gates extra offers", () => {
+  const itemId = "548635113360";
+  const skuId = "6174770470516";
+  const payload = {
+    // Browser evidence intentionally strips request queries after extracting
+    // identity metadata. This is the shape used by saved local evidence.
+    url: "https://h5api.m.tmall.com/h5/mtop.taobao.pcdetail.data.adjust/1.0/",
+    requestItemId: itemId,
+    requestSkuId: skuId,
+    body: JSON.stringify({ data: {
+      skuCore: { sku2info: { [skuId]: { price: {
+        priceText: "639",
+        priceMoney: "63900",
+        priceTitle: "优惠前",
+      } } } },
+      componentsVO: { priceVO: { price: {
+        priceText: "639",
+        priceActionText: "登录查看更多优惠",
+        priceActionType: "buy_in_mobile",
+      } } },
+    } }),
+  };
+
+  const resolution = resolveSkuPriceEvidence([payload], {
+    itemId,
+    skuId,
+    accountType: "normal",
+    selectedSkuVerified: true,
+  });
+  const sku = applyPriceResolution({ skuId, priceLayers: [] }, resolution);
+
+  assert.equal(resolution.status, "verified");
+  assert.equal(resolution.source, "pcdetail-selected-sku-direct");
+  assert.equal(sku.normalPrice, 639);
+  assert.equal(sku.giftPrice, null);
+  assert.match(sku.priceCalculation.normal, /当前 SKU 可售价 639\.00/);
+});
+
 test("single-stage UMP rejects unselected SKUs and non-baseline promotions", () => {
   const itemId = "1067004183223";
   const skuId = "6282156907900";

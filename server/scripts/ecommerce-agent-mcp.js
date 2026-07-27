@@ -16,6 +16,17 @@ const DEFAULT_IMAGE_REQUEST = Object.freeze({
   count: 1,
 });
 
+const PRICE_CHANNELS = Object.freeze([
+  { key: "normal", label: "普通价" },
+  { key: "gift", label: "礼金价" },
+  { key: "government", label: "国补价" },
+  { key: "coin", label: "淘金币价" },
+  { key: "seckill", label: "淘宝秒杀价" },
+  { key: "billion", label: "百亿补贴价" },
+  { key: "surprise", label: "惊喜立减价" },
+  { key: "vip88", label: "88VIP价" },
+]);
+
 function normalizeLocalBaseUrl(value) {
   const parsed = new URL(String(value || ""));
   if (!["127.0.0.1", "localhost", "::1"].includes(parsed.hostname.toLowerCase())) {
@@ -45,7 +56,7 @@ const tools = [
   },
   {
     name: "get_product_prices",
-    description: "读取某个已监控商品的本地已验证价格快照、SKU 覆盖情况与价格证据状态。不会发起新的网页采集。",
+    description: "读取某个已监控商品的当前本地已验证价格矩阵。结果逐 SKU、逐账号视角完整列出所有已验证渠道；不会发起新的网页采集，也不会用历史价格替代当前结果。",
     inputSchema: jsonSchema({ product_id: { type: "string" }, item_id: { type: "string" } }),
   },
   {
@@ -212,8 +223,97 @@ function compactProduct(product = {}) {
     lastStatus: product.lastStatus,
     lastError: product.lastError,
     updatedAt: product.updatedAt,
-    skuCount: Array.isArray(product.lastSnapshot?.skus) ? product.lastSnapshot.skus.length : undefined,
+    skuCount: Array.isArray(product.lastSnapshot?.skuPrices) ? product.lastSnapshot.skuPrices.length : undefined,
   });
+}
+
+function textValue(value, limit = 500) {
+  return typeof value === "string" ? value.slice(0, limit) : "";
+}
+
+function verifiedPriceChannels(priceResolution = {}) {
+  const channels = priceResolution?.channels && typeof priceResolution.channels === "object"
+    ? priceResolution.channels
+    : {};
+  return PRICE_CHANNELS.flatMap(({ key, label }) => {
+    const resolution = channels[key];
+    const valueCents = resolution?.valueCents;
+    if (resolution?.status !== "verified" || typeof valueCents !== "number" || !Number.isInteger(valueCents) || valueCents < 0) return [];
+    return [{
+      key,
+      label: textValue(resolution.label, 80) || label,
+      value: valueCents / 100,
+      valueCents,
+      evidenceCount: Array.isArray(resolution.evidenceIds) ? resolution.evidenceIds.length : 0,
+    }];
+  });
+}
+
+function unavailablePriceChannels(priceResolution = {}) {
+  const channels = priceResolution?.channels && typeof priceResolution.channels === "object"
+    ? priceResolution.channels
+    : {};
+  return PRICE_CHANNELS.flatMap(({ key, label }) => {
+    const resolution = channels[key];
+    if (resolution?.status === "verified" && typeof resolution?.valueCents === "number" && Number.isInteger(resolution.valueCents)) return [];
+    return [{
+      key,
+      label,
+      status: textValue(resolution?.status, 40) || "unavailable",
+      reason: textValue(resolution?.reason, 240) || "no-verified-evidence",
+    }];
+  });
+}
+
+function priceViewForSku(sku = {}, snapshot = {}, product = {}, accountPrice = null) {
+  const view = accountPrice && typeof accountPrice === "object" ? accountPrice : sku;
+  const priceResolution = view.priceResolution || {};
+  return {
+    account: {
+      sessionId: textValue(view.sessionId || snapshot.primaryAccountSessionId || product.primaryAccountSessionId, 160),
+      name: textValue(view.accountName, 160) || "当前账号",
+      type: textValue(view.accountType || snapshot.primaryAccountType || product.accountType, 40) || "normal",
+      capturedAt: textValue(view.capturedAt || snapshot.capturedAt, 80),
+    },
+    verifiedChannels: verifiedPriceChannels(priceResolution),
+    unavailableChannels: unavailablePriceChannels(priceResolution),
+  };
+}
+
+function currentVerifiedPriceReport(product = {}) {
+  const snapshot = product.lastSnapshot && typeof product.lastSnapshot === "object" ? product.lastSnapshot : null;
+  const skus = Array.isArray(snapshot?.skuPrices) ? snapshot.skuPrices : [];
+  const accountScope = Array.isArray(snapshot?.accountCaptures) ? snapshot.accountCaptures.map((capture) => ({
+    sessionId: textValue(capture?.sessionId, 160),
+    name: textValue(capture?.accountName, 160) || "当前账号",
+    type: textValue(capture?.accountType, 40) || "normal",
+    capturedAt: textValue(capture?.capturedAt || snapshot?.capturedAt, 80),
+  })) : [];
+  const rows = skus.map((sku) => {
+    const accountPrices = Array.isArray(sku?.accountPrices) ? sku.accountPrices.filter((view) => view && typeof view === "object") : [];
+    return {
+      skuId: textValue(sku?.skuId, 160),
+      skuName: textValue(sku?.name, 600) || "未命名 SKU",
+      accountViews: (accountPrices.length ? accountPrices : [null]).map((accountPrice) => priceViewForSku(sku, snapshot, product, accountPrice)),
+    };
+  });
+  return {
+    kind: "current_verified_sku_price_matrix",
+    product: compactProduct(product),
+    snapshot: snapshot ? {
+      capturedAt: textValue(snapshot.capturedAt, 80),
+      source: "current-local-snapshot",
+      localEvidence: {
+        saved: Boolean(snapshot.localFirst?.sourceSaved),
+        sanitized: Boolean(snapshot.localFirst?.sourceSanitized),
+        readFromDisk: Boolean(snapshot.localFirst?.parsedFromDisk),
+      },
+    } : null,
+    accountScope,
+    skuCount: rows.length,
+    skuRows: rows,
+    reportingRule: "必须逐 SKU 列出 verifiedChannels；unavailableChannels 仅表示当前没有通过证据校验，不能猜价或使用历史价格替代。",
+  };
 }
 
 function candidateItemId(value) {
@@ -328,8 +428,7 @@ async function executeTool(name, input = {}) {
     }
     case "get_product_prices": {
       const product = await resolveProduct(input.product_id || input.item_id);
-      const snapshots = await localApi(`/api/products/${encodeURIComponent(product.id)}/snapshots?limit=24`);
-      return safeValue({ product: compactProduct(product), snapshots: (snapshots || []).slice(0, 12) });
+      return currentVerifiedPriceReport(product);
     }
     case "capture_product_price": {
       const product = await ensureProduct(input.product_url_or_id, input);
@@ -338,8 +437,14 @@ async function executeTool(name, input = {}) {
         method: "POST",
         ...(allAccounts ? {} : { body: { captureKind: "price" } }),
       });
-      const snapshots = await localApi(`/api/products/${encodeURIComponent(product.id)}/snapshots?limit=8`);
-      return safeValue({ action: "price_capture", accountMode: allAccounts ? "all" : "primary", product: compactProduct(capture.product || product), run: capture.run, snapshots: (snapshots || []).slice(0, 4) });
+      const latestProduct = await resolveProduct(capture.product?.id || product.id).catch(() => capture.product || product);
+      return {
+        action: "price_capture",
+        accountMode: allAccounts ? "all" : "primary",
+        product: compactProduct(latestProduct),
+        run: safeValue(capture.run),
+        priceReport: currentVerifiedPriceReport(latestProduct),
+      };
     }
     case "set_product_monitoring": {
       const product = await localApi(`/api/products/${encodeURIComponent(input.product_id)}`, { method: "PATCH", body: { enabled: input.enabled, ...(input.group ? { group: input.group } : {}) } });
