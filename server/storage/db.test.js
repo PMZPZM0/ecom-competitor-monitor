@@ -6,6 +6,7 @@ import test from "node:test";
 import { DB_SCHEMA_VERSION, migrateDbDocument } from "./db.js";
 import { decryptSecret } from "../services/secretService.js";
 import { MODEL_CHANNELS } from "../services/modelConfigService.js";
+import { defaultQwenPawInstallDirectory } from "../services/qwenPawRuntimeService.js";
 
 let temporaryDbImportId = 0;
 
@@ -75,7 +76,7 @@ test("database migration preserves user data and marks legacy snapshots", () => 
     feedback: [],
     chat: [],
     principles: "",
-    qwenPawInstallDirectory: "D:\\电商监控数据\\QwenPaw",
+    qwenPawInstallDirectory: defaultQwenPawInstallDirectory(),
     qwenPawAlerts: { belowThresholdTargets: [], loginExpiredTargets: [] },
     dailyReport: { enabled: false, time: "09:30", lastRunAt: null, lastSentAt: null, lastError: "" },
     analyses: [],

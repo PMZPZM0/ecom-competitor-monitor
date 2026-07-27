@@ -43,13 +43,15 @@ test("QwenPaw defaults to the agreed Windows D drive directory", () => {
 
 test("an older QwenPaw installation without metadata is offered an in-place verified update", async () => {
   const directory = await fs.mkdtemp(path.join(os.tmpdir(), "qwenpaw-legacy-runtime-test-"));
+  const platform = "win32";
+  const arch = "x64";
   const originalFetch = globalThis.fetch;
   try {
-    const paths = qwenPawRuntimePaths(directory);
+    const paths = qwenPawRuntimePaths(directory, { platform });
     await fs.mkdir(path.dirname(paths.backend), { recursive: true });
     await fs.writeFile(paths.backend, "runtime marker");
     globalThis.fetch = async () => new Response(JSON.stringify(manifestFile()), { status: 200 });
-    const status = await qwenPawRuntimeStatus(directory, { checkLatest: true });
+    const status = await qwenPawRuntimeStatus(directory, { checkLatest: true, platform, arch });
     assert.equal(status.installed, true);
     assert.equal(status.version, "");
     assert.equal(status.latestVersion, "2.0.1");

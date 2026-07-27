@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import {
@@ -141,11 +142,12 @@ test("QwenPaw operations sync receives the Settings text model without putting i
     model: "operations-text-model",
     apiKey: "operations-key",
   });
-  const plan = qwenPawSyncPlan("C:/temp/ecom-qwenpaw", config, "新品先验证转化，再逐步放量。");
+  const directory = path.join(os.tmpdir(), "ecom-qwenpaw");
+  const plan = qwenPawSyncPlan(directory, config, "新品先验证转化，再逐步放量。");
 
   assert.deepEqual(plan.args, []);
   assert.equal(plan.environment.ECOM_QWENPAW_API_KEY, undefined);
-  assert.equal(plan.environment.QWENPAW_WORKING_DIR, path.join("C:/temp/ecom-qwenpaw", "data"));
+  assert.equal(plan.environment.QWENPAW_WORKING_DIR, path.join(directory, "data"));
   assert.equal(plan.environment.ECOM_QWENPAW_CONTEXT_URL, "http://127.0.0.1:4317/api/operations/agent-context");
   assert.equal(plan.environment.ECOM_QWENPAW_OPERATING_PRINCIPLES, "新品先验证转化，再逐步放量。");
   assert.equal(plan.environment.ECOM_QWENPAW_APP_URL, "http://127.0.0.1:4317");
