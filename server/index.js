@@ -217,7 +217,7 @@ const operationsUpload = multer({
   limits: { fileSize: OPERATIONS_MAX_UPLOAD_BYTES, files: 1, fields: 8, parts: 10 },
   fileFilter: (_req, file, callback) => {
     if (isSupportedOperationsFile(file)) return callback(null, true);
-    return callback(Object.assign(new Error("运营助手只支持 XLS、XLSX、CSV、JSON、PNG、JPG 或 WEBP。"), {
+    return callback(Object.assign(new Error("运营助手支持 Excel、WPS、CSV、TSV、TXT、JSON、PNG、JPG 或 WEBP。"), {
       status: 400,
       code: "OPERATIONS_UPLOAD_TYPE_INVALID",
     }));
