@@ -1,12 +1,17 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { acceleratedDownloadUrl, compareVersions, selectReleaseAsset } from "./updateService.js";
+import { acceleratedDownloadUrl, compareVersions, latestKnownVersion, selectReleaseAsset } from "./updateService.js";
 
 test("version comparison handles tags and different segment lengths", () => {
   assert.equal(compareVersions("v1.0.5", "1.0.4"), 1);
   assert.equal(compareVersions("1.0.4", "v1.0.4"), 0);
   assert.equal(compareVersions("1.0.4", "1.1.0"), -1);
   assert.equal(compareVersions("1.0.5", "1.0.5-beta.1"), 0);
+});
+
+test("a stale release response never reports a version below the installed app", () => {
+  assert.equal(latestKnownVersion("1.0.28", "1.0.26"), "1.0.28");
+  assert.equal(latestKnownVersion("1.0.28", "v1.0.29"), "1.0.29");
 });
 
 test("accelerated downloads only wrap trusted GitHub release assets", () => {

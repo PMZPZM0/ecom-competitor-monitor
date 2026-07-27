@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Bot, CheckCircle2, Download, FolderOpen, Lightbulb, LoaderCircle, RefreshCw, Save, Settings2 } from 'lucide-react'
 import { Button } from '../../components/ui/button'
 import { api } from '../../lib/api'
@@ -42,6 +42,8 @@ export function OperationsAgentChat({ active, workspace, modelConfig, onOpenMode
   const [directory, setDirectory] = useState(workspace.qwenPaw.installDirectory || workspace.qwenPaw.defaultInstallDirectory || '')
   const [busy, setBusy] = useState('')
   const [error, setError] = useState('')
+  const [notice, setNotice] = useState('')
+  const hasLoadedRuntime = useRef(false)
   const activeModel = modelConfig.channelStates?.[modelConfig.channel]
   const modelConfigured = activeModel?.hasApiKey ?? modelConfig.hasApiKey
   const modelName = activeModel?.model || modelConfig.model
@@ -49,7 +51,9 @@ export function OperationsAgentChat({ active, workspace, modelConfig, onOpenMode
   // Keep the Agent page usable while the fresh runtime status is loading.
   const task = runtimeStatus.installTask || idleInstallTask
   const installing = activeInstallStates.has(task.state)
-  const runtimeKey = `${modelConfig.channel}|${modelConfig.customBaseUrl}|${modelName}|${modelConfigured}|${runtimeStatus.installDirectory}|${runtimeStatus.version}|${workspace.qwenPaw.signature || ''}`
+  // Only a model or installation-directory change requires a new Agent session.
+  // Runtime status checks must not reload the embedded conversation.
+  const runtimeKey = `${modelConfig.channel}|${modelConfig.customBaseUrl}|${modelName}|${modelConfigured}|${runtimeStatus.installDirectory}`
 
   useEffect(() => {
     setRuntimeStatus(workspace.qwenPaw)
@@ -64,7 +68,8 @@ export function OperationsAgentChat({ active, workspace, modelConfig, onOpenMode
   }, [])
 
   useEffect(() => {
-    if (!active) return
+    if (!active || hasLoadedRuntime.current) return
+    hasLoadedRuntime.current = true
     void refreshRuntime().catch((reason) => setError(reason instanceof Error ? reason.message : 'QwenPaw 状态读取失败。'))
   }, [active, refreshRuntime])
 
@@ -99,17 +104,15 @@ export function OperationsAgentChat({ active, workspace, modelConfig, onOpenMode
     }
   }
 
-  async function chooseDirectory() {
-    setBusy('choose')
+  async function openInstallDirectory() {
+    setBusy('open')
     setError('')
+    setNotice('')
     try {
-      const result = await api.selectQwenPawInstallDirectory()
-      if (result.directory) {
-        setDirectory(result.directory)
-        await saveDirectory(result.directory)
-      }
+      const result = await api.openQwenPawInstallDirectory()
+      setNotice(`已请求系统打开安装目录：${result.directory}`)
     } catch (reason) {
-      setError(reason instanceof Error ? reason.message : '目录选择器未打开；可以直接填写本机绝对路径。')
+      setError(reason instanceof Error ? reason.message : '打开 QwenPaw 安装目录失败。')
     } finally {
       setBusy('')
     }
@@ -145,7 +148,7 @@ export function OperationsAgentChat({ active, workspace, modelConfig, onOpenMode
         <div className="flex min-w-0 items-center gap-1.5">
           <label htmlFor="qwenpaw-install-directory" className="shrink-0 text-xs font-medium text-slate-500">安装路径</label>
           <input id="qwenpaw-install-directory" value={directory} disabled={installing} onChange={(event) => setDirectory(event.target.value)} onKeyDown={(event) => { if (event.key === 'Enter' && pathChanged) void saveDirectory() }} className="h-9 min-w-0 flex-1 rounded-md border border-slate-200 bg-slate-50 px-3 text-xs text-slate-700 outline-none transition focus:border-blue-500 focus:bg-white disabled:cursor-not-allowed disabled:opacity-60" />
-          <Button type="button" size="sm" variant="ghost" className="h-9 w-9 p-0" title="选择安装目录" aria-label="选择 QwenPaw 安装目录" disabled={installing || busy === 'choose'} onClick={() => void chooseDirectory()}><FolderOpen className="h-4 w-4" /></Button>
+          <Button type="button" size="sm" variant="ghost" className="h-9 w-9 p-0" title="打开当前安装目录" aria-label="打开当前 QwenPaw 安装目录" disabled={installing || busy === 'open'} onClick={() => void openInstallDirectory()}>{busy === 'open' ? <LoaderCircle className="h-4 w-4 animate-spin" /> : <FolderOpen className="h-4 w-4" />}</Button>
           {pathChanged && <Button type="button" size="sm" variant="ghost" className="h-9 w-9 p-0" title="保存安装路径" aria-label="保存 QwenPaw 安装路径" disabled={busy === 'path'} onClick={() => void saveDirectory()}>{busy === 'path' ? <LoaderCircle className="h-4 w-4 animate-spin" /> : <Save className="h-4 w-4" />}</Button>}
         </div>
         <div className="flex flex-wrap items-center justify-end gap-1.5">
@@ -162,6 +165,7 @@ export function OperationsAgentChat({ active, workspace, modelConfig, onOpenMode
         <div className="h-1.5 overflow-hidden rounded-full bg-slate-100"><div className="h-full bg-blue-600 transition-[width] duration-300" style={{ width: `${Math.max(2, task.progress || 0)}%` }} /></div>
       </div>}
       {(error || task.error) && <div className="border-t border-red-100 bg-red-50 px-3 py-2 text-xs leading-5 text-red-700">{error || task.error}</div>}
+      {notice && <div className="border-t border-emerald-100 bg-emerald-50 px-3 py-2 text-xs leading-5 text-emerald-800">{notice}</div>}
     </section>
     <QwenPawChatEmbed active={active} modelConfigured={modelConfigured} runtimeInstalled={runtimeStatus.installed} modelRuntimeKey={runtimeKey} onOpenModelSettings={onOpenModelSettings} />
     <OperationsThoughtDrawer open={thinkingOpen} workspace={workspace} onClose={() => setThinkingOpen(false)} onUpdateProfile={onUpdateProfile} onDeleteReport={onDeleteReport} />

@@ -126,10 +126,8 @@ function App() {
       if (document.visibilityState === 'visible' && activePageRef.current !== 'image-workbench') refresh().catch(() => undefined)
     }
     refresh().catch((err) => setError(err.message))
-    const timer = window.setInterval(refreshWhenVisible, 60_000)
     document.addEventListener('visibilitychange', refreshWhenVisible)
     return () => {
-      window.clearInterval(timer)
       document.removeEventListener('visibilitychange', refreshWhenVisible)
     }
   }, [refresh])

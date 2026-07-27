@@ -34,3 +34,15 @@ test('the QwenPaw toolbar tolerates installer fields from an older backend', asy
   assert.match(agent, /installDirectory \|\| workspace\.qwenPaw\.defaultInstallDirectory \|\| ''/)
   assert.match(agent, /String\(directory \|\| ''\)\.trim\(\)/)
 })
+
+test('switching pages keeps the QwenPaw conversation mounted without periodic workspace refreshes', async () => {
+  const [app, agent] = await Promise.all([
+    source('src/App.tsx'),
+    source('src/features/operations/OperationsAgentChat.tsx'),
+  ])
+
+  assert.doesNotMatch(app, /setInterval\(refreshWhenVisible/)
+  assert.match(agent, /hasLoadedRuntime\.current/)
+  assert.match(agent, /title="打开当前安装目录"/)
+  assert.doesNotMatch(agent, /runtimeStatus\.version\}\|\$\{workspace\.qwenPaw\.signature/)
+})

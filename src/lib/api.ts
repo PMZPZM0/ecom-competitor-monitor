@@ -67,6 +67,7 @@ export const api = {
   runOperationsDailyReport: () => request<{ analysis: OperationsAnalysis, workspace: OperationsWorkspace, sent: boolean, sendError: string }>('/api/operations/daily-report/run', { method: 'POST' }),
   qwenPawStatus: () => request<OperationsWorkspace['qwenPaw']>('/api/operations/qwenpaw'),
   updateQwenPawInstallDirectory: (directory: string) => request<OperationsWorkspace['qwenPaw']>('/api/operations/qwenpaw/install-directory', { method: 'PATCH', body: JSON.stringify({ directory }) }),
+  openQwenPawInstallDirectory: () => request<{ ok: true; directory: string }>('/api/operations/qwenpaw/open-install-directory', { method: 'POST', body: '{}' }),
   selectQwenPawInstallDirectory: () => request<{ directory: string | null }>('/api/operations/qwenpaw/select-directory', { method: 'POST', body: '{}' }),
   installQwenPaw: () => request<OperationsWorkspace['qwenPaw']['installTask']>('/api/operations/qwenpaw/install', { method: 'POST', body: '{}' }),
   qwenPawInstallTask: () => request<OperationsWorkspace['qwenPaw']['installTask']>('/api/operations/qwenpaw/install-task'),

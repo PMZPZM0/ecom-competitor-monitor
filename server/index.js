@@ -934,6 +934,40 @@ app.post("/api/operations/qwenpaw/select-directory", async (_req, res) => {
   res.json({ directory: result.canceled ? null : result.filePaths[0] || null });
 });
 
+app.post("/api/operations/qwenpaw/open-install-directory", async (_req, res) => {
+  const db = await readDb();
+  const directory = normalizeQwenPawInstallDirectory(db.operations?.qwenPawInstallDirectory);
+  if (!fs.existsSync(directory)) {
+    throw Object.assign(new Error("当前 QwenPaw 安装目录不存在。请先完成安装，或确认上方路径后保存。"), {
+      status: 404,
+      code: "QWENPAW_INSTALL_DIRECTORY_NOT_FOUND",
+    });
+  }
+
+  if (process.versions.electron) {
+    const { shell } = await import("electron");
+    const error = await shell.openPath(directory);
+    if (error) throw Object.assign(new Error(error), { status: 500, code: "QWENPAW_INSTALL_DIRECTORY_OPEN_FAILED" });
+  } else {
+    const command = process.platform === "win32"
+      ? path.join(process.env.WINDIR || process.env.SystemRoot || "C:\\Windows", "explorer.exe")
+      : process.platform === "darwin" ? "open" : "";
+    if (!command) return res.status(501).json({ message: "当前系统无法从网页版打开本机文件管理器。" });
+    await new Promise((resolve, reject) => {
+      // Do not inherit the hidden web-backend window state: Explorer must be
+      // allowed to create and foreground a visible native file-manager window.
+      const child = spawn(command, process.platform === "win32" ? ["/e,", directory] : [directory], { detached: true, stdio: "ignore", windowsHide: false });
+      child.once("error", reject);
+      child.once("spawn", () => {
+        child.unref();
+        resolve();
+      });
+    });
+  }
+
+  res.json({ ok: true, directory });
+});
+
 app.get("/api/operations/qwenpaw/install-task", (_req, res) => {
   res.json(qwenPawInstallTaskStatus());
 });

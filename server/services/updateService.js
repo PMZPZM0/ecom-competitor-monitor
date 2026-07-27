@@ -22,6 +22,10 @@ export function compareVersions(left, right) {
   return 0;
 }
 
+export function latestKnownVersion(currentVersion, remoteVersion) {
+  return compareVersions(remoteVersion, currentVersion) < 0 ? String(currentVersion).replace(/^v/i, "") : String(remoteVersion).replace(/^v/i, "");
+}
+
 export function selectReleaseAsset(assets, platform = process.platform, arch = process.arch) {
   const candidates = Array.isArray(assets) ? assets : [];
   const patterns = platform === "win32"
@@ -74,14 +78,17 @@ async function latestRelease() {
 
 export async function checkForUpdate(currentVersion, runtime = {}) {
   const release = await latestRelease();
-  const latestVersion = String(release.tag_name).replace(/^v/i, "");
+  const remoteVersion = String(release.tag_name).replace(/^v/i, "");
+  // A cached or rate-limited GitHub response can briefly point to an older
+  // release while this app is already newer. Never present that as "latest".
+  const latestVersion = latestKnownVersion(currentVersion, remoteVersion);
   const platform = runtime.platform || process.platform;
   const arch = runtime.arch || process.arch;
   const asset = selectReleaseAsset(release.assets, platform, arch);
   return {
     currentVersion,
     latestVersion,
-    updateAvailable: compareVersions(latestVersion, currentVersion) > 0,
+    updateAvailable: compareVersions(remoteVersion, currentVersion) > 0,
     releaseName: String(release.name || release.tag_name),
     notes: String(release.body || "本次版本暂无更新说明。").slice(0, 8_000),
     publishedAt: release.published_at || null,
