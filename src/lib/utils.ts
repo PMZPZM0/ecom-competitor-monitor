@@ -6,8 +6,9 @@ export function cn(...inputs: ClassValue[]) {
 }
 
 export function currency(value?: number | null) {
-  if (value == null || Number.isNaN(value)) return '--'
-  return `¥${value.toFixed(2)}`
+  const numeric = Number(value)
+  if (value == null || !Number.isFinite(numeric)) return '--'
+  return `¥${numeric.toFixed(2)}`
 }
 
 export function timeAgo(value?: string | null) {

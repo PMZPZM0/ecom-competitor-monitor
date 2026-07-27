@@ -3,7 +3,7 @@ import { useEffect, useState } from 'react'
 import { Button } from '../../components/ui/button'
 import { Card, CardContent, CardHeader, CardTitle } from '../../components/ui/card'
 import { Input } from '../../components/ui/input'
-import { timeAgo } from '../../lib/utils'
+import { currency, timeAgo } from '../../lib/utils'
 import { api } from '../../lib/api'
 import type { LarkCliStatus, Overview, Product } from '../../types/domain'
 import { publicPriceLabelForSku } from '../products/productDisplayUtils'
@@ -135,12 +135,17 @@ export function FeishuSettings({ feishu, logs, products, onSave, onTest }: Props
               <div className="mt-0.5 truncate text-xs text-orange-600">{previewProduct.shopName || previewProduct.lastSnapshot?.shopName || '未知店铺'} · {previewProduct.model || previewProduct.lastSnapshot?.model || previewProduct.name}</div>
             </div>
             <div className="grid grid-cols-2 gap-x-6 gap-y-2 p-4">
-              {previewSkus.map((sku) => <div key={sku.skuId} className="min-w-0 border-b border-slate-200 pb-2"><div className="truncate text-xs font-medium text-slate-700">{sku.name}</div><div className="mt-1 flex flex-wrap gap-3 text-[11px] text-slate-500"><span>{previewProduct.lastSnapshot?.accessMode === 'anonymous' ? '匿名' : publicPriceLabelForSku(sku)} ¥{(sku.normalPrice ?? sku.price).toFixed(2)}</span><span>惊喜立减 {previewProduct.lastSnapshot?.accessMode === 'anonymous' ? '需登录' : sku.surprisePrice == null ? '未获取' : `¥${sku.surprisePrice.toFixed(2)}`}</span><span>淘金币 {previewProduct.lastSnapshot?.accessMode === 'anonymous' ? '需登录' : sku.coinPrice == null ? '无淘金币' : `¥${sku.coinPrice.toFixed(2)}`}</span><span className="text-amber-700">监控 {previewProduct.skuMonitorPrices?.[sku.skuId] ? `¥${previewProduct.skuMonitorPrices[sku.skuId].toFixed(2)}` : '--'}</span></div></div>)}
+              {previewSkus.map((sku) => {
+                const currentPrice = sku.normalPrice ?? sku.price
+                const monitorPrice = previewProduct.skuMonitorPrices?.[sku.skuId]
+                const anonymous = previewProduct.lastSnapshot?.accessMode === 'anonymous'
+                return <div key={sku.skuId} className="min-w-0 border-b border-slate-200 pb-2"><div className="truncate text-xs font-medium text-slate-700">{sku.name}</div><div className="mt-1 flex flex-wrap gap-3 text-[11px] text-slate-500"><span>{anonymous ? '匿名' : publicPriceLabelForSku(sku)} {currentPrice == null ? '未获取' : currency(currentPrice)}</span><span>惊喜立减 {anonymous ? '需登录' : sku.surprisePrice == null ? '未获取' : currency(sku.surprisePrice)}</span><span>淘金币 {anonymous ? '需登录' : sku.coinPrice == null ? '无淘金币' : currency(sku.coinPrice)}</span><span className="text-amber-700">监控 {monitorPrice == null ? '--' : currency(monitorPrice)}</span></div></div>
+              })}
             </div>
           </div>
         )}
         <div className="max-h-48 space-y-2 overflow-auto border-t border-slate-100 pt-3">
-          {logs.map((log) => <div key={log.id} className="flex items-center justify-between gap-3 rounded-md border border-slate-100 px-3 py-2 text-xs"><div className="min-w-0"><div className="flex items-center gap-1 font-medium text-slate-700">{log.status === 'sent' && <CheckCircle2 className="h-3.5 w-3.5 text-emerald-600" />}{log.message}</div><div className="mt-0.5 text-slate-400">{log.price != null ? `当前 ¥${log.price.toFixed(2)}` : ''}{log.threshold != null ? ` · 监控 ¥${log.threshold.toFixed(2)}` : ''}</div></div><span className={log.status === 'failed' ? 'shrink-0 text-red-600' : 'shrink-0 text-emerald-600'}>{log.status === 'failed' ? '失败' : '已发送'} · {timeAgo(log.createdAt)}</span></div>)}
+          {logs.map((log) => <div key={log.id} className="flex items-center justify-between gap-3 rounded-md border border-slate-100 px-3 py-2 text-xs"><div className="min-w-0"><div className="flex items-center gap-1 font-medium text-slate-700">{log.status === 'sent' && <CheckCircle2 className="h-3.5 w-3.5 text-emerald-600" />}{log.message}</div><div className="mt-0.5 text-slate-400">{log.price != null ? `当前 ${currency(log.price)}` : ''}{log.threshold != null ? ` · 监控 ${currency(log.threshold)}` : ''}</div></div><span className={log.status === 'failed' ? 'shrink-0 text-red-600' : 'shrink-0 text-emerald-600'}>{log.status === 'failed' ? '失败' : '已发送'} · {timeAgo(log.createdAt)}</span></div>)}
           {logs.length === 0 && <div className="py-3 text-sm text-slate-400">暂无飞书发送记录。</div>}
         </div>
       </CardContent>

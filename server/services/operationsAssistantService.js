@@ -65,6 +65,37 @@ function text(value, limit = 160) {
   return String(value ?? "").trim().replace(/\s+/g, " ").slice(0, limit);
 }
 
+function finiteNumber(value, fallback = null) {
+  const numericValue = Number(value);
+  return Number.isFinite(numericValue) ? numericValue : fallback;
+}
+
+function fixedNumber(value, digits = 2, fallback = "--") {
+  const numericValue = finiteNumber(value);
+  return numericValue === null ? fallback : numericValue.toFixed(digits);
+}
+
+function percentNumber(value, digits = 1, fallback = "--") {
+  const numericValue = finiteNumber(value);
+  return numericValue === null ? fallback : `${(numericValue * 100).toFixed(digits)}%`;
+}
+
+export function normalizeUploadedFilename(value = "") {
+  const raw = String(value || "").trim();
+  if (!raw) return "未命名文件";
+  // Multer may expose UTF-8 Chinese names as a Latin-1 string. Only accept a
+  // recovered value when it clearly restores Chinese text, leaving ordinary
+  // ASCII and non-recoverable names untouched.
+  if (/[\u4E00-\u9FFF]/.test(raw)) return raw;
+  try {
+    const recovered = Buffer.from(raw, "latin1").toString("utf8");
+    if (recovered && !recovered.includes("\uFFFD") && /[\u4E00-\u9FFF]/.test(recovered)) return recovered;
+  } catch {
+    // Keep the original name when the browser did not provide a recoverable string.
+  }
+  return raw;
+}
+
 function headerKey(value) {
   return text(value, 80).toLowerCase().replace(/[\s_()（）【】[\]·-]/g, "");
 }
@@ -128,7 +159,7 @@ function normalizeRow(row) {
 }
 
 function normalizedRows(rows) {
-  return rows
+  return (Array.isArray(rows) ? rows : [])
     .filter((row) => row && typeof row === "object" && !Array.isArray(row))
     .slice(0, MAX_ROWS_PER_REPORT)
     .map(normalizeRow)
@@ -280,7 +311,7 @@ export function normalizeOperationsState(value = {}) {
       storeName: text(report.storeName, 80),
       reportDate: dateOnly(report.reportDate),
       sourceName: text(report.sourceName, 80),
-      fileName: text(report.fileName, 160),
+      fileName: text(normalizeUploadedFilename(report.fileName), 160),
       kind: ["xls", "xlsx", "csv", "json", "screenshot"].includes(report.kind) ? report.kind : "csv",
       columns: uniqueStrings(report.columns, 200),
       rows: normalizedRows(report.rows),
@@ -345,7 +376,7 @@ export function createOperationsReport(input, parsed, { file, screenshotPath = "
     storeName: text(input?.storeName, 80),
     reportDate: dateOnly(input?.reportDate, now),
     sourceName: text(input?.sourceName, 80),
-    fileName: text(file?.originalname, 160),
+    fileName: text(normalizeUploadedFilename(file?.originalname), 160),
     kind: parsed.kind,
     columns: parsed.columns,
     rows: parsed.rows,
@@ -409,31 +440,39 @@ function buildSuggestions(products, state, reportDate) {
   return products
     .filter((product) => product.spend > 0)
     .map((product) => {
-      const target = { ...DEFAULT_TARGETS, ...(state.targets[product.key] || state.targets[product.name] || {}) };
+      const rawTarget = { ...DEFAULT_TARGETS, ...(state.targets[product.key] || state.targets[product.name] || {}) };
+      const target = {
+        targetRoi: finiteNumber(rawTarget.targetRoi, DEFAULT_TARGETS.targetRoi),
+        maxFeeRate: finiteNumber(rawTarget.maxFeeRate, DEFAULT_TARGETS.maxFeeRate),
+        dailyBudgetCap: finiteNumber(rawTarget.dailyBudgetCap, DEFAULT_TARGETS.dailyBudgetCap),
+      };
+      const spend = finiteNumber(product.spend, 0);
+      const roi = finiteNumber(product.roi);
+      const feeRate = finiteNumber(product.feeRate);
       let action = "保持";
       let change = 0;
       let reason = "ROI 与费率处于设定范围内，继续观察。";
-      if (target.dailyBudgetCap > 0 && product.spend > target.dailyBudgetCap) {
+      if (target.dailyBudgetCap > 0 && spend > target.dailyBudgetCap) {
         action = "降预算";
         change = -20;
-        reason = `当日消耗 ${product.spend.toFixed(2)} 已超过预算上限 ${target.dailyBudgetCap.toFixed(2)}。`;
-      } else if (product.orders === 0 && product.spend >= 50) {
+        reason = `当日消耗 ${fixedNumber(spend)} 已超过预算上限 ${fixedNumber(target.dailyBudgetCap)}。`;
+      } else if (product.orders === 0 && spend >= 50) {
         action = "暂停观察";
         change = -100;
-        reason = `已消耗 ${product.spend.toFixed(2)}，仍未产生订单。`;
-      } else if (Number.isFinite(product.roi) && product.roi < target.targetRoi) {
+        reason = `已消耗 ${fixedNumber(spend)}，仍未产生订单。`;
+      } else if (roi !== null && roi < target.targetRoi) {
         action = "降预算";
         change = -20;
-        reason = `ROI ${product.roi.toFixed(2)} 低于保本目标 ${target.targetRoi.toFixed(2)}。`;
-      } else if (Number.isFinite(product.feeRate) && product.feeRate > target.maxFeeRate) {
+        reason = `ROI ${fixedNumber(roi)} 低于保本目标 ${fixedNumber(target.targetRoi)}。`;
+      } else if (feeRate !== null && feeRate > target.maxFeeRate) {
         action = "降预算";
         change = -15;
-        reason = `费率 ${(product.feeRate * 100).toFixed(1)}% 高于上限 ${(target.maxFeeRate * 100).toFixed(1)}%。`;
-      } else if (Number.isFinite(product.roi) && Number.isFinite(product.feeRate)
-        && product.roi >= target.targetRoi * 1.2 && product.feeRate <= target.maxFeeRate * 0.8) {
+        reason = `费率 ${percentNumber(feeRate)} 高于上限 ${percentNumber(target.maxFeeRate)}。`;
+      } else if (roi !== null && feeRate !== null
+        && roi >= target.targetRoi * 1.2 && feeRate <= target.maxFeeRate * 0.8) {
         action = "加预算";
         change = 15;
-        reason = `ROI ${product.roi.toFixed(2)} 高于目标且费率 ${(product.feeRate * 100).toFixed(1)}% 有余量。`;
+        reason = `ROI ${fixedNumber(roi)} 高于目标且费率 ${percentNumber(feeRate)} 有余量。`;
       }
       return {
         id: suggestionId(product, action, reportDate),
@@ -586,8 +625,8 @@ function localOperationsAnalysis(workspace) {
   }
   const total = workspace.totals;
   const insights = [
-    `当前汇总消耗 ${total.spend.toFixed(2)}，成交 ${total.revenue.toFixed(2)}，ROI ${Number.isFinite(total.roi) ? total.roi.toFixed(2) : "--"}。`,
-    `整体费率 ${Number.isFinite(total.feeRate) ? `${(total.feeRate * 100).toFixed(1)}%` : "--"}，已覆盖 ${workspace.products.length} 个单品。`,
+    `当前汇总消耗 ${fixedNumber(total.spend)}，成交 ${fixedNumber(total.revenue)}，ROI ${fixedNumber(total.roi)}。`,
+    `整体费率 ${percentNumber(total.feeRate)}，已覆盖 ${workspace.products.length} 个单品。`,
   ];
   return {
     mode: "rule",

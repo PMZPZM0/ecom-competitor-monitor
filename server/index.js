@@ -68,6 +68,7 @@ import {
   normalizeOperationsState,
   operationsAgentContextText,
   parseOperationsFile,
+  normalizeUploadedFilename,
   persistOperationsScreenshot,
   prepareQwenPawOperationsSkill,
   qwenPawAgentToolAccessToken,
@@ -761,7 +762,7 @@ app.post("/api/operations/reports/preview", parseOperationsUpload, async (req, r
   if (!req.file) throw Object.assign(new Error("请选择要检查的报表或截图。"), { status: 400 });
   const parsed = await parseOperationsFile(req.file);
   res.json({
-    fileName: req.file.originalname,
+    fileName: normalizeUploadedFilename(req.file.originalname),
     kind: parsed.kind,
     columns: parsed.columns,
     rowCount: parsed.rows.length,

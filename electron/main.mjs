@@ -83,6 +83,7 @@ function configureRuntimePaths() {
   process.env.ECOM_MONITOR_DATA_DIR = path.join(userData, "data");
   process.env.ECOM_MONITOR_PROFILE_DIR = path.join(userData, "account-profiles");
   process.env.ECOM_MONITOR_RESOURCE_DIR = app.getAppPath();
+  process.env.ECOM_MONITOR_UNPACKED_DIR = path.join(process.resourcesPath, "app.asar.unpacked");
   process.env.NODE_ENV = "production";
 }
 

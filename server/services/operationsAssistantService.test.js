@@ -11,6 +11,7 @@ import {
   createOperationsReport,
   operationsAgentContextText,
   normalizeOperationsState,
+  normalizeUploadedFilename,
   lockQwenPawBuiltinTools,
   parseOperationsFile,
   qwenPawBootstrapPlan,
@@ -63,6 +64,25 @@ test("operations assistant parses uploaded XLSX reports into locally computable 
   assert.equal(parsed.rows[0].productName, "测试锅具");
   assert.equal(parsed.rows[0].spend, 120);
   assert.equal(parsed.rows[0].revenue, 600);
+});
+
+test("operations assistant restores UTF-8 Chinese filenames and keeps ordinary ASCII names unchanged", () => {
+  const garbled = Buffer.from("推广报表.xls", "utf8").toString("latin1");
+  assert.equal(normalizeUploadedFilename(garbled), "推广报表.xls");
+  assert.equal(normalizeUploadedFilename("promotion-report.xlsx"), "promotion-report.xlsx");
+  assert.equal(normalizeOperationsState({ reports: [{ id: "ops-1", type: "promotion", fileName: garbled, rows: [] }] }).reports[0].fileName, "推广报表.xls");
+});
+
+test("operations analysis safely handles incomplete targets and missing numeric fields", async () => {
+  const report = await promotionReport(["锅具,新品,,,0,0,计划A,店铺A"]);
+  const workspace = buildOperationsWorkspace({
+    reports: [report],
+    targets: { 锅具: { targetRoi: null, maxFeeRate: null, dailyBudgetCap: null } },
+  }, { now: new Date("2026-07-23T12:00:00.000Z") });
+  const analysis = await analyzeOperationsWorkspace({}, workspace, { reports: [report] });
+
+  assert.equal(analysis.mode, "rule");
+  assert.ok(analysis.insights.every((item) => typeof item === "string"));
 });
 
 test("operations data archive keeps daily snapshots separate and compares only the matching store and report type", async () => {
