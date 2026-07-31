@@ -1,5 +1,7 @@
 import path from "node:path";
+import os from "node:os";
 import { app, BrowserWindow, dialog, Menu, shell, Tray } from "electron";
+import { cloudLinkFromArgs, parseCloudLink } from "./cloudLink.mjs";
 import {
   clearLaunchMode,
   DESKTOP_MODE,
@@ -10,7 +12,7 @@ import {
   writeLaunchMode,
 } from "./launchMode.mjs";
 
-const productName = "电商竞品监控";
+const productName = "经营罗盘";
 const isDevelopment = process.argv.includes("--dev");
 let mainWindow = null;
 let backendServer = null;
@@ -21,14 +23,42 @@ let shutdownStarted = false;
 let launchMode = null;
 let tray = null;
 let modeSwitchActive = false;
+let pendingCloudLink = null;
+
+function publicAssetPath(filename) {
+  // In development main.mjs lives in /electron; packaged builds place public/
+  // beside the app entry. Keep both layouts explicit so tray startup cannot
+  // fail before the window is shown.
+  const publicRoot = isDevelopment ? path.dirname(app.getAppPath()) : app.getAppPath();
+  return path.join(publicRoot, "public", filename);
+}
 
 app.setName(productName);
+app.setAsDefaultProtocolClient("ecom-monitor");
+
+async function handleCloudLink(raw) {
+  const parsed = parseCloudLink(raw);
+  if (!parsed) return;
+  if (!backendUrl) { pendingCloudLink = raw; return; }
+  const response = await fetch(`${backendUrl}/api/operations/cloud-sync/activate`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ endpoint: parsed.endpoint, code: parsed.code, deviceName: `${os.hostname()} 本地应用` }),
+  });
+  const payload = await response.json().catch(() => ({}));
+  if (!response.ok) throw new Error(payload?.message || `设备绑定失败（${response.status}）`);
+  createWindow(frontendUrl);
+  dialog.showMessageBox({ type: "info", title: productName, message: "本机已连接团队云数据", detail: `已绑定：${payload?.cloudSync?.teamName || "团队"}\n现在可以回到运营数据页面手动同步。`, buttons: ["知道了"] }).catch(() => undefined);
+}
 
 const hasSingleInstanceLock = app.requestSingleInstanceLock();
+pendingCloudLink = cloudLinkFromArgs(process.argv);
 if (!hasSingleInstanceLock) {
   app.quit();
 } else {
-  app.on("second-instance", () => {
+  app.on("second-instance", (_event, commandLine) => {
+    const cloudLink = cloudLinkFromArgs(commandLine);
+    if (cloudLink) handleCloudLink(cloudLink).catch(showLaunchError);
     if (launchMode === WEB_MODE && frontendUrl) {
       shell.openExternal(frontendUrl).catch(() => undefined);
       return;
@@ -37,6 +67,12 @@ if (!hasSingleInstanceLock) {
     createWindow(frontendUrl);
   });
 }
+
+app.on("open-url", (event, url) => {
+  event.preventDefault();
+  pendingCloudLink = url;
+  if (backendUrl) handleCloudLink(url).catch(showLaunchError);
+});
 
 function launchModePath() {
   return path.join(app.getPath("userData"), "launch-mode.json");
@@ -92,10 +128,12 @@ async function startBackend() {
   configureRuntimePaths();
   const serverModule = await import("../server/index.js");
   const staticDir = isDevelopment ? "" : path.join(app.getAppPath(), "dist");
+  const developmentPort = Number(process.env.ECOM_MONITOR_DEV_SERVER_PORT || 4317);
   backendServer = await serverModule.startServer({
     host: "127.0.0.1",
-    port: isDevelopment ? 4317 : 0,
+    port: isDevelopment ? developmentPort : 0,
     staticDir,
+    deferInitialization: true,
   });
   stopBackend = serverModule.stopServer;
   const address = backendServer.address();
@@ -112,7 +150,7 @@ function createWindow(appUrl) {
     mainWindow.focus();
     return mainWindow;
   }
-  const icon = path.join(app.getAppPath(), "public", process.platform === "win32" ? "app-icon.ico" : "app-icon.png");
+  const icon = publicAssetPath(process.platform === "win32" ? "app-icon.ico" : "app-icon.png");
   mainWindow = new BrowserWindow({
     title: productName,
     width: 1480,
@@ -142,6 +180,11 @@ function createWindow(appUrl) {
     shell.openExternal(url).catch(() => undefined);
   });
   mainWindow.once("ready-to-show", () => mainWindow?.show());
+  mainWindow.on("close", (event) => {
+    if (shutdownStarted) return;
+    event.preventDefault();
+    mainWindow?.hide();
+  });
   mainWindow.on("closed", () => { mainWindow = null; });
   mainWindow.loadURL(appUrl);
   return mainWindow;
@@ -186,7 +229,7 @@ function clearRememberedLaunchMode() {
 }
 
 function refreshTray() {
-  const icon = path.join(app.getAppPath(), "public", process.platform === "win32" ? "app-icon.ico" : "app-icon.png");
+  const icon = publicAssetPath(process.platform === "win32" ? "app-icon.ico" : "app-icon.png");
   tray ||= new Tray(icon);
   tray.setToolTip(`${productName} - ${launchMode === WEB_MODE ? "浏览器网页" : "桌面 APP"}`);
   tray.setContextMenu(Menu.buildFromTemplate([
@@ -237,6 +280,11 @@ if (hasSingleInstanceLock) app.whenReady().then(async () => {
     }
     await startBackend();
     refreshTray();
+    if (pendingCloudLink) {
+      const cloudLink = pendingCloudLink;
+      pendingCloudLink = null;
+      await handleCloudLink(cloudLink);
+    }
     if (launchMode === WEB_MODE) await shell.openExternal(frontendUrl);
     else createWindow(frontendUrl);
   } catch (error) {

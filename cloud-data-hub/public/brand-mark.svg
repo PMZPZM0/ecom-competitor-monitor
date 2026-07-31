@@ -1,0 +1,11 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 48 48" role="img" aria-labelledby="title">
+  <title id="title">经营罗盘</title>
+  <rect width="48" height="48" rx="10" fill="#173b6c"/>
+  <circle cx="24" cy="24" r="15" fill="none" stroke="#72d9ca" stroke-width="2"/>
+  <path d="M24 7.5v3M40.5 24h-3M24 40.5v-3M7.5 24h3" stroke="#72d9ca" stroke-width="2" stroke-linecap="round"/>
+  <rect x="15" y="26" width="4" height="7" rx="1.2" fill="#fff"/>
+  <rect x="22" y="22" width="4" height="11" rx="1.2" fill="#fff"/>
+  <rect x="29" y="17" width="4" height="16" rx="1.2" fill="#fff"/>
+  <path d="m15.5 22.5 8-6 5 2.5 6-7" fill="none" stroke="#72d9ca" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"/>
+  <path d="m31.6 12 3.2-.3-.3 3.2" fill="none" stroke="#72d9ca" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"/>
+</svg>

@@ -61,7 +61,7 @@ export async function analyzeData({ products, snapshots, modelConfig = {} }) {
         },
         {
           role: "user",
-          content: `请分析这些天猫竞品监控数据，输出 JSON：{"summary":"","insights":[],"actions":[]}。\n${JSON.stringify(payload)}`,
+          content: `请分析这些天猫竞品经营数据，输出 JSON：{"summary":"","insights":[],"actions":[]}。\n${JSON.stringify(payload)}`,
         },
       ],
     },

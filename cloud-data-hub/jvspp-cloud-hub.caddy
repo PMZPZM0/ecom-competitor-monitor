@@ -1,0 +1,17 @@
+jvspp.cloud, www.jvspp.cloud {
+	encode zstd gzip
+	reverse_proxy 127.0.0.1:4328
+}
+
+# Cloudflare Tunnel currently sends jvspp.cloud to Caddy's normal HTTP listener.
+http://jvspp.cloud, http://www.jvspp.cloud {
+	encode zstd gzip
+	reverse_proxy 127.0.0.1:4328
+}
+
+# The existing Cloudflare Tunnel reaches Caddy through this local HTTP listener.
+# Keep this hostname scoped to the new hub so legacy sites remain untouched.
+http://jvspp.cloud:8096, http://www.jvspp.cloud:8096 {
+	encode zstd gzip
+	reverse_proxy 127.0.0.1:4328
+}

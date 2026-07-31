@@ -126,13 +126,20 @@ export function qwenPawWorkingDirectory(installDirectory) {
   return path.join(normalizeQwenPawInstallDirectory(installDirectory), "data");
 }
 
-export function qwenPawBundledPluginSource({ sourceDirectory = __dirname, unpackedDirectory = process.env.ECOM_MONITOR_UNPACKED_DIR } = {}) {
+export function qwenPawBundledPluginSource({
+  sourceDirectory = __dirname,
+  unpackedDirectory = process.env.ECOM_MONITOR_UNPACKED_DIR,
+  platform = process.platform,
+} = {}) {
   // Electron keeps source files in app.asar. QwenPaw's Python runtime needs
   // a normal directory, so production uses Electron's app.asar.unpacked copy.
+  // Use the target platform's path rules: release tests intentionally verify
+  // a Windows packaged path while running on macOS.
+  const pathApi = platform === "win32" ? path.win32 : path;
   if (String(unpackedDirectory || "").trim()) {
-    return path.join(path.resolve(String(unpackedDirectory)), "server", "qwenpaw-plugins", ECOMMERCE_QR_PLUGIN_ID);
+    return pathApi.join(pathApi.resolve(String(unpackedDirectory)), "server", "qwenpaw-plugins", ECOMMERCE_QR_PLUGIN_ID);
   }
-  return path.resolve(sourceDirectory, "../qwenpaw-plugins", ECOMMERCE_QR_PLUGIN_ID);
+  return pathApi.resolve(sourceDirectory, "../qwenpaw-plugins", ECOMMERCE_QR_PLUGIN_ID);
 }
 
 async function installBundledQwenPawPlugins(installDirectory) {

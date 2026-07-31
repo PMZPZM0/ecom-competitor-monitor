@@ -30,6 +30,8 @@ export type Product = {
   monitorPrice?: number | null
   skuMonitorPrices?: Record<string, number>
   skuMonitorRules?: SkuMonitorRules
+  /** User-selected focus SKUs for quick review in the monitoring workspace. */
+  primarySkuIds?: string[]
   skuLifecycle?: Record<string, {
     skuId: string
     name: string
@@ -441,21 +443,96 @@ export type BrowserEngineCatalog = {
   engines: BrowserEngineOption[]
 }
 
-export type OperationsReportType = 'promotion' | 'market' | 'audience' | 'competitor'
+export type OperationsReportType = 'campaign' | 'promotion' | 'product' | 'category' | 'scenario' | 'market' | 'audience' | 'competitor'
+export type OperationsReportInputType = OperationsReportType
+export type OperationsPeriodKind = 'day' | 'week' | 'month' | 'custom'
+/** The dashboard can choose a source ledger automatically without changing a report's own period. */
+export type OperationsSourcePeriodKind = 'auto' | 'all' | OperationsPeriodKind
 
 export type OperationsReport = {
   id: string
   type: OperationsReportType
   storeName: string
   reportDate: string
+  periodStart: string
+  periodEnd: string
+  periodLabel: string
+  periodKind: OperationsPeriodKind
+  detectedType: OperationsReportType
   sourceName: string
   fileName: string
   kind: 'xls' | 'xlsx' | 'csv' | 'json' | 'screenshot'
   columns: string[]
   rows: Array<Record<string, unknown>>
+  /** Original parsed row count. Workspace payloads omit raw rows for speed. */
+  rowCount?: number
   screenshotPath: string
   screenshotMimeType: string
   importedAt: string
+  cloudOrigin?: {
+    endpoint: string
+    teamId: string
+    remoteReportId: string
+    revision: number
+    syncedAt: string | null
+  } | null
+}
+
+export type OperationsCloudSync = {
+  endpoint: string
+  deviceId: string
+  deviceName: string
+  teamId: string
+  teamName: string
+  storeNames: string[]
+  lastCursor: number
+  scopeVersion: number
+  lastSyncAt: string | null
+  lastSyncResult: string
+  lastError: string
+  connected: boolean
+  deviceTokenMasked: string
+}
+
+export type OperationsProductCatalogEntry = {
+  id: string
+  storeName: string
+  productId: string
+  category: string
+  model: string
+  sourceName: string
+  createdAt: string
+}
+
+export type OperationsPromotionPlan = {
+  name: string
+  rowCount: number
+  spend: number
+  promotionRevenue: number
+  roi: number | null
+  clicks: number
+  impressions: number
+  orders: number
+  linkedRevenue: number | null
+  linkedProductCount: number
+  feeRate: number | null
+}
+
+export type OperationsPromotionChannel = {
+  /** Platform promotion type, for example 全站推广 or 关键词推广. */
+  name: string
+  rowCount: number
+  planCount: number
+  spend: number
+  promotionRevenue: number
+  roi: number | null
+  clicks: number
+  impressions: number
+  orders: number
+  linkedRevenue: number | null
+  linkedProductCount: number
+  feeRate: number | null
+  plans: OperationsPromotionPlan[]
 }
 
 export type OperationsTarget = {
@@ -483,13 +560,39 @@ export type OperationsSuggestion = {
 
 export type OperationsMetric = {
   spend: number
+  /** Payment amount before after-sales refunds. */
+  grossRevenue: number
+  /** Successfully refunded amount in the same report period. */
+  refundAmount: number
+  /** Real GSV: payment amount minus successfully refunded amount. */
+  netGsv: number
+  refundDataAvailable: boolean
   revenue: number
   orders: number
   clicks: number
   impressions: number
+  visitors: number
+  pageViews: number
+  favorites: number
+  cartUsers: number
+  cartItems: number
+  paidBuyers: number
+  paidItems: number
   feeRate: number | null
   roi: number | null
   conversionRate: number | null
+  collectionCartRate: number | null
+  cpc: number | null
+  costPerCollectCart: number | null
+}
+
+export type OperationsSalesDeduction = {
+  id: string
+  storeName: string
+  reportDate: string
+  amount: number
+  note: string
+  createdAt: string
 }
 
 export type OperationsArchiveSnapshot = {
@@ -519,6 +622,110 @@ export type OperationsGroup = OperationsMetric & {
   key?: string
   productStage?: 'new' | 'mature' | 'unknown'
   audienceSize?: number | null
+}
+
+export type OperationsDataset = {
+  type: OperationsReportType
+  date: string
+  period: string
+  reportCount: number
+  rowCount: number
+  metrics: OperationsMetric
+  groups: OperationsGroup[]
+  columns: string[]
+}
+
+// A store overview deliberately keeps net GSV and advertising sources
+// separate. Several reports may describe the same transaction, so adding all
+// report totals together would overstate sales and produce a false ROI.
+export type OperationsStoreOverview = {
+  revenue: OperationsMetric
+  performance: OperationsMetric
+  managementRoi: number | null
+  salesDeduction: number
+  revenueSource: { type: OperationsReportType, period: string, rowCount: number } | null
+  performanceSource: { type: OperationsReportType, period: string, rowCount: number } | null
+}
+
+export type OperationsMatchStatus = 'id' | 'name' | 'sales-only' | 'promotion-only' | 'unmatched'
+
+// A business entity never merges the two sources into one fake transaction
+// total. Sales and promotion remain independently traceable; fee rate and ROI
+// are calculated from their documented formulas.
+export type OperationsBusinessEntity = {
+  key: string
+  name: string
+  productId?: string
+  storeName?: string
+  model?: string
+  category?: string
+  matchStatus: OperationsMatchStatus
+  sales: OperationsMetric
+  promotion: OperationsMetric
+  salesCount: number
+  promotionCount: number
+  revenue: number
+  grossRevenue: number
+  refundAmount: number
+  refundDataAvailable: boolean
+  spend: number
+  promotionRevenue: number
+  promotionChannels: OperationsPromotionChannel[]
+  /** Sales and campaign source periods must align before showing a period-level rate. */
+  promotionCoverageComplete: boolean
+  roi: number | null
+  feeRate: number | null
+  visitors: number
+  paidBuyers: number
+  conversionRate: number | null
+  clicks: number
+  impressions: number
+  orders: number
+  /** Store-level exclusions are never fabricated into category or product rows. */
+  salesDeduction: number
+  /** Net GSV after approved deductions divided by actual promotion spend. */
+  managementRoi: number | null
+}
+
+export type OperationsDashboardTrendPoint = {
+  date: string
+  revenue: number
+  grossRevenue: number
+  refundAmount: number
+  salesDeduction: number
+  spend: number
+  promotionRevenue: number
+  promotionCoverageComplete: boolean
+  roi: number | null
+  feeRate: number | null
+}
+
+export type OperationsDashboard = {
+  store: OperationsBusinessEntity
+  stores: OperationsBusinessEntity[]
+  products: OperationsBusinessEntity[]
+  categories: OperationsBusinessEntity[]
+  coverage: {
+    products: { linked: number, salesOnly: number, promotionOnly: number }
+    categories: { linked: number, salesOnly: number, promotionOnly: number }
+  }
+  trend: OperationsDashboardTrendPoint[]
+  salesDeductions: OperationsSalesDeduction[]
+  totalSalesDeduction: number
+  sources: {
+    storeSales: { type: OperationsReportType, period: string, rowCount: number } | null
+    storePromotion: { type: OperationsReportType, period: string, rowCount: number } | null
+    categorySales: { type: OperationsReportType, period: string, rowCount: number } | null
+    categoryPromotion: { type: OperationsReportType, period: string, rowCount: number } | null
+  }
+  sourceWarnings: {
+    storePromotion: string | null
+    categoryPromotion: string | null
+  }
+  sourceCoverage: {
+    storePromotionComplete: boolean
+    categoryPromotionComplete: boolean
+  }
 }
 
 export type OperationsAnalysis = {
@@ -552,6 +759,10 @@ export type QwenPawAlertSettings = {
 
 export type OperationsWorkspace = {
   reports: OperationsReport[]
+  /** Reusable local store names selected when importing operating reports. */
+  storeNames: string[]
+  productCatalog: OperationsProductCatalogEntry[]
+  productCatalogSource: { fileName: string, updatedAt: string | null }
   currentDate: string
   archive: { days: OperationsArchiveDay[], totalReports: number, totalRows: number }
   profile: {
@@ -561,6 +772,11 @@ export type OperationsWorkspace = {
   }
   freshness: { latestAt: string | null, fresh: boolean }
   totals: OperationsMetric
+  salesDeductions: OperationsSalesDeduction[]
+  datasets: OperationsDataset[]
+  dashboard: OperationsDashboard
+  storeOverview: OperationsStoreOverview
+  filters?: { periodKind: 'all' | OperationsPeriodKind, sourcePeriodKind?: OperationsSourcePeriodKind, start: string, end: string, storeName: string }
   products: OperationsGroup[]
   stores: OperationsGroup[]
   categories: OperationsGroup[]
@@ -569,6 +785,7 @@ export type OperationsWorkspace = {
   analyses: OperationsAnalysis[]
   chat: OperationsChatMessage[]
   qwenPawAlerts: QwenPawAlertSettings
+  cloudSync: OperationsCloudSync
   qwenPaw: {
     installed: boolean
     version: string
@@ -903,6 +1120,16 @@ export type LocalEvidenceStatus = {
   sourceFileCount: number
   totalBytes: number
   directoryPickerAvailable: boolean
+}
+
+export type LocalEvidenceHistoryClearResult = LocalEvidenceStatus & {
+  deletedCount: number
+  deletedFileCount: number
+  deletedImportCount: number
+  deletedSourceFileCount: number
+  reclaimedBytes: number
+  protectedImportCount: number
+  protectedSourceFileCount: number
 }
 
 export type ExcelSyncStatus = {

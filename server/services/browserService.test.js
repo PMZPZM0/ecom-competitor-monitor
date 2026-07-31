@@ -142,7 +142,7 @@ test("a large SKU matrix skips warmup and stops cleanly when its shared capture 
   const selectedValueIds = [];
   const cdp = {
     async send(_method, params, timeoutMs) {
-      const valueId = ["one", "two", "three", "four", "five"].find((value) => params.expression.includes(`\"${value}\"`));
+      const valueId = ["one", "two", "three", "four", "five"].find((value) => params.expression.includes(`"${value}"`));
       selectedValueIds.push({ valueId, timeoutMs });
       clock += 700;
       responseSequence += 1;

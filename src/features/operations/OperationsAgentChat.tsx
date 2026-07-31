@@ -60,8 +60,8 @@ export function OperationsAgentChat({ active, workspace, modelConfig, onOpenMode
     setDirectory(workspace.qwenPaw.installDirectory || workspace.qwenPaw.defaultInstallDirectory || '')
   }, [workspace.qwenPaw])
 
-  const refreshRuntime = useCallback(async () => {
-    const next = await api.qwenPawStatus()
+  const refreshRuntime = useCallback(async ({ checkLatest = false }: { checkLatest?: boolean } = {}) => {
+    const next = await api.qwenPawStatus({ checkLatest })
     setRuntimeStatus(next)
     setDirectory(next.installDirectory || next.defaultInstallDirectory || '')
     return next
@@ -152,7 +152,7 @@ export function OperationsAgentChat({ active, workspace, modelConfig, onOpenMode
           {pathChanged && <Button type="button" size="sm" variant="ghost" className="h-9 w-9 p-0" title="保存安装路径" aria-label="保存 QwenPaw 安装路径" disabled={busy === 'path'} onClick={() => void saveDirectory()}>{busy === 'path' ? <LoaderCircle className="h-4 w-4 animate-spin" /> : <Save className="h-4 w-4" />}</Button>}
         </div>
         <div className="flex flex-wrap items-center justify-end gap-1.5">
-          <Button type="button" size="sm" variant="ghost" title="检查 QwenPaw 更新" disabled={installing} onClick={() => void refreshRuntime()}><RefreshCw className="h-4 w-4" /></Button>
+          <Button type="button" size="sm" variant="ghost" title="检查 QwenPaw 更新" disabled={installing} onClick={() => void refreshRuntime({ checkLatest: true })}><RefreshCw className="h-4 w-4" /></Button>
           <Button type="button" size="sm" variant="secondary" onClick={onOpenModelSettings}><Settings2 className="h-4 w-4" />配置模型</Button>
           <Button type="button" size="sm" disabled={installing || (runtimeStatus.installed && !runtimeStatus.updateAvailable)} onClick={() => void installOrUpdate()}>
             {installing || busy === 'install' ? <LoaderCircle className="h-4 w-4 animate-spin" /> : runtimeStatus.installed && !runtimeStatus.updateAvailable ? <CheckCircle2 className="h-4 w-4" /> : <Download className="h-4 w-4" />}

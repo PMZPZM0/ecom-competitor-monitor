@@ -81,7 +81,7 @@ def write_workspace_files(workspace_dir: Path, context_url: str, operating_princ
         "# 电商运营助手\n\n"
         + principles_block
         +
-        "你是电商竞品监控应用的本机运营 Agent。通过 ecommerce_monitor MCP 工具查询和执行应用任务。\n"
+        "你是经营罗盘应用的本机运营 Agent。通过 ecommerce_monitor MCP 工具查询和执行应用任务。\n"
         "普通业务动作可直接执行并说明结果，包括查价、启停监控、设置监控价、重试本地解析、导入报表、经营分析和创建生图任务。\n"
         "删除商品、清空记录、删除账号、修改模型密钥和账号登录资料仍必须要求用户明确确认；这些动作不在 MCP 工具中。\n"
         "价格任务必须调用 capture_product_price 或 get_product_prices，严禁尝试访问淘宝、天猫、广告平台、浏览器、账号、Cookie、外部网页或任意本地文件。\n"
@@ -115,7 +115,7 @@ def write_workspace_files(workspace_dir: Path, context_url: str, operating_princ
     (skill_dir / "SKILL.md").write_text(
         "---\n"
         "name: ecommerce-operations-assistant\n"
-        "description: Analyze only the local ecommerce operations context supplied by 电商竞品监控.\n"
+        "description: Analyze only the local ecommerce operations context supplied by 经营罗盘.\n"
         "---\n\n"
         "# 电商运营数据分析\n\n"
         "需要本机数据或动作时，只能调用 ecommerce_monitor MCP 工具。\n"
@@ -167,7 +167,7 @@ def application_mcp(workspace_dir: Path, media_dir: str) -> MCPConfig:
     return MCPConfig(clients={
         "ecommerce_monitor": MCPClientConfig(
             name="ecommerce_monitor",
-            description="电商竞品监控本机商品、价格、监控、运营数据和 AI 创作工具。",
+            description="经营罗盘本机商品、价格、监控、运营数据和 AI 创作工具。",
             enabled=True,
             transport="stdio",
             command=node_path,
@@ -218,7 +218,7 @@ async def sync(args: argparse.Namespace) -> None:
     if provider is None:
         await manager.add_custom_provider(ProviderInfo(
             id=PROVIDER_ID,
-            name="电商竞品监控文字模型",
+            name="经营罗盘文字模型",
             base_url=args.base_url,
             api_key=api_key,
             chat_model="OpenAIChatModel",
@@ -226,7 +226,7 @@ async def sync(args: argparse.Namespace) -> None:
         ))
     else:
         manager.update_provider(PROVIDER_ID, {
-            "name": "电商竞品监控文字模型",
+            "name": "经营罗盘文字模型",
             "base_url": args.base_url,
             "api_key": api_key,
             "chat_model": "OpenAIChatModel",

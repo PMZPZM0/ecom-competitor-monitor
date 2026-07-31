@@ -20,12 +20,12 @@ import { OperationsAgentChat } from './features/operations/OperationsAgentChat'
 import { loadCustomWallpaper } from './features/settings/customWallpaperStore'
 import { APP_WALLPAPER_STORAGE_KEY, CUSTOM_APP_WALLPAPER_ID, DEFAULT_APP_WALLPAPER_ID, resolveAppWallpaper, type AppWallpaperId } from './features/settings/wallpapers'
 import type { PromptHistoryItem, PromptProductProfile, PromptStylePreset, PromptSyncPayload } from './features/prompt-studio/types'
-import type { AuthSession, LocalImportCommitResult, ModelConfigPatch, ModelConfigTestPayload, ModelConfigTestResult, MonitorChannel, OperationsAnalysis, OperationsReportType, OperationsTarget, OperationsWorkspace, Overview, Product, ProductCaptureOptions, RunRecord, UpdateInfo } from './types/domain'
+import type { AuthSession, LocalImportCommitResult, ModelConfigPatch, ModelConfigTestPayload, ModelConfigTestResult, MonitorChannel, OperationsAnalysis, OperationsPeriodKind, OperationsReportInputType, OperationsSourcePeriodKind, OperationsWorkspace, Overview, Product, ProductCaptureOptions, RunRecord, UpdateInfo } from './types/domain'
 
 const guidePage = { id: 'guide', label: '使用说明书', icon: BookOpen, title: '使用说明书', subtitle: '第一次使用请从这里开始，按顺序完成账号授权、商品抓取和自动监控。' } as const
 const primaryNavItems = [
   { id: 'operations-agent', label: 'Agent 对话', icon: MessageSquare, title: 'Agent 对话', subtitle: '基于已导入的运营数据，获取可核对的经营分析与建议。' },
-  { id: 'operations', label: '运营数据', icon: BarChart3, title: '运营数据', subtitle: '导入经营数据，查看费率、单品与人群表现，并生成推广建议。' },
+  { id: 'operations', label: '运营数据', icon: BarChart3, title: '运营数据', subtitle: '导入经营数据，查看店铺、类目与单品经营，并生成推广建议。' },
   { id: 'monitoring', label: '商品监控', icon: PackageSearch, title: '商品监控', subtitle: '添加、筛选和核对商品，并在任务中心管理监控计划与抓取进度。' },
   { id: 'image-workbench', label: 'AI 创作', icon: WandSparkles, title: 'AI 创作', subtitle: '输入需求，可先让 AI 帮写并修改确认，再提交到生图队列。' },
   { id: 'records', label: '数据记录', icon: Database, title: '数据记录', subtitle: '查看运行日志、价格历史、本地证据并重试失败商品。' },
@@ -84,6 +84,7 @@ function App() {
     return window.localStorage.getItem(AI_CREATION_VIEW_KEY) === 'professional' ? 'professional' : 'compose'
   })
   const [busy, setBusy] = useState(false)
+  const [batchBusyProductIds, setBatchBusyProductIds] = useState<string[]>([])
   const [clearingRunLogs, setClearingRunLogs] = useState(false)
   const [busyProductId, setBusyProductId] = useState('')
   const [monitorToggleBusy, setMonitorToggleBusy] = useState(false)
@@ -105,6 +106,7 @@ function App() {
   const [professionalPromptMounted, setProfessionalPromptMounted] = useState(aiCreationView === 'professional')
   const [operationsMounted, setOperationsMounted] = useState(isOperationsPage(activePage))
   const updateCheckActive = useRef(false)
+  const qwenPawWarmupKey = useRef('')
   const activePageRef = useRef<PageId>(activePage)
   const customWallpaperUrlRef = useRef('')
 
@@ -115,22 +117,30 @@ function App() {
     setCustomWallpaperUrl(nextUrl)
   }, [])
 
+  // Product and authorization actions only need the compact monitoring
+  // overview. Rebuilding the whole operations workspace here made every
+  // delete, toggle and main-SKU save wait on unrelated report calculations.
   const refresh = useCallback(async () => {
-    const [nextOverview, nextOperations] = await Promise.all([api.overview(), api.operations()])
-    setOverview(nextOverview)
-    setOperations(nextOperations)
+    setOverview(await api.overview())
+  }, [])
+
+  const refreshOperations = useCallback(async () => {
+    setOperations(await api.operations())
   }, [])
 
   useEffect(() => {
     const refreshWhenVisible = () => {
-      if (document.visibilityState === 'visible' && activePageRef.current !== 'image-workbench') refresh().catch(() => undefined)
+      if (document.visibilityState === 'visible' && activePageRef.current !== 'image-workbench') {
+        void refresh()
+        if (isOperationsPage(activePageRef.current)) void refreshOperations()
+      }
     }
-    refresh().catch((err) => setError(err.message))
+    Promise.all([refresh(), refreshOperations()]).catch((err) => setError(err.message))
     document.addEventListener('visibilitychange', refreshWhenVisible)
     return () => {
       document.removeEventListener('visibilitychange', refreshWhenVisible)
     }
-  }, [refresh])
+  }, [refresh, refreshOperations])
 
   useEffect(() => {
     const check = () => checkUpdates(false, true).catch(() => undefined)
@@ -157,6 +167,25 @@ function App() {
   useEffect(() => {
     if (isOperationsPage(activePage)) setOperationsMounted(true)
   }, [activePage])
+
+  useEffect(() => {
+    const modelConfig = overview?.modelConfig
+    const activeModel = modelConfig?.channelStates?.[modelConfig.channel]
+    const configured = activeModel?.hasApiKey ?? modelConfig?.hasApiKey ?? false
+    if (!operations?.qwenPaw?.installed || !configured) return undefined
+    const key = `${modelConfig?.channel}|${modelConfig?.customBaseUrl}|${activeModel?.model || modelConfig?.model}`
+    if (qwenPawWarmupKey.current === key) return undefined
+    qwenPawWarmupKey.current = key
+    // Warm the local console after the app becomes interactive. The request is
+    // intentionally not awaited, so it removes the first Agent-page cold start
+    // without delaying the rest of the local workspace.
+    const timer = window.setTimeout(() => {
+      void api.qwenPawConsole().catch(() => {
+        if (qwenPawWarmupKey.current === key) qwenPawWarmupKey.current = ''
+      })
+    }, 1_200)
+    return () => window.clearTimeout(timer)
+  }, [operations?.qwenPaw?.installed, overview?.modelConfig])
 
   useEffect(() => {
     document.documentElement.dataset.fontSize = fontSize
@@ -315,6 +344,11 @@ function App() {
     await refresh()
   }
 
+  async function savePrimarySkuIds(product: Product, primarySkuIds: string[]) {
+    await api.updateProduct(product.id, { primarySkuIds })
+    await refresh()
+  }
+
   async function captureProduct(product: Product, options: ProductCaptureOptions = {}) {
     requireOnlineCapture(product)
     const accountType = product.accountType || 'normal'
@@ -411,6 +445,7 @@ function App() {
       throw new Error(`缺少可用的${missingAccountProduct.accountType === 'gift' ? '礼金' : missingAccountProduct.accountType === 'vip88' ? '88VIP' : '普通'}账号；日常抓价不会换用其他账号类型。`)
     }
     setBusy(true)
+    setBatchBusyProductIds(onlineProducts.map((product) => product.id))
     if (showFeedback) {
       setError('')
       setNotice(`正在抓取 ${onlineProducts.length} 个在线商品；同一账号按顺序执行，不同账号并行${skippedLocalCount ? `；已排除 ${skippedLocalCount} 个本地数据商品` : ''}...`)
@@ -427,6 +462,7 @@ function App() {
       }
       throw err
     } finally {
+      setBatchBusyProductIds([])
       setBusy(false)
     }
   }
@@ -567,7 +603,7 @@ function App() {
     }
   }
 
-  async function uploadOperationsReport(file: File, payload: { type: OperationsReportType, storeName?: string, reportDate?: string, sourceName?: string }) {
+  async function uploadOperationsReport(file: File, payload: { type: OperationsReportInputType, storeName?: string, reportDate?: string, periodKind?: OperationsPeriodKind, periodStart?: string, periodEnd?: string, sourceName?: string }) {
     setError('')
     setNotice('正在导入运营数据...')
     const result = await api.uploadOperationsReport(file, payload)
@@ -576,8 +612,48 @@ function App() {
     return result.workspace
   }
 
+  async function uploadProductCatalog(file: File) {
+    setError('')
+    setNotice('正在更新商品 ID 和型号资料...')
+    const result = await api.uploadProductCatalog(file)
+    setOperations(result.workspace)
+    setNotice(`已追加 ${result.importedCount} 条商品资料，最新版本已参与运营数据关联。`)
+    return result.workspace
+  }
+
+  async function saveProductCatalogEntry(payload: { storeName: string, productId: string, category?: string, model?: string }) {
+    setError('')
+    const result = await api.saveProductCatalogEntry(payload)
+    setOperations(result.workspace)
+    setNotice('商品资料已保存，当前版本已立即参与本地汇总。')
+    return result.workspace
+  }
+
+  async function exportProductCatalog() {
+    const { blob, fileName } = await api.exportProductCatalog()
+    const url = URL.createObjectURL(blob)
+    const anchor = document.createElement('a')
+    anchor.href = url
+    anchor.download = fileName
+    document.body.appendChild(anchor)
+    anchor.click()
+    anchor.remove()
+    window.setTimeout(() => URL.revokeObjectURL(url), 1_000)
+  }
+
   async function previewOperationsReport(file: File) {
     return api.previewOperationsReport(file)
+  }
+
+  async function loadOperationsWorkspace(filters: { periodKind?: 'all' | OperationsPeriodKind, sourcePeriodKind?: OperationsSourcePeriodKind, start?: string, end?: string, storeName?: string }) {
+    const next = await api.operations(filters)
+    setOperations(next)
+    return next
+  }
+
+  async function loadOperationsArchive() {
+    const allReports = await api.operations({ periodKind: 'all' })
+    return { reports: allReports.reports, archive: allReports.archive }
   }
 
   async function deleteOperationsReport(id: string) {
@@ -585,6 +661,38 @@ function App() {
     await api.deleteOperationsReport(id)
     setOperations(await api.operations())
     setNotice('运营数据已删除。')
+  }
+
+  async function renameOperationsReport(id: string, fileName: string) {
+    setError('')
+    const result = await api.renameOperationsReport(id, fileName)
+    setOperations(result.workspace)
+    setNotice('归档名称已修改。')
+    return result.workspace
+  }
+
+  async function createOperationsStore(name: string) {
+    setError('')
+    const next = await api.createOperationsStore(name)
+    setOperations(next)
+    setNotice(`店铺“${name}”已添加。`)
+    return next
+  }
+
+  async function removeOperationsStore(name: string) {
+    setError('')
+    const next = await api.deleteOperationsStore(name)
+    setOperations(next)
+    setNotice(`店铺“${name}”已删除；关联报表和商品资料已改为未归属店铺。`)
+    return next
+  }
+
+  async function assignOperationsReportsStore(ids: string[], storeName: string) {
+    setError('')
+    const result = await api.assignOperationsReportsStore(ids, storeName)
+    setOperations(result.workspace)
+    setNotice(`已将 ${result.updatedCount} 份报表归属到“${storeName}”。`)
+    return result.workspace
   }
 
   async function updateOperationsProfile(payload: { principles?: string, dailyReport?: { enabled?: boolean, time?: string } }) {
@@ -605,18 +713,24 @@ function App() {
     setNotice('运营助手设置已保存。')
   }
 
-  async function updateOperationsTarget(key: string, target: OperationsTarget) {
+  async function saveOperationsSalesDeduction(payload: { storeName: string, reportDate: string, amount: number, note?: string }) {
     setError('')
-    const next = await api.updateOperationsTarget(key, target)
+    const filters = operations?.filters || { periodKind: 'all' as const }
+    await api.addOperationsSalesDeduction(payload)
+    const next = await api.operations(filters)
     setOperations(next)
-    setNotice('单品目标已保存。')
+    setNotice('销售扣除已保存，整店净 GSV、经营 ROI 与推广费率已重算。')
+    return next
   }
 
-  async function updateOperationsFeedback(id: string, status: 'adopted' | 'skipped' | 'outcome') {
+  async function removeOperationsSalesDeduction(id: string) {
     setError('')
-    const next = await api.updateOperationsSuggestionFeedback(id, { status })
+    const filters = operations?.filters || { periodKind: 'all' as const }
+    await api.deleteOperationsSalesDeduction(id)
+    const next = await api.operations(filters)
     setOperations(next)
-    setNotice(status === 'adopted' ? '建议已标记为采纳。' : '建议已标记为跳过。')
+    setNotice('销售扣除已删除，经营指标已恢复计算。')
+    return next
   }
 
   async function analyzeOperations(): Promise<OperationsAnalysis> {
@@ -628,6 +742,15 @@ function App() {
     return result.analysis
   }
 
+  async function clearOperationsAnalyses() {
+    setError('')
+    const filters = operations?.filters || { periodKind: 'all' as const }
+    const result = await api.clearOperationsAnalyses()
+    const next = await api.operations(filters)
+    setOperations(next)
+    setNotice(result.cleared ? `已清空 ${result.cleared} 条运营分析。` : '当前没有可清空的运营分析。')
+  }
+
   async function runOperationsDailyReport(): Promise<{ analysis: OperationsAnalysis, sent: boolean, sendError: string }> {
     setError('')
     setNotice('正在生成经营日报...')
@@ -635,6 +758,32 @@ function App() {
     setOperations(result.workspace)
     setNotice(result.sent ? '经营日报已发送至飞书。' : result.sendError || '经营日报已生成。')
     return result
+  }
+
+  async function activateOperationsCloudSync(payload: { endpoint?: string, code: string, deviceName?: string }) {
+    setError('')
+    setNotice('正在绑定云端团队授权...')
+    const result = await api.activateOperationsCloudSync(payload)
+    setOperations(result.workspace)
+    setNotice(`已绑定“${result.cloudSync.teamName || '团队'}”。现在可以手动同步云端数据。`)
+    return result.workspace
+  }
+
+  async function runOperationsCloudSync() {
+    setError('')
+    setNotice('正在同步云端运营数据...')
+    const result = await api.runOperationsCloudSync()
+    setOperations(result.workspace)
+    setNotice(`云端同步完成：新增 ${result.result.inserted} 份，更新 ${result.result.updated} 份，移除 ${result.result.removed} 份云端来源报表。`)
+    return result.workspace
+  }
+
+  async function disconnectOperationsCloudSync() {
+    setError('')
+    const result = await api.disconnectOperationsCloudSync()
+    setOperations(result.workspace)
+    setNotice('已断开云端团队，本机已有数据保持不变。')
+    return result.workspace
   }
 
   function openSettings(section: SettingsSection = 'accounts') {
@@ -665,12 +814,25 @@ function App() {
   const operationsAssistant = <OperationsAssistant
     workspace={operations}
     onUpload={uploadOperationsReport}
+    onUploadProductCatalog={uploadProductCatalog}
+    onSaveProductCatalogEntry={saveProductCatalogEntry}
+    onExportProductCatalog={exportProductCatalog}
     onPreview={previewOperationsReport}
     onDeleteReport={deleteOperationsReport}
-    onUpdateTarget={updateOperationsTarget}
-    onFeedback={updateOperationsFeedback}
+    onRenameReport={renameOperationsReport}
+    onCreateStore={createOperationsStore}
+    onDeleteStore={removeOperationsStore}
+    onAssignReportsStore={assignOperationsReportsStore}
+    onSaveSalesDeduction={saveOperationsSalesDeduction}
+    onDeleteSalesDeduction={removeOperationsSalesDeduction}
     onAnalyze={analyzeOperations}
+    onClearAnalyses={clearOperationsAnalyses}
     onRunDailyReport={runOperationsDailyReport}
+    onLoadWorkspace={loadOperationsWorkspace}
+    onLoadArchive={loadOperationsArchive}
+    onActivateCloudSync={activateOperationsCloudSync}
+    onRunCloudSync={runOperationsCloudSync}
+    onDisconnectCloudSync={disconnectOperationsCloudSync}
   />
   const operationsAgent = <OperationsAgentChat active={activePage === 'operations-agent'} workspace={operations} modelConfig={data.modelConfig} onOpenModelSettings={() => openSettings('models')} onUpdateProfile={updateOperationsProfile} onDeleteReport={deleteOperationsReport} />
 
@@ -689,6 +851,7 @@ function App() {
           onSchedule={saveProductSchedule}
           onMediaPreference={saveProductMediaPreference}
           onSaveSkuMonitorPrice={saveSkuMonitorPrice}
+          onSavePrimarySkuIds={savePrimarySkuIds}
           onCapture={captureProduct}
           onRetryBuyerShows={retryBuyerShows}
           onCaptureSearchMainImage={captureSearchMainImage}
@@ -702,6 +865,7 @@ function App() {
           onRefresh={refresh}
           onOpenSettings={() => openSettings('accounts')}
           batchBusy={busy}
+          batchBusyProductIds={batchBusyProductIds}
           busyProductId={busyProductId}
           monitorToggleBusy={monitorToggleBusy}
         />
@@ -754,7 +918,7 @@ function App() {
             <Search className="h-5 w-5" />
           </div>
           <div className="brand-copy">
-            <div className="font-semibold text-slate-950">电商竞品监控</div>
+            <div className="font-semibold text-slate-950">经营罗盘</div>
             <div className="text-xs text-slate-400">本地工作台</div>
           </div>
         </div>

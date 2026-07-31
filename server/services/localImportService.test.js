@@ -9,6 +9,8 @@ process.env.ECOM_MONITOR_DATA_DIR = dataDir;
 
 const {
   clearLocalEvidenceFiles,
+  clearLocalEvidenceHistoryFiles,
+  collectCurrentLocalEvidenceIds,
   createLocalImport,
   createLocalImportFromSavedSource,
   getLocalEvidenceStorageOverview,
@@ -29,6 +31,74 @@ const { updateDb } = await import("../storage/db.js");
 
 after(async () => {
   await fs.rm(dataDir, { recursive: true, force: true });
+});
+
+test("history cleanup preserves current evidence and Excel files while removing old evidence artifacts", async () => {
+  const directory = await fs.mkdtemp(path.join(dataDir, "history-cleanup-"));
+  const currentImportId = `local_${"1".repeat(32)}`;
+  const historicalImportId = `local_${"2".repeat(32)}`;
+  const currentCaptureId = `capture_${"3".repeat(32)}`;
+  const historicalCaptureId = `capture_${"4".repeat(32)}`;
+  const writeImport = (importId) => fs.writeFile(
+    path.join(directory, `${importId}.json`),
+    JSON.stringify({ origin: "automatic-capture", importId }),
+    "utf8",
+  );
+  const writeCapture = async (captureId) => {
+    await fs.writeFile(
+      path.join(directory, `${captureId}.source.txt`),
+      JSON.stringify({ captureType: "account-browser-local-source", captureId }),
+      "utf8",
+    );
+    await fs.writeFile(path.join(directory, `${captureId}.sku-0001.source.txt`), "sanitized sku evidence", "utf8");
+    await fs.writeFile(path.join(directory, `${captureId}.sku-0002.source.txt`), "sanitized sku evidence", "utf8");
+  };
+
+  await Promise.all([
+    writeImport(currentImportId),
+    writeImport(historicalImportId),
+    writeCapture(currentCaptureId),
+    writeCapture(historicalCaptureId),
+  ]);
+  const workbook = path.join(directory, "local-price-workbook.xlsx");
+  const index = path.join(directory, "local-price-index.json");
+  await fs.writeFile(workbook, "XLOOKUP and SUMIFS workbook", "utf8");
+  await fs.writeFile(index, "price index", "utf8");
+
+  const materialCaptureId = `capture_${"5".repeat(32)}`;
+  const buyerShowCaptureId = `capture_${"6".repeat(32)}`;
+  const searchCaptureId = `capture_${"7".repeat(32)}`;
+  const protection = collectCurrentLocalEvidenceIds([{
+    lastSnapshot: {
+      localImportFile: path.join(directory, `${currentImportId}.json`),
+      browserEvidenceFile: path.join(directory, `${currentCaptureId}.source.txt`),
+      materialEvidenceId: materialCaptureId,
+      buyerShowEvidenceId: buyerShowCaptureId,
+    },
+    searchMainImageEvidenceId: searchCaptureId,
+  }]);
+  assert.deepEqual(protection.protectedImportIds, [currentImportId]);
+  assert.deepEqual(protection.protectedCaptureIds, [currentCaptureId, materialCaptureId, buyerShowCaptureId, searchCaptureId]);
+
+  const result = await clearLocalEvidenceHistoryFiles(directory, protection);
+
+  assert.equal(result.deletedImportCount, 1);
+  assert.equal(result.deletedSourceFileCount, 1);
+  assert.equal(result.deletedCount, 2);
+  assert.equal(result.deletedFileCount, 4);
+  assert.equal(result.protectedImportCount, 1);
+  assert.equal(result.protectedSourceFileCount, 1);
+  assert.equal(result.fileCount, 1);
+  assert.equal(result.sourceFileCount, 1);
+  assert.ok(result.reclaimedBytes > 0);
+  await fs.access(path.join(directory, `${currentImportId}.json`));
+  await fs.access(path.join(directory, `${currentCaptureId}.source.txt`));
+  await fs.access(path.join(directory, `${currentCaptureId}.sku-0001.source.txt`));
+  await assert.rejects(fs.access(path.join(directory, `${historicalImportId}.json`)), { code: "ENOENT" });
+  await assert.rejects(fs.access(path.join(directory, `${historicalCaptureId}.source.txt`)), { code: "ENOENT" });
+  await assert.rejects(fs.access(path.join(directory, `${historicalCaptureId}.sku-0001.source.txt`)), { code: "ENOENT" });
+  await fs.access(workbook);
+  await fs.access(index);
 });
 
 function response(skuId, price1, price2, promotions) {

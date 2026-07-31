@@ -1,0 +1,18 @@
+services:
+  operations-cloud:
+    build:
+      context: ..
+      dockerfile: cloud-data-hub/Dockerfile
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      CLOUD_HUB_DATA_DIR: /data
+    ports:
+      - "${CLOUD_HUB_PORT:-4328}:4328"
+    volumes:
+      - operations-cloud-data:/data
+
+volumes:
+  operations-cloud-data:
+

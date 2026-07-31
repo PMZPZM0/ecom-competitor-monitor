@@ -46,14 +46,15 @@ test("packaged QwenPaw plugin resolves from Electron's unpacked resource directo
   const source = qwenPawBundledPluginSource({
     sourceDirectory: "D:/workspace/server/services",
     unpackedDirectory: "D:/Program Files/电商竞品监控/resources/app.asar.unpacked",
+    platform: "win32",
   });
   assert.equal(
     source,
     path.join("D:/Program Files/电商竞品监控/resources/app.asar.unpacked", "server", "qwenpaw-plugins", "ecommerce-qr-delivery"),
   );
   assert.equal(
-    qwenPawBundledPluginSource({ sourceDirectory: "D:/workspace/server/services", unpackedDirectory: "" }),
-    path.resolve("D:/workspace/server/qwenpaw-plugins/ecommerce-qr-delivery"),
+    qwenPawBundledPluginSource({ sourceDirectory: "D:/workspace/server/services", unpackedDirectory: "", platform: "win32" }),
+    path.win32.resolve("D:/workspace/server/qwenpaw-plugins/ecommerce-qr-delivery"),
   );
 });
 

@@ -8,7 +8,7 @@ import { normalizePromptStudioState } from "../services/promptStudioService.js";
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const dataDir = path.resolve(process.env.ECOM_MONITOR_DATA_DIR || path.resolve(__dirname, "../data"));
 const dbPath = path.join(dataDir, "db.json");
-export const DB_SCHEMA_VERSION = 10;
+export const DB_SCHEMA_VERSION = 14;
 
 const RENAME_RETRY_DELAYS_MS = [10, 25, 50, 100, 200];
 const RETRYABLE_RENAME_CODES = new Set(["EPERM", "EBUSY"]);
@@ -128,6 +128,9 @@ function migrateProductSchema(product) {
     ...product,
     lastSnapshot: markLegacySnapshot(product?.lastSnapshot),
     skuMonitorRules,
+    primarySkuIds: [...new Set((Array.isArray(product?.primarySkuIds) ? product.primarySkuIds : [])
+      .filter((skuId) => typeof skuId === "string" && skuId.trim())
+      .map((skuId) => skuId.trim()))].slice(0, 3),
     skuLifecycle: product?.skuLifecycle && typeof product.skuLifecycle === "object"
       ? { ...product.skuLifecycle }
       : {},

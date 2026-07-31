@@ -32,7 +32,7 @@ function injectedFsError(code) {
 
 test("database migration preserves user data and marks legacy snapshots", () => {
   const original = {
-    products: [{ id: "p1", name: "商品", lastSnapshot: { capturedAt: "2026-01-01", price: 10 } }],
+    products: [{ id: "p1", name: "商品", primarySkuIds: ["sku-a", "", "sku-a", " sku-b ", "sku-c", "sku-d"], lastSnapshot: { capturedAt: "2026-01-01", price: 10 } }],
     snapshots: [{ id: "s1", productId: "p1", capturedAt: "2026-01-01", price: 10 }],
     authSessions: [{ id: "a1", cookie: "configured" }],
     feishu: { enabled: true, cooldownEnabled: true, cooldownMinutes: 120, documentId: "doc-1" },
@@ -43,6 +43,7 @@ test("database migration preserves user data and marks legacy snapshots", () => 
   assert.equal(migration.migrated, true);
   assert.equal(migration.data.schemaVersion, DB_SCHEMA_VERSION);
   assert.equal(migration.data.products[0].name, "商品");
+  assert.deepEqual(migration.data.products[0].primarySkuIds, ["sku-a", "sku-b", "sku-c"]);
   assert.equal(migration.data.products[0].lastSnapshot.parserVersion, "legacy");
   assert.equal(migration.data.snapshots[0].resolutionStatus, "legacy");
   assert.deepEqual(migration.data.authSessions, original.authSessions);
@@ -72,12 +73,34 @@ test("database migration preserves user data and marks legacy snapshots", () => 
   assert.deepEqual(migration.data.notificationOutbox, []);
   assert.deepEqual(migration.data.operations, {
     reports: [],
+    ledgerVersion: 2,
+    ledgerSourceSignature: "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+    ledger: [],
+    storeNames: [],
+    productCatalog: [],
+    productCatalogSource: { fileName: "", updatedAt: null },
     targets: {},
     feedback: [],
     chat: [],
+    salesDeductions: [],
     principles: "",
     qwenPawInstallDirectory: defaultQwenPawInstallDirectory(),
     qwenPawAlerts: { belowThresholdTargets: [], loginExpiredTargets: [] },
+    cloudSync: {
+      endpoint: "https://jvspp.cloud",
+      deviceId: "",
+      deviceName: os.hostname().slice(0, 80),
+      tokenEncrypted: "",
+      teamId: "",
+      teamName: "",
+      storeNames: [],
+      lastCursor: 0,
+      scopeVersion: 0,
+      lastSyncAt: null,
+      lastSyncResult: "",
+      lastError: "",
+      connected: false,
+    },
     dailyReport: { enabled: false, time: "09:30", lastRunAt: null, lastSentAt: null, lastError: "" },
     analyses: [],
   });
@@ -86,6 +109,35 @@ test("database migration preserves user data and marks legacy snapshots", () => 
   assert.deepEqual(migration.data.products[0].skuMonitorRules, {});
   assert.deepEqual(migration.data.products[0].skuLifecycle, {});
   assert.equal(original.products[0].lastSnapshot.parserVersion, undefined);
+});
+
+test("schema v13 backfills the local operations ledger without deleting original reports", () => {
+  const report = {
+    id: "ops_product_1",
+    type: "product",
+    storeName: "店铺A",
+    reportDate: "2026-07-26",
+    periodStart: "2026-07-26",
+    periodEnd: "2026-07-26",
+    periodKind: "day",
+    fileName: "商品排行.csv",
+    kind: "csv",
+    rows: [
+      { productId: "1001", productName: "电饭煲A", grossRevenue: 1000, revenue: 900, refundAmount: 100, refundDataAvailable: true },
+      { productId: "1001", productName: "电饭煲A", grossRevenue: 500, revenue: 450, refundAmount: 50, refundDataAvailable: true },
+    ],
+    importedAt: "2026-07-27T08:00:00.000Z",
+  };
+  const migration = migrateDbDocument({ schemaVersion: 12, products: [], snapshots: [], operations: { reports: [report] } });
+
+  assert.equal(migration.migrated, true);
+  assert.equal(migration.data.operations.reports[0].rows.length, 2);
+  assert.equal(migration.data.operations.ledgerVersion, 2);
+  assert.equal(migration.data.operations.ledger.length, 1);
+  assert.equal(migration.data.operations.ledger[0].sourceReportId, "ops_product_1");
+  assert.equal(migration.data.operations.ledger[0].grossRevenue, 1500);
+  assert.equal(migration.data.operations.ledger[0].refundAmount, 150);
+  assert.equal(migration.data.operations.ledger[0].revenue, 1350);
 });
 
 test("database migration filters malformed prompt studio assets", () => {

@@ -11,7 +11,11 @@ type OperationsPrinciplesProps = {
 }
 
 const reportTypeLabels: Record<OperationsReportType, string> = {
-  promotion: '推广报表',
+  campaign: '单品推广',
+  promotion: '类目付费',
+  product: '商品经营',
+  category: '品类经营',
+  scenario: '类目付费',
   market: '大盘数据',
   audience: '人群数据',
   competitor: '竞品人群',

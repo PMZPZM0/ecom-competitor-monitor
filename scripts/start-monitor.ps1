@@ -38,7 +38,7 @@ for ($i = 0; $i -lt 30; $i++) {
 }
 
 if (-not ((Test-Url $ApiUrl) -and (Test-Url $AppUrl))) {
-  throw "Ecom Monitor startup failed: local frontend or backend was not ready within 30 seconds."
+  throw "Business Compass failed to start: local frontend or backend was not ready within 30 seconds."
 }
 
 Start-Process $AppUrl

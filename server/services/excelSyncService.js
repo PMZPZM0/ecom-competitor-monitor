@@ -4,8 +4,8 @@ import ExcelJS from "exceljs";
 import { dbRuntimeInfo, readDb } from "../storage/db.js";
 import { PRICE_PROMOTION_INDEX } from "./priceResolver.js";
 
-const WORKBOOK_NAME = "电商竞品监控-价格自动同步.xlsx";
-const PRICE_INDEX_NAME = "电商竞品监控-价格索引.json";
+const WORKBOOK_NAME = "经营罗盘-价格自动同步.xlsx";
+const PRICE_INDEX_NAME = "经营罗盘-价格索引.json";
 const CHANNEL_KINDS = ["normal", "billion", "seckill", "government", "surprise", "gift", "vip88", "coin"];
 const channelFields = [
   ["标价", "originalPrice", "list"],
@@ -490,7 +490,7 @@ export async function syncPriceWorkbook(dbDocument = null) {
       rows: indexRows,
     }, null, 2)));
     const workbook = new ExcelJS.Workbook();
-    workbook.creator = "电商竞品监控";
+    workbook.creator = "经营罗盘";
     workbook.created = new Date();
     workbook.modified = new Date();
     workbook.calcProperties.fullCalcOnLoad = true;
@@ -503,7 +503,7 @@ export async function syncPriceWorkbook(dbDocument = null) {
     addFormulaSheet(workbook, dataset.current, dataset.promotions.length);
     const status = workbook.addWorksheet("同步说明", { properties: { showGridLines: false } });
     status.addRows([
-      ["电商竞品监控 · 本地 Excel 公式引擎", ""],
+      ["经营罗盘 · 本地 Excel 公式引擎", ""],
       ["最后同步", new Date()],
       ["当前价格行数", dataset.current.length],
       ["历史价格行数", dataset.history.length],

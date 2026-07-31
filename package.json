@@ -1,8 +1,8 @@
 {
   "name": "tmall-competitor-monitor",
-  "productName": "电商竞品监控",
+  "productName": "经营罗盘",
   "private": true,
-  "version": "1.0.33",
+  "version": "1.0.35",
   "type": "module",
   "main": "electron/main.mjs",
   "scripts": {

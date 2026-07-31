@@ -307,7 +307,9 @@ export function mergeCapturedProduct(current, captured) {
     name: captured.name,
     shopName: captured.shopName,
     shopLogo: captured.shopLogo,
-    model: captured.model,
+    // Metadata may be absent from one otherwise valid price capture. Keep a
+    // previously verified local-evidence model instead of erasing it.
+    model: captured.model || current?.model || current?.lastSnapshot?.model || "",
     itemId: captured.itemId,
     autoGroup: captured.autoGroup,
     mainImage: captured.mainImage,
@@ -387,6 +389,9 @@ function mergeCapturedSnapshotState(currentProduct, result) {
     };
   }
   const snapshot = applySkuVerificationHistory(result.snapshot, currentProduct?.lastSnapshot);
+  const retainedModel = snapshot.model || currentProduct?.model || currentProduct?.lastSnapshot?.model || "";
+  snapshot.model = retainedModel;
+  result.product.model ||= retainedModel;
   result.snapshot = snapshot;
   result.product = { ...result.product, lastSnapshot: snapshot };
   const product = {

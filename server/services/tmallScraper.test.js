@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import fs from "node:fs/promises";
 import test from "node:test";
-import { applyAppliedCoinDiscount, applyMediaCapturePreference, applyNetworkPromoData, applyVisibleDiscountItems, applyVisibleSurprisePrice, buildBrowserCaptureEvidence, buyerShowCaptureFromNetwork, buyerShowsFromRateDetail, calculateAccountPriceScenario, calculatePriceScenarios, collectDiscountItems, collectDiscountItemsFromText, collectProductProgramItems, collectVisibleSurprisePrices, extractBuyerShowItems, extractEmbeddedPromotionComponent, extractSearchMainImage, extractSelectedSkuId, extractShopName, extractStructuredSku, filterProductVideoUrls, hasCurrentSkuPriceData, hasTmallPriceLoginGate, hydrateBrowserCapturePage, isUnselectablePromotionSku, resolveCaptureAccessMode, resolveCoinBenefit, resolveLocalSkuPriceRows, resolveSkuPrices, scrapeTmallBuyerShows, scrapeTmallMaterials, scrapeTmallProduct, searchMainImageQueries, selectGalleryImages, selectSquareMainImage, sellerIdFromProductMedia, shouldRequireTmallPriceAuthorization } from "./tmallScraper.js";
+import { applyAppliedCoinDiscount, applyMediaCapturePreference, applyNetworkPromoData, applyVisibleDiscountItems, applyVisibleSurprisePrice, buildBrowserCaptureEvidence, buyerShowCaptureFromNetwork, buyerShowsFromRateDetail, calculateAccountPriceScenario, calculatePriceScenarios, collectDiscountItems, collectDiscountItemsFromText, collectProductProgramItems, collectVisibleSurprisePrices, extractBuyerShowItems, extractEmbeddedPromotionComponent, extractProductMetadataFromLocalEvidence, extractSearchMainImage, extractSelectedSkuId, extractShopName, extractStructuredSku, filterProductVideoUrls, hasCurrentSkuPriceData, hasTmallPriceLoginGate, hydrateBrowserCapturePage, isUnselectablePromotionSku, resolveCaptureAccessMode, resolveCoinBenefit, resolveLocalSkuPriceRows, resolveSkuPrices, scrapeTmallBuyerShows, scrapeTmallMaterials, scrapeTmallProduct, searchMainImageQueries, selectGalleryImages, selectSquareMainImage, sellerIdFromProductMedia, shouldRequireTmallPriceAuthorization } from "./tmallScraper.js";
 import { resolveEmbeddedSkuPriceEvidence } from "./priceResolver.js";
 
 test("Tmall scraper has no Node-side price fetch escape hatch", async () => {
@@ -330,6 +330,26 @@ test("browser evidence stores loaded page data once without account credentials"
 
 test("Tmall Supermarket final URLs override generic shop-page noise", () => {
   assert.equal(extractShopName('{"shopName":"免费开店"}', { shopName: "免费开店" }, { shopName: "" }, "https://chaoshi.detail.tmall.com/item.htm?id=838302541852"), "天猫超市");
+});
+
+test("local metadata recognizes title/text parameter rows for the product model", () => {
+  const evidence = JSON.stringify({
+    extensionInfoVO: {
+      infos: [{
+        items: [
+          { title: "型号", text: ["SY-30FC3077Q"] },
+          { title: "容量", text: ["3L"] },
+        ],
+      }],
+    },
+  });
+  assert.equal(extractProductMetadataFromLocalEvidence(evidence).model, "SY-30FC3077Q");
+});
+
+test("local metadata reads a model parameter from a saved nested response body", () => {
+  const response = JSON.stringify({ extensionInfoVO: { infos: [{ items: [{ title: "型号", text: ["SY-30FC3077Q"] }] }] } });
+  const evidence = JSON.stringify({ page: { networkPayloads: [{ body: response }] } });
+  assert.equal(extractProductMetadataFromLocalEvidence(evidence).model, "SY-30FC3077Q");
 });
 
 test("filters only an unavailable review-rebate pseudo SKU", () => {

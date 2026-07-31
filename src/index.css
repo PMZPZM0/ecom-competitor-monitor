@@ -208,7 +208,7 @@ body {
 
 @container (min-width: 760px) {
   .product-list-card-grid {
-    grid-template-columns: 28px minmax(250px, 1fr) minmax(104px, 0.35fr) auto;
+    grid-template-columns: 28px minmax(250px, 1fr) minmax(290px, 0.7fr) auto;
     min-height: 5.5rem;
   }
 

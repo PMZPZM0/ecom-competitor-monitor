@@ -47,6 +47,8 @@ import { discoverAvailableModels, MODEL_CHANNEL_IDS, ModelApiError, publicModelC
 import { analyzeProductImages, generatePromptSet, generatePromptSetLocally, interpretQuickPrompt, interpretQuickPromptLocally, normalizePromptStudioState, productFactsSchema, promptLibraryTemplateIdSchema, QUICK_PROMPT_PIPELINE_VERSION, styleSchema, validatePromptStudioInput, validateQuickPromptInput, writeFreeformImagePrompt } from "./services/promptStudioService.js";
 import {
   clearLocalEvidenceFiles,
+  clearLocalEvidenceHistoryFiles,
+  collectCurrentLocalEvidenceIds,
   createLocalImport,
   getLocalEvidenceStorageOverview,
   loadLocalImportRecord,
@@ -59,15 +61,20 @@ import { isAllowedLocalRequest, localCorsOptions } from "./utils/localOrigin.js"
 import { cleanupEvidenceRetention } from "./services/evidenceRetentionService.js";
 import {
   OPERATIONS_MAX_UPLOAD_BYTES,
-  OPERATIONS_REPORT_TYPES,
+  OPERATIONS_PERIOD_KINDS,
   analyzeOperationsWorkspace,
   askOperationsAgent,
   buildOperationsWorkspace,
+  clearOperationsAnalyses,
+  createProductCatalogEntries,
   createOperationsReport,
   isSupportedOperationsFile,
   normalizeOperationsState,
+  OPERATIONS_REPORT_INPUT_TYPES,
+  unassignOperationsStore,
   operationsAgentContextText,
   parseOperationsFile,
+  parseProductCatalogFile,
   normalizeUploadedFilename,
   persistOperationsScreenshot,
   prepareQwenPawOperationsSkill,
@@ -77,6 +84,12 @@ import {
   startQwenPawOperationsConsole,
   stopQwenPawOperationsConsole,
 } from "./services/operationsAssistantService.js";
+import {
+  activateCloudSync,
+  disconnectCloudSync,
+  publicCloudSync,
+  syncCloudReports,
+} from "./services/cloudSyncService.js";
 import {
   normalizeQwenPawInstallDirectory,
   qwenPawInstallTaskStatus,
@@ -132,6 +145,7 @@ function runtimeInfo() {
 
 export const app = express();
 const pendingScans = new Map();
+const pendingScanSyncTasks = new Map();
 const qwenPawLoginQrTasks = new Map();
 const pendingQuickPromptRequests = new Map();
 const pendingBrowserPorts = new Set();
@@ -531,9 +545,6 @@ app.get("/api/health", async (_req, res) => {
 });
 
 app.get("/api/overview", async (_req, res) => {
-  // This is a disk-only metadata repair for older captures. It never opens a
-  // browser, changes a price, or causes any external traffic.
-  await backfillMissingProductModelsFromLocalEvidence();
   const db = await readDb();
   const latestSnapshots = db.snapshots.slice(-100).reverse();
   res.json({
@@ -551,9 +562,23 @@ app.get("/api/overview", async (_req, res) => {
   });
 });
 
-function operationsWorkspacePayload(db) {
+function operationsReportMetadata(report) {
   return {
-    ...buildOperationsWorkspace(db.operations),
+    ...report,
+    rowCount: report.rows.length,
+    rows: [],
+  };
+}
+
+function operationsWorkspacePayload(db, filters = {}) {
+  const state = normalizeOperationsState(db.operations);
+  const workspace = buildOperationsWorkspace(state, { filters });
+  return {
+    ...workspace,
+    // Raw reports stay on disk for traceability, but dashboard pages only
+    // need their metadata. Returning every spreadsheet row made a simple
+    // date switch transfer and render far more data than the ledger query.
+    reports: workspace.reports.map(operationsReportMetadata),
     qwenPaw: qwenPawRuntimeStatus(db.operations?.qwenPawInstallDirectory),
   };
 }
@@ -724,7 +749,67 @@ async function scheduleOperationsDailyReport() {
 }
 
 app.get("/api/operations", async (_req, res) => {
-  res.json(operationsWorkspacePayload(await readDb()));
+  const query = z.object({
+    periodKind: z.enum(["all", ...OPERATIONS_PERIOD_KINDS]).optional().default("all"),
+    sourcePeriodKind: z.enum(["auto", "all", ...OPERATIONS_PERIOD_KINDS]).optional().default("all"),
+    start: z.string().regex(/^$|^\d{4}-\d{2}-\d{2}$/).optional().default(""),
+    end: z.string().regex(/^$|^\d{4}-\d{2}-\d{2}$/).optional().default(""),
+    storeName: z.string().trim().max(80).optional().default(""),
+  }).parse(_req.query);
+  res.json(operationsWorkspacePayload(await readDb(), query));
+});
+
+app.get("/api/operations/cloud-sync", async (_req, res) => {
+  const state = normalizeOperationsState((await readDb()).operations);
+  res.json(publicCloudSync(state.cloudSync));
+});
+
+app.post("/api/operations/cloud-sync/activate", async (req, res) => {
+  const input = z.object({
+    endpoint: z.string().trim().max(300).optional().default(""),
+    code: z.string().trim().min(8).max(40),
+    deviceName: z.string().trim().max(80).optional().default(""),
+  }).strict().parse(req.body || {});
+  let cloudSync = null;
+  await updateDb(async (db) => {
+    const state = normalizeOperationsState(db.operations);
+    cloudSync = await activateCloudSync(state.cloudSync, {
+      ...input,
+      appVersion: currentVersion(),
+    });
+    db.operations = normalizeOperationsState({ ...state, cloudSync });
+    return db;
+  });
+  res.json({ cloudSync: publicCloudSync(cloudSync), workspace: operationsWorkspacePayload(await readDb()) });
+});
+
+app.post("/api/operations/cloud-sync/disconnect", async (_req, res) => {
+  await updateDb((db) => {
+    const state = normalizeOperationsState(db.operations);
+    db.operations = normalizeOperationsState({ ...state, cloudSync: disconnectCloudSync(state.cloudSync) });
+    return db;
+  });
+  res.json({ cloudSync: publicCloudSync(normalizeOperationsState((await readDb()).operations).cloudSync), workspace: operationsWorkspacePayload(await readDb()) });
+});
+
+app.post("/api/operations/cloud-sync/run", async (_req, res) => {
+  let result = null;
+  await updateDb(async (db) => {
+    const state = normalizeOperationsState(db.operations);
+    try {
+      const synced = await syncCloudReports({ cloudSync: state.cloudSync, reports: state.reports });
+      result = synced.result;
+      db.operations = normalizeOperationsState({ ...state, reports: synced.reports, cloudSync: synced.cloudSync });
+    } catch (error) {
+      db.operations = normalizeOperationsState({
+        ...state,
+        cloudSync: { ...state.cloudSync, lastError: error?.message || "云端同步失败。" },
+      });
+      throw error;
+    }
+    return db;
+  });
+  res.json({ result, workspace: operationsWorkspacePayload(await readDb()) });
 });
 
 app.get("/api/operations/agent-context", async (_req, res) => {
@@ -766,16 +851,96 @@ app.post("/api/operations/reports/preview", parseOperationsUpload, async (req, r
     kind: parsed.kind,
     columns: parsed.columns,
     rowCount: parsed.rows.length,
+    period: parsed.period || null,
+    detectedType: parsed.detectedType || null,
     sampleRows: parsed.rows.slice(0, 12),
   });
+});
+
+function csvValue(value) {
+  const source = String(value ?? "");
+  return /[",\r\n]/.test(source) ? `"${source.replace(/"/g, '""')}"` : source;
+}
+
+function latestProductCatalogEntries(entries = []) {
+  const latest = new Map();
+  // Catalog records are append-only. Iterating in stored order intentionally
+  // makes the last record for each store + product ID the active version.
+  for (const entry of entries) {
+    const key = `${String(entry.storeName || "").trim().toLowerCase()}\u0000${String(entry.productId || "").trim()}`;
+    latest.set(key, entry);
+  }
+  return [...latest.values()].sort((left, right) => (
+    String(left.storeName || "").localeCompare(String(right.storeName || ""), "zh-CN")
+    || String(left.category || "").localeCompare(String(right.category || ""), "zh-CN")
+    || String(left.productId || "").localeCompare(String(right.productId || ""))
+  ));
+}
+
+app.post("/api/operations/product-catalog/import", parseOperationsUpload, async (req, res) => {
+  if (!req.file) throw Object.assign(new Error("请选择 ID 型号表。"), { status: 400 });
+  const parsed = await parseProductCatalogFile(req.file);
+  const sourceName = normalizeUploadedFilename(req.file.originalname);
+  const entries = createProductCatalogEntries(parsed.entries, { sourceName });
+  await updateDb((db) => {
+    const state = normalizeOperationsState(db.operations);
+    db.operations = normalizeOperationsState({
+      ...state,
+      productCatalog: [...state.productCatalog, ...entries],
+      productCatalogSource: { fileName: sourceName, updatedAt: new Date().toISOString() },
+    });
+    return db;
+  });
+  res.status(201).json({
+    importedCount: entries.length,
+    skippedRows: parsed.skippedRows,
+    workspace: operationsWorkspacePayload(await readDb()),
+  });
+});
+
+app.post("/api/operations/product-catalog", async (req, res) => {
+  const input = z.object({
+    storeName: z.string().trim().min(1).max(80),
+    productId: z.string().trim().min(1).max(80),
+    category: z.string().trim().max(80).optional().default(""),
+    model: z.string().trim().max(80).optional().default(""),
+  }).strict().parse(req.body);
+  if (!input.category && !input.model) {
+    throw Object.assign(new Error("型号和品类至少填写一项。"), { status: 400 });
+  }
+  const [entry] = createProductCatalogEntries([input], { sourceName: "手工维护" });
+  await updateDb((db) => {
+    const state = normalizeOperationsState(db.operations);
+    db.operations = normalizeOperationsState({
+      ...state,
+      productCatalog: [...state.productCatalog, entry],
+      productCatalogSource: { fileName: "手工维护", updatedAt: entry.createdAt },
+    });
+    return db;
+  });
+  res.status(201).json({ entry, workspace: operationsWorkspacePayload(await readDb()) });
+});
+
+app.get("/api/operations/product-catalog/export", async (_req, res) => {
+  const state = normalizeOperationsState((await readDb()).operations);
+  const rows = latestProductCatalogEntries(state.productCatalog);
+  const csv = [
+    ["店铺名", "ID", "品类名", "型号"].join(","),
+    ...rows.map((entry) => [entry.storeName, entry.productId, entry.category, entry.model].map(csvValue).join(",")),
+  ].join("\r\n");
+  res.setHeader("Content-Disposition", "attachment; filename*=UTF-8''%E5%95%86%E5%93%81ID%E5%9E%8B%E5%8F%B7%E8%A1%A8-%E6%9C%80%E6%96%B0.csv");
+  res.type("text/csv; charset=utf-8").send(`\uFEFF${csv}`);
 });
 
 app.post("/api/operations/reports", parseOperationsUpload, async (req, res) => {
   if (!req.file) throw Object.assign(new Error("请选择要导入的报表或截图。"), { status: 400 });
   const input = z.object({
-    type: z.enum(OPERATIONS_REPORT_TYPES),
+    type: z.enum(OPERATIONS_REPORT_INPUT_TYPES),
     storeName: z.string().trim().max(80).optional().default(""),
     reportDate: z.string().trim().max(40).optional().default(""),
+    periodKind: z.enum(OPERATIONS_PERIOD_KINDS).optional(),
+    periodStart: z.string().trim().max(40).optional().default(""),
+    periodEnd: z.string().trim().max(40).optional().default(""),
     sourceName: z.string().trim().max(80).optional().default(""),
   }).strict().parse(req.body);
   const parsed = await parseOperationsFile(req.file);
@@ -788,7 +953,39 @@ app.post("/api/operations/reports", parseOperationsUpload, async (req, res) => {
     db.operations = normalizeOperationsState({ ...state, reports: [...state.reports, report] });
     return db;
   });
-  res.status(201).json({ report, workspace: operationsWorkspacePayload(await readDb()) });
+  res.status(201).json({ report: operationsReportMetadata(report), workspace: operationsWorkspacePayload(await readDb()) });
+});
+
+app.patch("/api/operations/reports/bulk-store", async (req, res) => {
+  const input = z.object({
+    ids: z.array(z.string().trim().min(1)).min(1).max(200),
+    storeName: z.string().trim().min(1).max(80),
+  }).strict().parse(req.body);
+  const selectedIds = new Set(input.ids);
+  let updatedCount = 0;
+  await updateDb((db) => {
+    const state = normalizeOperationsState(db.operations);
+    const availableStoreNames = new Set([
+      ...state.storeNames,
+      ...state.reports.map((report) => report.storeName),
+    ].filter(Boolean));
+    if (!availableStoreNames.has(input.storeName)) {
+      throw Object.assign(new Error("请选择已有店铺；新店铺请在导入区先添加。"), { status: 409, code: "OPERATIONS_STORE_NOT_FOUND" });
+    }
+    const reports = state.reports.map((report) => {
+      if (!selectedIds.has(report.id)) return report;
+      updatedCount += 1;
+      return { ...report, storeName: input.storeName };
+    });
+    db.operations = normalizeOperationsState({
+      ...state,
+      storeNames: [...state.storeNames, input.storeName],
+      reports,
+    });
+    return db;
+  });
+  if (!updatedCount) return res.status(404).json({ message: "未找到可归属的运营报表。" });
+  res.json({ updatedCount, workspace: operationsWorkspacePayload(await readDb()) });
 });
 
 app.delete("/api/operations/reports/:id", async (req, res) => {
@@ -802,6 +999,55 @@ app.delete("/api/operations/reports/:id", async (req, res) => {
   if (!removed) return res.status(404).json({ message: "运营数据不存在或已删除。" });
   if (removed.screenshotPath) await fs.promises.rm(removed.screenshotPath, { force: true }).catch(() => undefined);
   res.status(204).end();
+});
+
+app.patch("/api/operations/reports/:id", async (req, res) => {
+  const input = z.object({
+    fileName: z.string().trim().min(1).max(160),
+  }).strict().parse(req.body);
+  let renamed = null;
+  await updateDb((db) => {
+    const state = normalizeOperationsState(db.operations);
+    const reports = state.reports.map((report) => {
+      if (report.id !== req.params.id) return report;
+      renamed = { ...report, fileName: normalizeUploadedFilename(input.fileName) };
+      return renamed;
+    });
+    db.operations = normalizeOperationsState({ ...state, reports });
+    return db;
+  });
+  if (!renamed) return res.status(404).json({ message: "运营数据不存在或已删除。" });
+  res.json({ report: operationsReportMetadata(renamed), workspace: operationsWorkspacePayload(await readDb()) });
+});
+
+app.post("/api/operations/stores", async (req, res) => {
+  const input = z.object({ name: z.string().trim().min(1).max(80) }).strict().parse(req.body);
+  await updateDb((db) => {
+    const state = normalizeOperationsState(db.operations);
+    const knownStoreNames = [
+      ...state.storeNames,
+      ...state.reports.map((report) => report.storeName),
+    ].filter(Boolean);
+    const exists = knownStoreNames.some((name) => name.localeCompare(input.name, "zh-CN", { sensitivity: "accent" }) === 0);
+    db.operations = normalizeOperationsState({
+      ...state,
+      storeNames: exists ? state.storeNames : [...state.storeNames, input.name],
+    });
+    return db;
+  });
+  res.status(201).json(operationsWorkspacePayload(await readDb()));
+});
+
+app.delete("/api/operations/stores/:name", async (req, res) => {
+  let result = null;
+  await updateDb((db) => {
+    const state = normalizeOperationsState(db.operations);
+    result = unassignOperationsStore(state, req.params.name);
+    if (result) db.operations = result.state;
+    return db;
+  });
+  if (!result) return res.status(404).json({ message: "店铺不存在，或“未归属店铺”不能删除。" });
+  res.json(operationsWorkspacePayload(await readDb()));
 });
 
 app.patch("/api/operations/profile", async (req, res) => {
@@ -824,6 +1070,547 @@ app.patch("/api/operations/profile", async (req, res) => {
   await scheduleOperationsDailyReport();
   res.json(operationsWorkspacePayload(await readDb()));
 });
+
+app.post("/api/operations/sales-deductions", async (req, res) => {
+  const input = z.object({
+    storeName: z.string().trim().min(1).max(80),
+    reportDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
+    amount: z.coerce.number().positive().max(1_000_000_000),
+    note: z.string().trim().max(240).optional().default(""),
+  }).strict().parse(req.body);
+  const deduction = {
+    id: `ops_deduction_${crypto.randomUUID()}`,
+    ...input,
+    createdAt: new Date().toISOString(),
+  };
+  await updateDb((db) => {
+    const state = normalizeOperationsState(db.operations);
+    db.operations = normalizeOperationsState({
+      ...state,
+      salesDeductions: [...state.salesDeductions, deduction],
+    });
+    return db;
+  });
+  res.status(201).json({ deduction, workspace: operationsWorkspacePayload(await readDb()) });
+});
+
+app.delete("/api/operations/sales-deductions/:id", async (req, res) => {
+  const id = z.string().trim().min(1).max(80).parse(req.params.id);
+  let removed = false;
+  await updateDb((db) => {
+    const state = normalizeOperationsState(db.operations);
+    const salesDeductions = state.salesDeductions.filter((item) => {
+      const keep = item.id !== id;
+      if (!keep) removed = true;
+      return keep;
+    });
+    if (!removed) throw Object.assign(new Error("未找到该销售扣除记录。"), { status: 404 });
+    db.operations = normalizeOperationsState({ ...state, salesDeductions });
+    return db;
+  });
+  res.status(204).end();
+});
+
+/* Removed merchant-browser report automation. Operations data is manual-import only.
+function merchantAutomationPayload(operations) {
+  const automation = normalizeMerchantAutomation(operations?.merchantAutomation);
+  const desktopLastSeen = Date.parse(automation.runtime?.lastSeenAt || "");
+  const sogouInstalled = Boolean(listBrowserEngines().engines.find((engine) => engine.id === "sogou")?.available);
+  return {
+    ...automation,
+    tasks: MERCHANT_REPORT_TASKS,
+    downloadRoot: merchantAutomationDownloadRoot(dbRuntimeInfo().dataDir),
+    desktopReady: Number.isFinite(desktopLastSeen) && Date.now() - desktopLastSeen < 15_000,
+    sogouInstalled,
+  };
+}
+
+function assertMerchantSogouInstalled() {
+  const installed = listBrowserEngines().engines.find((engine) => engine.id === "sogou")?.available;
+  if (installed) return;
+  throw Object.assign(new Error("搜狗浏览器尚未安装，无法打开商家登录页。请先点击“安装搜狗”完成官方安装。"), {
+    status: 409,
+    code: "SOGOU_BROWSER_NOT_INSTALLED",
+  });
+}
+
+async function recoverMerchantAutomationAfterRestart() {
+  await updateDb((db) => {
+    const state = normalizeOperationsState(db.operations);
+    const automation = normalizeMerchantAutomation(state.merchantAutomation);
+    let changed = false;
+    const recoveredAt = new Date().toISOString();
+    const stores = automation.stores.map((store) => {
+      let storeChanged = false;
+      const taskStatus = Object.fromEntries(Object.entries(store.taskStatus).map(([taskId, task]) => {
+        if (!["queued", "running", "waiting"].includes(task.state)) return [taskId, task];
+        changed = true;
+        storeChanged = true;
+        return [taskId, {
+          ...task,
+          state: "idle",
+          message: "上次任务未完成，已停止，可重新下载。",
+          fileName: "",
+          updatedAt: recoveredAt,
+        }];
+      }));
+      return storeChanged ? { ...store, taskStatus } : store;
+    });
+    const runs = automation.runs.map((run) => {
+      if (!["queued", "running", "waiting"].includes(run.state)) return run;
+      changed = true;
+      return {
+        ...run,
+        state: "failed",
+        message: "上次任务未完成，重启后已停止，可重新下载。",
+        completedAt: recoveredAt,
+      };
+    });
+    if (!changed) return db;
+    db.operations = normalizeOperationsState({ ...state, merchantAutomation: { ...automation, stores, runs } });
+    return db;
+  });
+}
+
+async function ensureMerchantStoreBrowserProfile(storeId) {
+  const current = await readDb();
+  const currentState = normalizeOperationsState(current.operations);
+  const currentAutomation = normalizeMerchantAutomation(currentState.merchantAutomation);
+  const store = merchantStoreOrError(currentAutomation, storeId);
+  if (store.browserPort) return store;
+  const reservedPorts = [
+    ...current.authSessions.map((session) => session.browserPort),
+    ...(Array.isArray(current.pendingAuthScans) ? current.pendingAuthScans.map((scan) => scan.browserPort) : []),
+    ...currentAutomation.stores.map((item) => item.browserPort),
+    ...pendingBrowserPorts,
+  ];
+  const browserPort = await findAvailableBrowserPort(reservedPorts);
+  let updated;
+  await updateDb((db) => {
+    const state = normalizeOperationsState(db.operations);
+    const automation = normalizeMerchantAutomation(state.merchantAutomation);
+    const stores = automation.stores.map((item) => {
+      if (item.id !== storeId) return item;
+      updated = {
+        ...item,
+        browserEngine: "sogou",
+        browserProfileKey: item.browserProfileKey || `merchant_${item.id.replace(/[^a-z0-9_-]/gi, "_")}`,
+        browserPort,
+      };
+      return updated;
+    });
+    db.operations = normalizeOperationsState({ ...state, merchantAutomation: { ...automation, stores } });
+    return db;
+  });
+  return updated;
+}
+
+function merchantStoreOrError(automation, storeId) {
+  const store = automation.stores.find((item) => item.id === storeId);
+  if (!store) throw Object.assign(new Error("未找到商家报表店铺。"), { status: 404 });
+  return store;
+}
+
+function isInsideDirectory(filePath, directory) {
+  const root = path.resolve(directory);
+  const target = path.resolve(filePath);
+  return target === root || target.startsWith(`${root}${path.sep}`);
+}
+
+function merchantFileMimeType(fileName) {
+  const extension = path.extname(fileName).toLowerCase();
+  if (extension === ".csv") return "text/csv";
+  if (extension === ".xls") return "application/vnd.ms-excel";
+  if (extension === ".xlsx") return "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet";
+  return "application/octet-stream";
+}
+
+app.get("/api/operations/merchant-automation", async (_req, res) => {
+  const db = await readDb();
+  res.json(merchantAutomationPayload(db.operations));
+});
+
+app.patch("/api/operations/merchant-automation", async (req, res) => {
+  const patch = z.object({
+    enabled: z.boolean().optional(),
+    time: z.string().regex(/^\d{2}:\d{2}$/).optional(),
+  }).strict().parse(req.body);
+  await updateDb((db) => {
+    const state = normalizeOperationsState(db.operations);
+    db.operations = normalizeOperationsState({
+      ...state,
+      merchantAutomation: { ...state.merchantAutomation, ...patch },
+    });
+    return db;
+  });
+  const db = await readDb();
+  res.json(merchantAutomationPayload(db.operations));
+});
+
+app.post("/api/operations/merchant-automation/sogou/install", (_req, res) => {
+  res.status(202).json(startSogouBrowserInstall());
+});
+
+app.post("/api/operations/merchant-automation/stores", async (req, res) => {
+  const input = z.object({ name: z.string().trim().min(1).max(80) }).strict().parse(req.body);
+  const current = await readDb();
+  const currentAutomation = normalizeMerchantAutomation(normalizeOperationsState(current.operations).merchantAutomation);
+  const browserPort = await findAvailableBrowserPort([
+    ...current.authSessions.map((session) => session.browserPort),
+    ...(Array.isArray(current.pendingAuthScans) ? current.pendingAuthScans.map((scan) => scan.browserPort) : []),
+    ...currentAutomation.stores.map((store) => store.browserPort),
+    ...pendingBrowserPorts,
+  ]);
+  let created;
+  await updateDb((db) => {
+    const state = normalizeOperationsState(db.operations);
+    const automation = normalizeMerchantAutomation(state.merchantAutomation);
+    if (automation.stores.some((store) => store.name === input.name)) {
+      throw Object.assign(new Error("该店铺已配置商家报表自动下载。"), { status: 409 });
+    }
+    created = {
+      id: crypto.randomUUID(),
+      name: input.name,
+      enabled: true,
+      browserEngine: "sogou",
+      browserProfileKey: "",
+      browserPort,
+      sessionState: "unconfigured",
+      lastCheckedAt: null,
+    lastRunAt: null,
+    lastError: "",
+    credentialsConfigured: false,
+    credentialsUpdatedAt: null,
+      taskStatus: {},
+      createdAt: new Date().toISOString(),
+    };
+    db.operations = normalizeOperationsState({
+      ...state,
+      merchantAutomation: { ...automation, stores: [...automation.stores, created] },
+    });
+    return db;
+  });
+  res.status(201).json({ store: created, automation: merchantAutomationPayload((await readDb()).operations) });
+});
+
+app.patch("/api/operations/merchant-automation/stores/:id", async (req, res) => {
+  const input = z.object({
+    name: z.string().trim().min(1).max(80).optional(),
+    enabled: z.boolean().optional(),
+  }).strict().parse(req.body);
+  const storeId = String(req.params.id || "");
+  await updateDb((db) => {
+    const state = normalizeOperationsState(db.operations);
+    const automation = normalizeMerchantAutomation(state.merchantAutomation);
+    merchantStoreOrError(automation, storeId);
+    const stores = automation.stores.map((store) => store.id === storeId ? { ...store, ...input } : store);
+    db.operations = normalizeOperationsState({ ...state, merchantAutomation: { ...automation, stores } });
+    return db;
+  });
+  res.json(merchantAutomationPayload((await readDb()).operations));
+});
+
+app.delete("/api/operations/merchant-automation/stores/:id", async (req, res) => {
+  const storeId = String(req.params.id || "");
+  await updateDb((db) => {
+    const state = normalizeOperationsState(db.operations);
+    const automation = normalizeMerchantAutomation(state.merchantAutomation);
+    merchantStoreOrError(automation, storeId);
+    db.operations = normalizeOperationsState({
+      ...state,
+      merchantAutomation: {
+        ...automation,
+        stores: automation.stores.filter((store) => store.id !== storeId),
+        runs: automation.runs.filter((run) => run.storeId !== storeId),
+      },
+    });
+    return db;
+  });
+  removeMerchantReportCredentials(storeId);
+  res.status(204).end();
+});
+
+app.post("/api/operations/merchant-automation/stores/:id/credentials", async (req, res) => {
+  const input = z.object({
+    username: z.string().trim().min(1).max(160),
+    password: z.string().min(1).max(512).optional(),
+  }).strict().parse(req.body);
+  const storeId = String(req.params.id || "");
+  const current = normalizeMerchantAutomation((await readDb()).operations?.merchantAutomation);
+  const store = merchantStoreOrError(current, storeId);
+  const previous = input.password ? null : await getMerchantReportCredentials(storeId);
+  await saveMerchantReportCredentials(storeId, {
+    username: input.username,
+    password: input.password || previous?.password || "",
+  });
+  await updateDb((db) => {
+    const state = normalizeOperationsState(db.operations);
+    const automation = normalizeMerchantAutomation(state.merchantAutomation);
+    db.operations = normalizeOperationsState({
+      ...state,
+      merchantAutomation: {
+        ...automation,
+        stores: automation.stores.map((item) => item.id === store.id ? {
+          ...item,
+          credentialsConfigured: true,
+          credentialsUpdatedAt: new Date().toISOString(),
+        } : item),
+      },
+    });
+    return db;
+  });
+  res.status(201).json(merchantAutomationPayload((await readDb()).operations));
+});
+
+app.delete("/api/operations/merchant-automation/stores/:id/credentials", async (req, res) => {
+  const storeId = String(req.params.id || "");
+  const current = normalizeMerchantAutomation((await readDb()).operations?.merchantAutomation);
+  merchantStoreOrError(current, storeId);
+  removeMerchantReportCredentials(storeId);
+  await updateDb((db) => {
+    const state = normalizeOperationsState(db.operations);
+    const automation = normalizeMerchantAutomation(state.merchantAutomation);
+    db.operations = normalizeOperationsState({
+      ...state,
+      merchantAutomation: {
+        ...automation,
+        stores: automation.stores.map((item) => item.id === storeId ? {
+          ...item,
+          credentialsConfigured: false,
+          credentialsUpdatedAt: null,
+        } : item),
+      },
+    });
+    return db;
+  });
+  res.status(204).end();
+});
+
+// Browser work occurs only inside the user-authorized Sogou profile. This
+// endpoint stores the local worker's progress and never receives page data.
+app.post("/api/operations/merchant-automation/status", async (req, res) => {
+  const input = z.object({
+    storeId: z.string().uuid(),
+    sessionState: z.enum(["unconfigured", "authorizing", "online", "offline"]).optional(),
+    taskId: z.string().optional(),
+    taskState: z.enum(["idle", "queued", "running", "success", "failed", "waiting"]).optional(),
+    reportDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional(),
+    message: z.string().max(300).optional(),
+    fileName: z.string().max(180).optional(),
+  }).strict().parse(req.body);
+  if (input.taskId && !merchantAutomationTask(input.taskId)) {
+    throw Object.assign(new Error("未知的商家报表任务。"), { status: 400 });
+  }
+  await updateDb((db) => {
+    const state = normalizeOperationsState(db.operations);
+    const automation = normalizeMerchantAutomation(state.merchantAutomation);
+    merchantStoreOrError(automation, input.storeId);
+    const now = new Date().toISOString();
+    const stores = automation.stores.map((store) => {
+      if (store.id !== input.storeId) return store;
+      const taskStatus = { ...store.taskStatus };
+      if (input.taskId && input.taskState) {
+        taskStatus[input.taskId] = {
+          state: input.taskState,
+          message: input.message || "",
+          updatedAt: now,
+          fileName: input.fileName || "",
+        };
+      }
+      return {
+        ...store,
+        ...(input.sessionState ? { sessionState: input.sessionState, lastCheckedAt: now } : {}),
+        ...(input.taskState === "running" || input.taskState === "success" ? { lastRunAt: now, lastError: "" } : {}),
+        ...(input.taskState === "failed" ? { lastError: input.message || "下载失败" } : {}),
+        taskStatus,
+      };
+    });
+    const runs = [...automation.runs];
+    if (input.taskId && input.taskState) {
+      const runIndex = runs.findLastIndex((run) => run.storeId === input.storeId && run.taskId === input.taskId && run.reportDate === input.reportDate && !run.completedAt);
+      const run = {
+        id: runIndex >= 0 ? runs[runIndex].id : `merchant_${crypto.randomUUID()}`,
+        storeId: input.storeId,
+        taskId: input.taskId,
+        reportDate: input.reportDate || "",
+        state: input.taskState === "idle" ? "waiting" : input.taskState,
+        message: input.message || "",
+        fileName: input.fileName || "",
+        createdAt: runIndex >= 0 ? runs[runIndex].createdAt : now,
+        completedAt: ["success", "failed"].includes(input.taskState) ? now : null,
+      };
+      if (runIndex >= 0) runs[runIndex] = run;
+      else runs.push(run);
+    }
+    db.operations = normalizeOperationsState({ ...state, merchantAutomation: { ...automation, stores, runs } });
+    return db;
+  });
+  res.json(merchantAutomationPayload((await readDb()).operations));
+});
+
+app.post("/api/operations/merchant-automation/runtime", async (_req, res) => {
+  const current = await readDb();
+  const currentAutomation = normalizeMerchantAutomation(current.operations?.merchantAutomation);
+  const lastSeenAt = Date.parse(currentAutomation.runtime?.lastSeenAt || "");
+  // The desktop companion reports health often, but persisting every pulse
+  // rewrites and normalizes every uploaded report. Ten seconds keeps the
+  // 15-second online indicator accurate without burning a CPU core.
+  if (Number.isFinite(lastSeenAt) && Date.now() - lastSeenAt < 10_000) {
+    res.json({ ok: true });
+    return;
+  }
+  await updateDb((db) => {
+    const state = normalizeOperationsState(db.operations);
+    const automation = normalizeMerchantAutomation(state.merchantAutomation);
+    db.operations = normalizeOperationsState({
+      ...state,
+      merchantAutomation: { ...automation, runtime: { ...automation.runtime, lastSeenAt: new Date().toISOString() } },
+    });
+    return db;
+  });
+  res.json({ ok: true });
+});
+
+app.post("/api/operations/merchant-automation/commands", async (req, res) => {
+  const input = z.object({
+    storeId: z.string().uuid(),
+    action: z.enum(["open-login", "run-now", "check-session"]),
+    taskIds: z.array(z.enum(MERCHANT_REPORT_TASKS.map((task) => task.id))).max(MERCHANT_REPORT_TASKS.length).optional().default([]),
+  }).strict().parse(req.body);
+  assertMerchantSogouInstalled();
+  await ensureMerchantStoreBrowserProfile(input.storeId);
+  const command = { id: `merchant_command_${crypto.randomUUID()}`, ...input, createdAt: new Date().toISOString() };
+  let runtimeReady = false;
+  let runtimeStarting = false;
+  await updateDb((db) => {
+    const state = normalizeOperationsState(db.operations);
+    const automation = normalizeMerchantAutomation(state.merchantAutomation);
+    merchantStoreOrError(automation, input.storeId);
+    const queuedTaskIds = input.action === "run-now"
+      ? (input.taskIds.length ? input.taskIds : MERCHANT_REPORT_TASKS.map((task) => task.id))
+      : [];
+    const queuedAt = new Date().toISOString();
+    const runtimeLastSeen = Date.parse(automation.runtime?.lastSeenAt || "");
+    runtimeReady = Number.isFinite(runtimeLastSeen) && Date.now() - runtimeLastSeen < 15_000;
+    const launchRequestedAt = Date.parse(automation.runtime?.launchRequestedAt || "");
+    runtimeStarting = !runtimeReady && Number.isFinite(launchRequestedAt) && Date.now() - launchRequestedAt < 30_000;
+    db.operations = normalizeOperationsState({
+      ...state,
+      merchantAutomation: {
+        ...automation,
+        stores: automation.stores.map((store) => store.id !== input.storeId || !queuedTaskIds.length ? store : {
+          ...store,
+          lastError: "",
+          taskStatus: {
+            ...store.taskStatus,
+            ...Object.fromEntries(queuedTaskIds.map((taskId) => [taskId, {
+              state: "queued",
+              message: "已加入下载队列，等待搜狗浏览器执行。",
+              fileName: "",
+              updatedAt: queuedAt,
+            }])),
+          },
+        }),
+        commands: [...automation.commands, command],
+        runtime: runtimeReady || runtimeStarting
+          ? automation.runtime
+          : { ...automation.runtime, launchRequestedAt: new Date().toISOString() },
+      },
+    });
+    return db;
+  });
+  // The local server orchestrates the store's persistent Sogou session. It
+  // only talks to the browser's local DevTools endpoint; platform pages are
+  // opened and operated inside that authorized browser.
+  const backendUrl = `http://127.0.0.1:${req.socket.localPort}`;
+  const runtime = runtimeReady
+    ? { started: false, pending: false, ready: true }
+    : runtimeStarting
+      ? { started: false, pending: true }
+    : await ensureMerchantReportRuntime(backendUrl);
+  res.status(202).json({ command, runtime });
+});
+
+// The local Sogou worker claims commands atomically. The renderer only queues
+// work and never receives browser sessions, cookies, or platform responses.
+app.post("/api/operations/merchant-automation/commands/claim", async (_req, res) => {
+  const current = await readDb();
+  if (!normalizeMerchantAutomation(current.operations?.merchantAutomation).commands.length) {
+    res.json({ command: null });
+    return;
+  }
+  let command = null;
+  await updateDb((db) => {
+    const state = normalizeOperationsState(db.operations);
+    const automation = normalizeMerchantAutomation(state.merchantAutomation);
+    [command] = automation.commands;
+    if (!command) return db;
+    db.operations = normalizeOperationsState({
+      ...state,
+      merchantAutomation: { ...automation, commands: automation.commands.slice(1) },
+    });
+    return db;
+  });
+  res.json({ command });
+});
+
+app.post("/api/operations/merchant-automation/downloads/complete", async (req, res) => {
+  const input = z.object({
+    storeId: z.string().uuid(),
+    taskId: z.string().min(1),
+    reportDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
+    filePath: z.string().min(1).max(500),
+  }).strict().parse(req.body);
+  const task = merchantAutomationTask(input.taskId);
+  if (!task) throw Object.assign(new Error("未知的商家报表任务。"), { status: 400 });
+  const downloadRoot = merchantAutomationDownloadRoot(dbRuntimeInfo().dataDir);
+  if (!isInsideDirectory(input.filePath, downloadRoot)) {
+    throw Object.assign(new Error("自动下载文件不在应用运营目录内，已拒绝导入。"), { status: 400 });
+  }
+  const filePath = path.resolve(input.filePath);
+  const stat = await fs.promises.stat(filePath).catch(() => null);
+  if (!stat?.isFile() || stat.size <= 0 || stat.size > OPERATIONS_MAX_UPLOAD_BYTES) {
+    throw Object.assign(new Error("自动下载文件不存在、为空或超过运营报表大小限制。"), { status: 400 });
+  }
+  const db = await readDb();
+  const state = normalizeOperationsState(db.operations);
+  const automation = normalizeMerchantAutomation(state.merchantAutomation);
+  const store = merchantStoreOrError(automation, input.storeId);
+  const file = {
+    originalname: path.basename(filePath),
+    mimetype: merchantFileMimeType(filePath),
+    buffer: await fs.promises.readFile(filePath),
+  };
+  if (!isSupportedOperationsFile(file)) {
+    throw Object.assign(new Error("自动下载文件格式不受支持。"), { status: 400 });
+  }
+  const parsed = await parseOperationsFile(file);
+  const report = createOperationsReport({
+    type: task.type,
+    storeName: store.name,
+    reportDate: input.reportDate,
+    periodKind: "day",
+    sourceName: task.sourceName,
+  }, parsed, { file });
+  await updateDb((current) => {
+    const currentState = normalizeOperationsState(current.operations);
+    current.operations = normalizeOperationsState({
+      ...currentState,
+      reports: [
+        ...currentState.reports.filter((item) => !(
+          item.sourceName === task.sourceName
+          && item.storeName === store.name
+          && item.reportDate === input.reportDate
+        )),
+        report,
+      ],
+    });
+    return current;
+  });
+  res.status(201).json({ report, workspace: operationsWorkspacePayload(await readDb()) });
+});
+
+*/
 
 app.put("/api/operations/targets/:key", async (req, res) => {
   const target = z.object({
@@ -856,6 +1643,17 @@ app.post("/api/operations/analyze", async (_req, res) => {
   res.json(await runOperationsAnalysis({ source: "manual" }));
 });
 
+app.delete("/api/operations/analyses", async (_req, res) => {
+  let cleared = 0;
+  await updateDb((db) => {
+    const state = normalizeOperationsState(db.operations);
+    cleared = state.analyses.length;
+    db.operations = clearOperationsAnalyses(state);
+    return db;
+  });
+  res.json({ cleared });
+});
+
 app.post("/api/operations/chat", async (req, res) => {
   const input = z.object({ message: z.string().trim().min(1).max(2_000) }).strict().parse(req.body);
   const db = await readDb();
@@ -880,9 +1678,13 @@ app.post("/api/operations/daily-report/run", async (_req, res) => {
   res.json(await runOperationsAnalysis({ source: "manual-daily", sendToFeishu: true }));
 });
 
-app.get("/api/operations/qwenpaw", async (_req, res) => {
+app.get("/api/operations/qwenpaw", async (req, res) => {
   const db = await readDb();
-  res.json(await qwenPawDetailedRuntimeStatus(db.operations?.qwenPawInstallDirectory, { checkLatest: true }));
+  const { checkLatest } = z.object({ checkLatest: z.enum(["0", "1"]).optional().default("0") }).parse(req.query);
+  // Opening Agent should only inspect the local installation. Contacting the
+  // official update endpoint can take tens of seconds on a slow connection,
+  // so it is reserved for the explicit refresh action.
+  res.json(await qwenPawDetailedRuntimeStatus(db.operations?.qwenPawInstallDirectory, { checkLatest: checkLatest === "1" }));
 });
 
 app.get("/api/operations/qwenpaw/feishu-targets", async (_req, res) => {
@@ -1050,6 +1852,47 @@ app.delete("/api/local-evidence", async (_req, res) => {
           searchMainImageLocalFirst: undefined,
         } : {}),
       }));
+      return current;
+    });
+  }
+  const { deletedImportIds: _deletedImportIds, deletedCaptureIds: _deletedCaptureIds, ...response } = result;
+  res.json(response);
+});
+
+app.delete("/api/local-evidence/history", async (_req, res) => {
+  const db = await readDb();
+  const protection = collectCurrentLocalEvidenceIds(db.products);
+  const result = await clearLocalEvidenceHistoryFiles(db.localEvidence?.directory, {
+    ...protection,
+  });
+  const deletedImportIds = new Set(result.deletedImportIds);
+  const deletedCaptureIds = new Set(result.deletedCaptureIds);
+  if (deletedImportIds.size || deletedCaptureIds.size) {
+    const clearDeletedReference = (snapshot) => {
+      if (!snapshot || typeof snapshot !== "object") return snapshot;
+      const cleaned = { ...snapshot };
+      if (deletedImportIds.has(snapshot.localImportId)) {
+        delete cleaned.localImportId;
+        delete cleaned.localImportFile;
+      }
+      if (deletedCaptureIds.has(snapshot.browserEvidenceId)) {
+        delete cleaned.browserEvidenceId;
+        delete cleaned.browserEvidenceFile;
+        delete cleaned.localFirst;
+      }
+      if (deletedCaptureIds.has(snapshot.materialEvidenceId)) {
+        delete cleaned.materialEvidenceId;
+        delete cleaned.materialEvidenceFile;
+      }
+      if (deletedCaptureIds.has(snapshot.buyerShowEvidenceId)) {
+        delete cleaned.buyerShowEvidenceId;
+        delete cleaned.buyerShowEvidenceFile;
+        delete cleaned.buyerShowLocalFirst;
+      }
+      return cleaned;
+    };
+    await updateDb((current) => {
+      current.snapshots = current.snapshots.map(clearDeletedReference);
       return current;
     });
   }
@@ -1502,6 +2345,70 @@ function parseOperationsUpload(req, res, next) {
   });
 }
 
+function remapAccountSnapshotSessionIds(snapshot, sessionIdMap) {
+  if (!snapshot || typeof snapshot !== "object" || !sessionIdMap.size) return snapshot;
+  const remap = (id) => sessionIdMap.get(id) || id;
+  return {
+    ...snapshot,
+    primaryAccountSessionId: remap(snapshot.primaryAccountSessionId),
+    accountCaptures: Array.isArray(snapshot.accountCaptures)
+      ? snapshot.accountCaptures.map((capture) => ({ ...capture, sessionId: remap(capture.sessionId) }))
+      : snapshot.accountCaptures,
+    skuPrices: Array.isArray(snapshot.skuPrices)
+      ? snapshot.skuPrices.map((sku) => ({
+        ...sku,
+        accountPrices: Array.isArray(sku.accountPrices)
+          ? sku.accountPrices.map((view) => ({ ...view, sessionId: remap(view.sessionId) }))
+          : sku.accountPrices,
+      }))
+      : snapshot.skuPrices,
+  };
+}
+
+// A browser profile represents exactly one Taobao login. Earlier versions let
+// the foreground poller and the recovery poller write it concurrently, which
+// could leave multiple cards pointing at one profile and one browser port.
+async function repairDuplicateBrowserSessions() {
+  let removed = 0;
+  await updateDb((db) => {
+    const byProfile = new Map();
+    for (const session of db.authSessions || []) {
+      if (session.source !== "taobao-browser" || !session.browserProfileKey || !session.browserPort) continue;
+      const key = `${session.browserProfileKey}:${session.browserPort}`;
+      const group = byProfile.get(key) || [];
+      group.push(session);
+      byProfile.set(key, group);
+    }
+    const sessionIdMap = new Map();
+    const replacements = new Map();
+    for (const group of byProfile.values()) {
+      if (group.length < 2) continue;
+      const ordered = [...group].sort((left, right) => (
+        Date.parse(left.createdAt || "") - Date.parse(right.createdAt || "")
+      ));
+      const keeper = ordered[0];
+      const freshest = [...group].sort((left, right) => (
+        Date.parse(right.lastCheckedAt || right.createdAt || "") - Date.parse(left.lastCheckedAt || left.createdAt || "")
+      ))[0];
+      replacements.set(keeper.id, { ...keeper, ...freshest, id: keeper.id, createdAt: keeper.createdAt });
+      for (const duplicate of ordered.slice(1)) sessionIdMap.set(duplicate.id, keeper.id);
+    }
+    if (!sessionIdMap.size) return db;
+    removed = sessionIdMap.size;
+    db.authSessions = (db.authSessions || [])
+      .filter((session) => !sessionIdMap.has(session.id))
+      .map((session) => replacements.get(session.id) || session);
+    db.products = (db.products || []).map((product) => ({
+      ...product,
+      primaryAccountSessionId: sessionIdMap.get(product.primaryAccountSessionId) || product.primaryAccountSessionId,
+      lastSnapshot: remapAccountSnapshotSessionIds(product.lastSnapshot, sessionIdMap),
+    }));
+    db.snapshots = (db.snapshots || []).map((snapshot) => remapAccountSnapshotSessionIds(snapshot, sessionIdMap));
+    return db;
+  });
+  return { removed };
+}
+
 async function removePersistedProducts(selectedIds) {
   let deleted = 0;
   await updateDb((db) => {
@@ -1540,6 +2447,7 @@ app.patch("/api/products/:id", async (req, res) => {
     monitorStartAt: z.string().datetime().nullable().optional(),
     monitorPrice: z.number().positive().nullable().optional(),
     skuMonitorPrices: z.record(z.string().min(1), z.number().positive()).optional(),
+    primarySkuIds: z.array(z.string().trim().min(1)).max(3, "主 SKU 最多设置 3 个。").optional(),
     skuMonitorRules: z.record(z.string().min(1), z.object({
       lowest: z.number().positive().optional(),
       normal: z.number().positive().optional(),
@@ -1569,6 +2477,14 @@ app.patch("/api/products/:id", async (req, res) => {
         .find((channel) => !monitorChannelSupported(accountType, channel));
       if ((patch.skuMonitorRules || patch.accountType) && unsupportedChannel) {
         throw Object.assign(new Error(`主账号类型 ${accountType} 不支持 ${unsupportedChannel} 监控口径，请先清除该规则。`), { status: 409, code: "MONITOR_CHANNEL_NOT_SUPPORTED" });
+      }
+      if (patch.primarySkuIds) {
+        const currentSkuIds = new Set((product.lastSnapshot?.skuPrices || []).map((sku) => sku.skuId));
+        const invalidSkuId = patch.primarySkuIds.find((skuId) => !currentSkuIds.has(skuId));
+        if (invalidSkuId) {
+          throw Object.assign(new Error("主 SKU 必须来自当前已抓取的 SKU 列表，请刷新商品后再设置。"), { status: 409, code: "PRIMARY_SKU_NOT_CURRENT" });
+        }
+        patch.primarySkuIds = [...new Set(patch.primarySkuIds)].slice(0, 3);
       }
       scheduleChanged = patch.enabled !== undefined || patch.monitorScheduleMode !== undefined || patch.monitorIntervalMinutes !== undefined || patch.monitorStartAt !== undefined;
       updated = { ...product, ...patch, updatedAt: new Date().toISOString() };
@@ -2604,7 +3520,7 @@ app.post("/api/auth/sessions/:id/reauthorize", async (req, res) => {
   res.json(login);
 });
 
-async function syncPendingScan(profileKey) {
+async function syncPendingScanUnsafe(profileKey) {
   const data = await readDb();
   const pending = pendingScans.get(profileKey)
     || (Array.isArray(data.pendingAuthScans) ? data.pendingAuthScans.find((scan) => scan.profileKey === profileKey) : null);
@@ -2706,6 +3622,21 @@ async function syncPendingScan(profileKey) {
   await resumeAuthRequiredCaptureJobs();
   void drainNotificationOutbox().catch((error) => console.error("[notification-outbox]", error));
   return { status: "synced", session };
+}
+
+// The visible authorization dialog and the background recovery worker both
+// observe a pending browser profile. Serialize that work so one scan cannot
+// create duplicate account cards while its cookie is being persisted.
+async function syncPendingScan(profileKey) {
+  const existing = pendingScanSyncTasks.get(profileKey);
+  if (existing) return existing;
+  const task = syncPendingScanUnsafe(profileKey);
+  pendingScanSyncTasks.set(profileKey, task);
+  try {
+    return await task;
+  } finally {
+    if (pendingScanSyncTasks.get(profileKey) === task) pendingScanSyncTasks.delete(profileKey);
+  }
 }
 
 async function checkAuthSession(session) {
@@ -3224,28 +4155,44 @@ app.use((err, req, res, _next) => {
   res.status(status).json({ message: err.message || "服务端运行失败。", ...(err.code ? { error: { code: err.code, message: err.message } } : {}) });
 });
 
-export async function startServer({ host = "127.0.0.1", port = Number(process.env.PORT || 4317), staticDir = "" } = {}) {
+export async function startServer({ host = "127.0.0.1", port = Number(process.env.PORT || 4317), staticDir = "", deferInitialization = false } = {}) {
   if (staticDir) {
     const directory = path.resolve(staticDir);
     staticMiddleware = express.static(directory);
     staticMiddleware.directory = directory;
   }
-  if (!schedulerStarted) {
-    await recoverCaptureQueue();
-    startScheduler();
-    schedulerStarted = true;
-  }
+  const initializeRuntime = async () => {
+    if (!schedulerStarted) {
+      await recoverCaptureQueue();
+      const duplicateSessions = await repairDuplicateBrowserSessions();
+      if (duplicateSessions.removed) console.warn(`[auth-session-repair] Removed ${duplicateSessions.removed} duplicate browser session record(s).`);
+      startScheduler();
+      schedulerStarted = true;
+    }
+    // Older captures are repaired from local, sanitized evidence once per
+    // server start. Routine overview refreshes stay metadata-only and fast.
+    void backfillMissingProductModelsFromLocalEvidence().catch((error) => console.error("[model-backfill]", error));
+  };
+  if (!deferInitialization) await initializeRuntime();
   let server;
   try {
     server = await new Promise((resolve, reject) => {
       const instance = app.listen(port, host, () => resolve(instance));
       instance.once("error", reject);
     });
-    await startImageJobQueue();
-    startNotificationOutboxWorker();
-    startEvidenceCleanup();
-    startPendingAuthorizationSync();
-    await scheduleOperationsDailyReport();
+    const finishStartup = async () => {
+      await initializeRuntime();
+      await startImageJobQueue();
+      startNotificationOutboxWorker();
+      startEvidenceCleanup();
+      startPendingAuthorizationSync();
+      await scheduleOperationsDailyReport();
+    };
+    if (deferInitialization) {
+      void finishStartup().catch((error) => console.error("[startup-background]", error));
+    } else {
+      await finishStartup();
+    }
   } catch (error) {
     if (server?.listening) await new Promise((resolve) => server.close(() => resolve()));
     await stopImageJobQueue().catch((stopError) => console.error("[image-job-stop]", stopError));
@@ -3261,7 +4208,7 @@ export async function startServer({ host = "127.0.0.1", port = Number(process.en
   const address = server.address();
   const actualPort = typeof address === "object" && address ? address.port : port;
   setQwenPawOperationsContextUrl(`http://127.0.0.1:${actualPort}/api/operations/agent-context`);
-  console.log(`电商竞品监控服务已启动：http://${host}:${actualPort}`);
+  console.log(`经营罗盘服务已启动：http://${host}:${actualPort}`);
   console.log("[runtime]", runtimeInfo());
   const eagerBrowserWarmup = process.env.ECOM_MONITOR_EAGER_BROWSER_WARMUP === "1";
   if (eagerBrowserWarmup) {

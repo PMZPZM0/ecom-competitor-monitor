@@ -1,0 +1,17 @@
+.git/
+node_modules/
+cloud-data-hub/node_modules/
+cloud-data-hub/data/
+cloud-data-hub/.runtime-env
+cloud-data-hub/.test-data/
+dist/
+release/
+output/
+canvas/
+logs/
+-workspace.json
+*.log
+.env
+.env.*
+!.env.example
+

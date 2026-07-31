@@ -1,4 +1,4 @@
-import { Archive, BellRing, CircleAlert, CircleCheck, Crown, Download, ExternalLink, FileJson, Gift, Images, LoaderCircle, PauseCircle, PlayCircle, ReceiptText, RotateCw, Save, ShieldCheck, Trash2, UserRound } from 'lucide-react'
+import { Archive, BellRing, CircleAlert, CircleCheck, Crown, Download, ExternalLink, FileJson, Gift, Images, LoaderCircle, PauseCircle, PlayCircle, ReceiptText, RotateCw, Save, ShieldCheck, Star, Trash2, UserRound } from 'lucide-react'
 import { useEffect, useRef, useState } from 'react'
 import { Badge } from '../../components/ui/badge'
 import { Button } from '../../components/ui/button'
@@ -58,6 +58,7 @@ type Props = {
   onSchedule: (product: Product, mode: NonNullable<Product['monitorScheduleMode']>, intervalMinutes: number, monitorStartAt: string | null) => Promise<void>
   onMediaPreference: (product: Product, captureMediaAssets: boolean) => Promise<void>
   onSaveSkuMonitorPrice: (product: Product, skuId: string, value: number | null, channel?: MonitorChannel) => Promise<void>
+  onSavePrimarySkuIds?: (product: Product, primarySkuIds: string[]) => Promise<void>
   onCapture: (product: Product, options?: ProductCaptureOptions) => Promise<Product | void>
   onRetryBuyerShows: (product: Product) => Promise<Product>
   onCaptureSearchMainImage: (product: Product) => Promise<{ ok: boolean; status: NonNullable<Product['searchMainImageStatus']>; product: Product; message: string }>
@@ -125,13 +126,14 @@ function CaptureStatus({ product }: { product: Product }) {
   )
 }
 
-function SkuPricePanel({ product, snapshots, showTrend, accountSessionId, accountType, accountName, primaryAccountType, isPrimaryAccountView, onPreview, onSaveSkuMonitorPrice, allowMediaDownload }: { product: Product; snapshots: Snapshot[]; showTrend: boolean; accountSessionId: string; accountType: NonNullable<Product['accountType']>; accountName: string; primaryAccountType: NonNullable<Product['accountType']>; isPrimaryAccountView: boolean; onPreview: (preview: Preview) => void; onSaveSkuMonitorPrice: (skuId: string, value: number | null, channel: MonitorChannel) => Promise<void>; allowMediaDownload: boolean }) {
+function SkuPricePanel({ product, snapshots, showTrend, accountSessionId, accountType, accountName, primaryAccountType, isPrimaryAccountView, onPreview, onSaveSkuMonitorPrice, onSavePrimarySkuIds, allowMediaDownload }: { product: Product; snapshots: Snapshot[]; showTrend: boolean; accountSessionId: string; accountType: NonNullable<Product['accountType']>; accountName: string; primaryAccountType: NonNullable<Product['accountType']>; isPrimaryAccountView: boolean; onPreview: (preview: Preview) => void; onSaveSkuMonitorPrice: (skuId: string, value: number | null, channel: MonitorChannel) => Promise<void>; onSavePrimarySkuIds?: (primarySkuIds: string[]) => Promise<void>; allowMediaDownload: boolean }) {
   const [copiedSkuId, setCopiedSkuId] = useState('')
   const [copiedSkuNameId, setCopiedSkuNameId] = useState('')
   const [detailSku, setDetailSku] = useState<SkuPrice | null>(null)
   const [monitorPriceDrafts, setMonitorPriceDrafts] = useState<Record<string, string>>({})
   const [monitorPriceStatuses, setMonitorPriceStatuses] = useState<Record<string, 'saving' | 'saved' | 'error'>>({})
   const [monitorChannels, setMonitorChannels] = useState<Record<string, MonitorChannel>>({})
+  const [savingPrimarySkuId, setSavingPrimarySkuId] = useState('')
   const snapshot = product.lastSnapshot
   const anonymous = snapshot?.accessMode === 'anonymous'
   const skuPrices = (snapshot?.skuPrices || []).flatMap((sku) => (
@@ -141,6 +143,9 @@ function SkuPricePanel({ product, snapshots, showTrend, accountSessionId, accoun
   ))
   const supportedMonitorChannels = new Set<MonitorChannel>(['lowest', ...verifiedPriceChannelsForAccount(primaryAccountType)])
   const availableMonitorChannels = monitorChannelOptions.filter((option) => supportedMonitorChannels.has(option.value))
+  const currentSkuIds = new Set((snapshot?.skuPrices || []).map((sku) => sku.skuId))
+  const primarySkuIds = [...new Set(product.primarySkuIds || [])].filter((skuId) => currentSkuIds.has(skuId)).slice(0, 3)
+  const primarySkuIdSet = new Set(primarySkuIds)
 
   async function copySkuId(skuId: string) {
     await navigator.clipboard.writeText(skuId)
@@ -205,6 +210,27 @@ function SkuPricePanel({ product, snapshots, showTrend, accountSessionId, accoun
     })
   }
 
+  async function togglePrimarySku(skuId: string) {
+    if (!onSavePrimarySkuIds || savingPrimarySkuId) return
+    const next = new Set(primarySkuIds)
+    if (next.has(skuId)) next.delete(skuId)
+    else {
+      if (next.size >= 3) {
+        window.alert('主 SKU 最多设置 3 个，请先取消一个后再选择。')
+        return
+      }
+      next.add(skuId)
+    }
+    setSavingPrimarySkuId(skuId)
+    try {
+      await onSavePrimarySkuIds([...next])
+    } catch (error) {
+      window.alert(error instanceof Error ? error.message : '主 SKU 保存失败，请重试。')
+    } finally {
+      setSavingPrimarySkuId('')
+    }
+  }
+
   return (
     <div className="min-w-0 self-start">
       {showTrend && (
@@ -248,10 +274,12 @@ function SkuPricePanel({ product, snapshots, showTrend, accountSessionId, accoun
           const monitorChannel = monitorChannels[sku.skuId] || 'lowest'
           const monitorKey = monitorDraftKey(sku.skuId, monitorChannel)
           const monitorPriceStatus = monitorPriceStatuses[monitorKey]
+          const primarySku = primarySkuIdSet.has(sku.skuId)
+          const savingPrimarySku = savingPrimarySkuId === sku.skuId
           const stalePrices = Object.entries(sku.stalePrices || {}).filter((entry): entry is [Exclude<MonitorChannel, 'lowest'>, NonNullable<typeof entry[1]>] => Boolean(entry[1]))
           return (
           <div key={sku.skuId} className="rounded-xl border border-slate-200/70 bg-white p-3 shadow-[0_4px_14px_rgba(15,23,42,0.05)] transition-[border-color,box-shadow,transform] duration-200 hover:-translate-y-px hover:border-sky-200 hover:shadow-[0_8px_20px_rgba(15,23,42,0.08)]">
-            <div className="grid grid-cols-[58px_minmax(0,1fr)] gap-2.5">
+            <div className="grid grid-cols-[58px_minmax(0,1fr)_auto] gap-2.5">
               <div className="group relative h-14 w-14 overflow-hidden rounded-md border border-slate-100 bg-slate-50">
                 <button type="button" className="h-full w-full" onClick={() => sku.image && onPreview({ src: sku.image, title: sku.name })}>
                   {sku.image ? <img src={sku.image} alt="" loading="lazy" decoding="async" className="h-full w-full object-contain" /> : <span className="flex h-full items-center justify-center text-xs text-slate-400">无图</span>}
@@ -287,6 +315,17 @@ function SkuPricePanel({ product, snapshots, showTrend, accountSessionId, accoun
                   )}
                 </div>
               </div>
+              <button
+                type="button"
+                aria-pressed={primarySku}
+                disabled={!onSavePrimarySkuIds || Boolean(savingPrimarySkuId)}
+                onClick={() => void togglePrimarySku(sku.skuId)}
+                title={primarySku ? '已设为主 SKU，点击取消' : '设为主 SKU（最多 3 个），商品列表会并列展示已选型号'}
+                className={`inline-flex h-7 shrink-0 items-center gap-1 self-start rounded-md border px-2 text-[11px] font-medium transition disabled:cursor-not-allowed disabled:opacity-60 ${primarySku ? 'border-sky-600 bg-sky-600 text-white shadow-sm' : 'border-slate-200 bg-white text-slate-500 hover:border-sky-300 hover:bg-sky-50 hover:text-sky-700'}`}
+              >
+                {savingPrimarySku ? <LoaderCircle className="h-3.5 w-3.5 animate-spin" /> : <Star className={`h-3.5 w-3.5 ${primarySku ? 'fill-current' : ''}`} />}
+                {primarySku ? '主 SKU' : '设主 SKU'}
+              </button>
             </div>
             <div className="mt-2 grid grid-cols-[repeat(auto-fit,minmax(76px,1fr))] gap-1.5 pt-1">
               <div className="flex min-h-12 min-w-0 flex-col items-start justify-center gap-1 rounded bg-sky-50 px-2 py-1.5">
@@ -359,7 +398,7 @@ function CaptureButton({ busy, onCapture }: { busy?: boolean; onCapture: () => v
   )
 }
 
-export function ProductMonitorCard({ product, monitor, onToggle, onSchedule, onMediaPreference, onSaveSkuMonitorPrice: persistSkuMonitorPrice, onCapture, onRetryBuyerShows, onCaptureSearchMainImage, onReparseLocalEvidence, onLocalImport, onDelete, busy, onPreview, compactContext = false, showPrimaryActions = true }: Props) {
+export function ProductMonitorCard({ product, monitor, onToggle, onSchedule, onMediaPreference, onSaveSkuMonitorPrice: persistSkuMonitorPrice, onSavePrimarySkuIds, onCapture, onRetryBuyerShows, onCaptureSearchMainImage, onReparseLocalEvidence, onLocalImport, onDelete, busy, onPreview, compactContext = false, showPrimaryActions = true }: Props) {
   const cardRef = useRef<HTMLElement | null>(null)
   const [trendVisible, setTrendVisible] = useState(false)
   const [copiedItemId, setCopiedItemId] = useState(false)
@@ -823,7 +862,7 @@ export function ProductMonitorCard({ product, monitor, onToggle, onSchedule, onM
           <CaptureStatus product={product} />
         </section>
 
-        <SkuPricePanel product={product} snapshots={snapshots} showTrend={trendVisible} accountSessionId={selectedAccountCapture?.sessionId || ''} accountType={selectedAccountType} accountName={selectedAccountName} primaryAccountType={primaryAccountType} isPrimaryAccountView={isPrimaryAccountView} onPreview={onPreview} onSaveSkuMonitorPrice={saveSkuMonitorPrice} allowMediaDownload={captureMediaAssets} />
+        <SkuPricePanel product={product} snapshots={snapshots} showTrend={trendVisible} accountSessionId={selectedAccountCapture?.sessionId || ''} accountType={selectedAccountType} accountName={selectedAccountName} primaryAccountType={primaryAccountType} isPrimaryAccountView={isPrimaryAccountView} onPreview={onPreview} onSaveSkuMonitorPrice={saveSkuMonitorPrice} onSavePrimarySkuIds={onSavePrimarySkuIds ? (primarySkuIds) => onSavePrimarySkuIds(product, primarySkuIds) : undefined} allowMediaDownload={captureMediaAssets} />
       </div>
 
       {buyerShowOpen && <BuyerShowDialog title={title} items={buyerShows} statusText={buyerShowStatusText} onClose={() => setBuyerShowOpen(false)} retryBusy={retryingBuyerShows} onRetry={localOnly ? undefined : retryBuyerShows} downloadBusy={operation?.tone === 'progress' && operation.key.startsWith('buyer-show') && operation.key !== 'buyer-show-retry'} downloadMessage={operation?.key.startsWith('buyer-show') ? operation.message : ''} onDownload={() => runDownload('buyer-shows', '正在整理全部买家秀并生成 ZIP...', downloadBuyerShowsHref(product.id), `${title}_买家秀.zip`)} onDownloadItem={(item) => runDownload(`buyer-show-item:${item.id}`, '正在整理这条买家秀并生成 ZIP...', downloadBuyerShowItemHref(product.id, item.id), `${title}_买家秀.zip`)} />}

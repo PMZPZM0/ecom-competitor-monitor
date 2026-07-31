@@ -1,6 +1,10 @@
 appId: com.ecommerce.competitor-monitor
-productName: 电商竞品监控
-artifactName: EcomMonitor-${version}-${os}-${arch}.${ext}
+productName: 经营罗盘
+protocols:
+  - name: 经营罗盘团队云端同步
+    schemes:
+      - ecom-monitor
+artifactName: 经营罗盘-${version}-${os}-${arch}.${ext}
 directories:
   output: release
 files:
@@ -16,6 +20,7 @@ files:
   - server/utils/**/*
   - server/routes/**/*
   - server/qwenpaw-plugins/**/*
+  - shared/**/*
   - public/app-icon.ico
   - public/app-icon.png
   - package.json
@@ -39,8 +44,8 @@ nsis:
   allowToChangeInstallationDirectory: true
   createDesktopShortcut: true
   createStartMenuShortcut: true
-  shortcutName: 电商竞品监控
-  uninstallDisplayName: 电商竞品监控
+  shortcutName: 经营罗盘
+  uninstallDisplayName: 经营罗盘
 mac:
   target:
     - dmg

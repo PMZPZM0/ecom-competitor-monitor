@@ -47,11 +47,24 @@ function browserEngineCandidates(engineId) {
   const local = process.env.LOCALAPPDATA || "";
   const roaming = process.env.APPDATA || "";
   const home = process.env.HOME || process.env.USERPROFILE || "";
+  const programFiles = [
+    process.env.ProgramW6432,
+    process.env.ProgramFiles,
+    process.env["ProgramFiles(x86)"],
+    "C:\\Program Files",
+    "C:\\Program Files (x86)",
+  ].filter(Boolean);
+  const installedPath = (parts) => programFiles.map((directory) => path.join(directory, ...parts));
   const definitions = {
     uc: [
       process.env.UC_BROWSER_PATH,
       path.join(local, "Programs/UC浏览器/uc.exe"),
       path.join(local, "UCBrowser/Application/UCBrowser.exe"),
+      path.join(local, "UC浏览器/Application/UCBrowser.exe"),
+      path.join(roaming, "UCBrowser/Application/UCBrowser.exe"),
+      ...installedPath(["UCBrowser", "Application", "UCBrowser.exe"]),
+      ...installedPath(["UC浏览器", "Application", "UCBrowser.exe"]),
+      ...installedPath(["UC Browser", "Application", "UCBrowser.exe"]),
     ],
     360: [
       process.env.BROWSER_360_PATH,
@@ -82,7 +95,7 @@ function browserEngineCandidates(engineId) {
       path.join(home, "Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge"),
     ],
   };
-  return (definitions[engineId] || []).filter(Boolean);
+  return [...new Set((definitions[engineId] || []).filter(Boolean))];
 }
 
 function detectedBrowserEngines() {
@@ -849,7 +862,7 @@ function setBrowserWindowState(options = {}, state = "minimize") {
   if (process.platform !== "win32") return setBrowserWindowStateWithCdp(context, state);
   const showCommand = state === "restore" ? 9 : 6;
   const bringToFront = state === "restore" ? "[NativeWindow]::SetForegroundWindow($handle) | Out-Null;" : "";
-  const script = `$port=${context.port}; Add-Type @'\nusing System;\nusing System.Collections.Generic;\nusing System.Runtime.InteropServices;\nusing System.Text;\npublic static class NativeWindow {\npublic delegate bool EnumWindowsProc(IntPtr hWnd, IntPtr lParam);\n[DllImport("user32.dll")] public static extern bool EnumWindows(EnumWindowsProc callback, IntPtr lParam);\n[DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint processId);\n[DllImport("user32.dll")] public static extern bool IsWindowVisible(IntPtr hWnd);\n[DllImport("user32.dll", CharSet=CharSet.Unicode)] public static extern int GetClassName(IntPtr hWnd, StringBuilder className, int maxCount);\n[DllImport("user32.dll")] public static extern bool ShowWindow(IntPtr hWnd, int nCmdShow);\n[DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr hWnd);\npublic static IntPtr FindWindow(int[] processIds) {\nvar ids = new HashSet<int>(processIds);\nvar found = IntPtr.Zero;\nEnumWindows((hWnd, lParam) => { uint pid; GetWindowThreadProcessId(hWnd, out pid); var name = new StringBuilder(256); GetClassName(hWnd, name, name.Capacity); if (ids.Contains((int)pid) && IsWindowVisible(hWnd) && name.ToString() == "Chrome_WidgetWin_1") { found = hWnd; return false; } return true; }, IntPtr.Zero);\nreturn found;\n}\n}\n'@; for($attempt=0;$attempt -lt 20;$attempt++){ $all=@(Get-CimInstance Win32_Process); $roots=@($all | Where-Object { $_.Name -in @('uc.exe','360chrome.exe','360ChromeX.exe','360se.exe','QQBrowser.exe','SogouExplorer.exe','msedge.exe') -and $_.CommandLine -match "--remote-debugging-port=$port(?:\\s|$)" }); $ids=@{}; foreach($root in $roots){$ids[$root.ProcessId]=$true}; do { $added=$false; foreach($item in $all){ if($ids.ContainsKey($item.ParentProcessId) -and -not $ids.ContainsKey($item.ProcessId)){ $ids[$item.ProcessId]=$true; $added=$true } } } while($added); $handle=[NativeWindow]::FindWindow([int[]]@($ids.Keys)); if($handle -ne [IntPtr]::Zero){ [NativeWindow]::ShowWindow($handle,${showCommand}) | Out-Null; ${bringToFront} exit }; Start-Sleep -Milliseconds 250 }`;
+  const script = `$port=${context.port}; Add-Type @'\nusing System;\nusing System.Collections.Generic;\nusing System.Runtime.InteropServices;\nusing System.Text;\npublic static class NativeWindow {\npublic delegate bool EnumWindowsProc(IntPtr hWnd, IntPtr lParam);\n[DllImport("user32.dll")] public static extern bool EnumWindows(EnumWindowsProc callback, IntPtr lParam);\n[DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint processId);\n[DllImport("user32.dll")] public static extern bool IsWindowVisible(IntPtr hWnd);\n[DllImport("user32.dll", CharSet=CharSet.Unicode)] public static extern int GetClassName(IntPtr hWnd, StringBuilder className, int maxCount);\n[DllImport("user32.dll")] public static extern bool ShowWindow(IntPtr hWnd, int nCmdShow);\n[DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr hWnd);\npublic static IntPtr FindWindow(int[] processIds) {\nvar ids = new HashSet<int>(processIds);\nvar found = IntPtr.Zero;\nEnumWindows((hWnd, lParam) => { uint pid; GetWindowThreadProcessId(hWnd, out uint processId); var name = new StringBuilder(256); GetClassName(hWnd, name, name.Capacity); if (ids.Contains((int)processId) && IsWindowVisible(hWnd) && name.ToString() == "Chrome_WidgetWin_1") { found = hWnd; return false; } return true; }, IntPtr.Zero);\nreturn found;\n}\n}\n'@; for($attempt=0;$attempt -lt 20;$attempt++){ $all=@(Get-CimInstance Win32_Process); $roots=@($all | Where-Object { $_.Name -in @('uc.exe','UCBrowser.exe','360chrome.exe','360ChromeX.exe','360se.exe','QQBrowser.exe','SogouExplorer.exe','msedge.exe') -and $_.CommandLine -match "--remote-debugging-port=$port(?:\\s|$)" }); $ids=@{}; foreach($root in $roots){$ids[$root.ProcessId]=$true}; do { $added=$false; foreach($item in $all){ if($ids.ContainsKey($item.ParentProcessId) -and -not $ids.ContainsKey($item.ProcessId)){ $ids[$item.ProcessId]=$true; $added=$true } } } while($added); $handle=[NativeWindow]::FindWindow([int[]]@($ids.Keys)); if($handle -ne [IntPtr]::Zero){ [NativeWindow]::ShowWindow($handle,${showCommand}) | Out-Null; ${bringToFront} exit }; Start-Sleep -Milliseconds 250 }`;
   const helper = spawn("powershell.exe", ["-NoProfile", "-WindowStyle", "Hidden", "-Command", script], {
     detached: true,
     stdio: "ignore",
@@ -906,6 +919,75 @@ export async function minimizeAccountBrowser(options = {}) {
   if (!runtime.ready) return false;
   await assertBrowserOwnership(context, runtime.version);
   return setBrowserWindowState(context, "minimize");
+}
+
+// Merchant-report automation uses the same user-visible, persistent browser
+// process as account capture. These helpers deliberately expose only CDP page
+// control and never make a platform request from Node.
+export async function openBrowserAutomationPage(url, options = {}) {
+  const context = await ensureBrowser("about:blank", {
+    ...options,
+    headless: false,
+  });
+  const tab = await createTab(url, context);
+  if (!tab?.webSocketDebuggerUrl) throw new Error("浏览器标签页未提供调试连接。");
+  const cdp = await createCdp(tab.webSocketDebuggerUrl);
+  try {
+    await cdp.send("Page.enable", {}, 10_000);
+    await cdp.send("Runtime.enable", {}, 10_000);
+  } catch (error) {
+    cdp.close();
+    throw error;
+  }
+  return {
+    context,
+    tab,
+    cdp,
+    async close() {
+      cdp.close();
+      await closeTab(tab.id, context);
+    },
+  };
+}
+
+export async function navigateBrowserAutomationPage(cdp, url, { timeoutMs = 20_000 } = {}) {
+  const signal = waitForBrowserDocumentSignal(cdp, { timeoutMs });
+  await cdp.send("Page.navigate", { url }, timeoutMs);
+  await signal;
+  return readBrowserDocument(cdp, {
+    attempts: 4,
+    timeoutMs,
+    stage: "读取商家报表页面",
+  });
+}
+
+export async function configureBrowserDownloadDirectory(directory, options = {}) {
+  const context = await ensureBrowser("about:blank", {
+    ...options,
+    headless: false,
+  });
+  fs.mkdirSync(directory, { recursive: true });
+  const version = await getJson(`http://127.0.0.1:${context.port}/json/version`);
+  await assertBrowserOwnership(context, version);
+  const cdp = await createCdp(version.webSocketDebuggerUrl);
+  try {
+    await cdp.send("Browser.setDownloadBehavior", {
+      behavior: "allow",
+      downloadPath: path.resolve(directory),
+      eventsEnabled: true,
+    }, 10_000);
+  } finally {
+    cdp.close();
+  }
+  return context;
+}
+
+export async function restoreBrowserWindow(options = {}) {
+  const context = browserContext(options);
+  const runtime = await browserRuntimeState(context);
+  if (!runtime.ready) return false;
+  await assertBrowserOwnership(context, runtime.version);
+  return setBrowserWindowState(context, "restore");
 }
 
 async function acquireBackgroundCaptureTab(url, options = {}) {

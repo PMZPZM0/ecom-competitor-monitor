@@ -23,10 +23,8 @@ function fileSize(bytes: number) {
 export function DataRecords({ snapshots, products, onClear, onEvidenceChanged }: Props) {
   const [evidence, setEvidence] = useState<LocalEvidenceStatus | null>(null)
   const [directory, setDirectory] = useState('')
-  const [busy, setBusy] = useState<'load' | 'pick' | 'open' | 'save' | 'reset' | 'delete' | null>('load')
+  const [busy, setBusy] = useState<'load' | 'pick' | 'open' | 'save' | 'reset' | 'cleanup' | null>('load')
   const [feedback, setFeedback] = useState<{ tone: 'success' | 'error'; message: string } | null>(null)
-  const [deleteConfirming, setDeleteConfirming] = useState(false)
-  const [deletePhrase, setDeletePhrase] = useState('')
   const [excelStatus, setExcelStatus] = useState<ExcelSyncStatus | null>(null)
   const [excelBusy, setExcelBusy] = useState<'load' | 'sync' | 'open' | null>('load')
   const [excelFeedback, setExcelFeedback] = useState<{ tone: 'success' | 'error'; message: string } | null>(null)
@@ -123,17 +121,19 @@ export function DataRecords({ snapshots, products, onClear, onEvidenceChanged }:
     }
   }
 
-  async function deleteEvidence() {
-    if (deletePhrase !== '删除全部证据') return
-    setBusy('delete')
+  async function clearEvidenceHistory() {
+    const confirmed = window.confirm('仅删除历史证据文件，保留每个商品的最新证据、最新验证价格、监控商品和 Excel 公式。确认继续？')
+    if (!confirmed) return
+    setBusy('cleanup')
     setFeedback(null)
     try {
-      applyEvidence(await api.deleteLocalEvidence(), '当前目录中的本地证据已全部删除，保存目录和监控数据未改变。')
+      const result = await api.clearLocalEvidenceHistory()
+      applyEvidence(result, result.deletedCount
+        ? `已清理 ${result.deletedSourceFileCount} 份历史原始证据和 ${result.deletedImportCount} 份历史解析证据，释放 ${fileSize(result.reclaimedBytes)}；最新证据、价格、监控商品和 Excel 公式均已保留。`
+        : '没有可清理的历史证据；最新证据、价格、监控商品和 Excel 公式均已保留。')
       await onEvidenceChanged().catch(() => undefined)
-      setDeleteConfirming(false)
-      setDeletePhrase('')
     } catch (error) {
-      setFeedback({ tone: 'error', message: error instanceof Error ? error.message : '删除本地证据失败' })
+      setFeedback({ tone: 'error', message: error instanceof Error ? error.message : '清理历史证据失败' })
     } finally {
       setBusy(null)
     }
@@ -183,55 +183,51 @@ export function DataRecords({ snapshots, products, onClear, onEvidenceChanged }:
   return (
     <div className="space-y-4">
       <Card>
-        <CardHeader className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-          <div>
-            <CardTitle className="flex items-center gap-2"><FolderOpen className="h-4 w-4 text-blue-600" />本地价格证据</CardTitle>
-            <div className="mt-1 text-sm text-slate-500">抓取后自动保存脱敏证据并同步 Excel；成功证据保留 7 天，系统每天自动清理，最新证据不会误删。</div>
-          </div>
-          <div className="inline-flex w-fit items-center gap-2 rounded-md bg-slate-100 px-3 py-1.5 text-xs text-slate-600">
-            {busy === 'load' ? <LoaderCircle className="h-3.5 w-3.5 animate-spin" /> : evidence ? <CheckCircle2 className="h-3.5 w-3.5 text-emerald-600" /> : <CircleAlert className="h-3.5 w-3.5 text-red-500" />}
-            {busy === 'load' ? '正在读取' : evidence ? `${evidence.sourceFileCount} 份原始 + ${evidence.fileCount} 份解析 · ${fileSize(evidence.totalBytes)}` : '读取失败'}
-          </div>
-        </CardHeader>
-        <CardContent className="space-y-3">
-          <div className="grid gap-1.5">
-            <label className="text-sm font-medium text-slate-700" htmlFor="local-evidence-directory">保存目录</label>
-            <div className="flex flex-col gap-2 lg:flex-row">
-              <Input id="local-evidence-directory" value={directory} onChange={(event) => setDirectory(event.target.value)} placeholder="输入本机文件夹的完整路径" disabled={Boolean(busy)} className="min-w-0 flex-1" />
-              <div className="flex flex-wrap gap-2">
-                {evidence?.directoryPickerAvailable && <Button type="button" variant="secondary" onClick={() => void selectDirectory()} disabled={Boolean(busy)}>
-                  {busy === 'pick' ? <LoaderCircle className="h-4 w-4 animate-spin" /> : <FolderOpen className="h-4 w-4" />}{busy === 'pick' ? '选择中' : '选择文件夹'}
-                </Button>}
-                {evidence?.directoryPickerAvailable && <Button type="button" variant="secondary" onClick={() => void openDirectory()} disabled={Boolean(busy)} title="打开已保存的当前目录">
-                  {busy === 'open' ? <LoaderCircle className="h-4 w-4 animate-spin" /> : <ExternalLink className="h-4 w-4" />}{busy === 'open' ? '打开中' : '打开当前目录'}
-                </Button>}
-                <Button type="button" onClick={() => void saveDirectory()} disabled={Boolean(busy) || directory.trim() === evidence?.directory}>
-                  {busy === 'save' ? <LoaderCircle className="h-4 w-4 animate-spin" /> : <Save className="h-4 w-4" />}{busy === 'save' ? '保存中' : '保存目录'}
-                </Button>
-                <Button type="button" variant="secondary" onClick={() => void restoreDefaultDirectory()} disabled={Boolean(busy) || evidence?.directory === evidence?.defaultDirectory}>
-                  {busy === 'reset' ? <LoaderCircle className="h-4 w-4 animate-spin" /> : <RotateCcw className="h-4 w-4" />}恢复默认
-                </Button>
-                <Button type="button" variant="danger" onClick={() => { setDeleteConfirming(true); setDeletePhrase(''); setFeedback(null) }} disabled={Boolean(busy) || !((evidence?.fileCount || 0) + (evidence?.sourceFileCount || 0))}>
-                  <Trash2 className="h-4 w-4" />清空当前目录
-                </Button>
+        <CardContent className="space-y-3 p-3 sm:p-4">
+          <div className="flex flex-col gap-3 xl:flex-row xl:items-center">
+            <div className="flex min-w-0 flex-1 items-start gap-2.5">
+              <div className="mt-0.5 grid h-8 w-8 shrink-0 place-items-center rounded-md bg-blue-50 text-blue-600"><FolderOpen className="h-4 w-4" /></div>
+              <div className="min-w-0">
+                <div className="flex flex-wrap items-center gap-2">
+                  <CardTitle>本地价格证据</CardTitle>
+                  <span className="inline-flex items-center gap-1.5 rounded-md bg-slate-100 px-2 py-1 text-xs text-slate-600">
+                    {busy === 'load' ? <LoaderCircle className="h-3.5 w-3.5 animate-spin" /> : evidence ? <CheckCircle2 className="h-3.5 w-3.5 text-emerald-600" /> : <CircleAlert className="h-3.5 w-3.5 text-red-500" />}
+                    {busy === 'load' ? '正在读取' : evidence ? `${evidence.sourceFileCount} 原始 + ${evidence.fileCount} 解析 · ${fileSize(evidence.totalBytes)}` : '读取失败'}
+                  </span>
+                </div>
+                <div className="mt-1 text-xs text-slate-500">自动脱敏落盘；清理历史时保留每个商品最新证据、验证价格和 Excel 公式。</div>
               </div>
             </div>
-          </div>
-          {evidence?.defaultDirectory && <div className="break-all text-xs text-slate-400">默认目录：{evidence.defaultDirectory}</div>}
-          {deleteConfirming && (
-            <div className="flex flex-col gap-3 rounded-md border border-red-200 bg-red-50 p-3 sm:flex-row sm:items-end" role="alert">
-              <label className="min-w-0 flex-1 text-sm font-medium text-red-800" htmlFor="delete-local-evidence-confirmation">
-                此操作不可恢复。请输入“删除全部证据”确认
-                <Input id="delete-local-evidence-confirmation" value={deletePhrase} onChange={(event) => setDeletePhrase(event.target.value)} className="mt-1.5 border-red-200 bg-white" autoFocus />
-              </label>
-              <div className="flex gap-2">
-                <Button type="button" variant="danger" onClick={() => void deleteEvidence()} disabled={busy === 'delete' || deletePhrase !== '删除全部证据'}>
-                  {busy === 'delete' ? <LoaderCircle className="h-4 w-4 animate-spin" /> : <Trash2 className="h-4 w-4" />}{busy === 'delete' ? '删除中' : '确认删除'}
-                </Button>
-                <Button type="button" variant="secondary" onClick={() => { setDeleteConfirming(false); setDeletePhrase('') }} disabled={busy === 'delete'}>取消</Button>
-              </div>
+            <div className="flex flex-wrap gap-2">
+              {evidence?.directoryPickerAvailable && <Button type="button" variant="secondary" onClick={() => void openDirectory()} disabled={Boolean(busy)}>
+                {busy === 'open' ? <LoaderCircle className="h-4 w-4 animate-spin" /> : <ExternalLink className="h-4 w-4" />}{busy === 'open' ? '打开中' : '打开目录'}
+              </Button>}
+              <Button type="button" variant="danger" onClick={() => void clearEvidenceHistory()} disabled={Boolean(busy) || !((evidence?.fileCount || 0) + (evidence?.sourceFileCount || 0))}>
+                {busy === 'cleanup' ? <LoaderCircle className="h-4 w-4 animate-spin" /> : <Trash2 className="h-4 w-4" />}{busy === 'cleanup' ? '清理中' : '清空历史证据'}
+              </Button>
+              <details className="group relative">
+                <summary className="inline-flex h-9 cursor-pointer list-none items-center gap-2 rounded-md border border-slate-200 bg-white px-3 text-sm font-medium text-slate-700 hover:bg-slate-50 [&::-webkit-details-marker]:hidden">
+                  <Save className="h-4 w-4" />目录设置
+                </summary>
+                <div className="absolute right-0 top-11 z-30 w-[min(36rem,calc(100vw-2rem))] space-y-2 rounded-md border border-slate-200 bg-white p-3 shadow-xl">
+                  <label className="text-xs font-medium text-slate-600" htmlFor="local-evidence-directory">保存目录</label>
+                  <Input id="local-evidence-directory" value={directory} onChange={(event) => setDirectory(event.target.value)} placeholder="输入本机文件夹的完整路径" disabled={Boolean(busy)} />
+                  <div className="flex flex-wrap gap-2">
+                    {evidence?.directoryPickerAvailable && <Button type="button" variant="secondary" onClick={() => void selectDirectory()} disabled={Boolean(busy)}>
+                      {busy === 'pick' ? <LoaderCircle className="h-4 w-4 animate-spin" /> : <FolderOpen className="h-4 w-4" />}{busy === 'pick' ? '选择中' : '选择文件夹'}
+                    </Button>}
+                    <Button type="button" onClick={() => void saveDirectory()} disabled={Boolean(busy) || directory.trim() === evidence?.directory}>
+                      {busy === 'save' ? <LoaderCircle className="h-4 w-4 animate-spin" /> : <Save className="h-4 w-4" />}{busy === 'save' ? '保存中' : '保存目录'}
+                    </Button>
+                    <Button type="button" variant="secondary" onClick={() => void restoreDefaultDirectory()} disabled={Boolean(busy) || evidence?.directory === evidence?.defaultDirectory}>
+                      {busy === 'reset' ? <LoaderCircle className="h-4 w-4 animate-spin" /> : <RotateCcw className="h-4 w-4" />}恢复默认
+                    </Button>
+                  </div>
+                  {evidence?.defaultDirectory && <div className="break-all text-xs text-slate-400">默认目录：{evidence.defaultDirectory}</div>}
+                </div>
+              </details>
             </div>
-          )}
+          </div>
           {feedback && <div className={`flex items-start gap-2 rounded-md px-3 py-2 text-sm ${feedback.tone === 'success' ? 'bg-emerald-50 text-emerald-800' : 'bg-red-50 text-red-700'}`} role={feedback.tone === 'error' ? 'alert' : 'status'} aria-live="polite">{feedback.tone === 'success' ? <CheckCircle2 className="mt-0.5 h-4 w-4 shrink-0" /> : <CircleAlert className="mt-0.5 h-4 w-4 shrink-0" />}<span>{feedback.message}</span></div>}
         </CardContent>
       </Card>

@@ -382,10 +382,11 @@ function metadataFrom(parsed, content) {
   const pageHtml = typeof parsed?.page?.html === "string" ? parsed.page.html : content;
   const pageUrl = String(parsed?.page?.finalUrl || parsed?.finalUrl || parsed?.requestedUrl || "");
   const extracted = extractProductMetadataFromLocalEvidence(pageHtml, pageUrl);
+  const extractedFromRecord = pageHtml === content ? extracted : extractProductMetadataFromLocalEvidence(content, pageUrl);
   const result = {
-    title: extracted.title || "",
-    shopName: extracted.shopName || "",
-    model: extracted.model || "",
+    title: extracted.title || extractedFromRecord.title || "",
+    shopName: extracted.shopName || extractedFromRecord.shopName || "",
+    model: extracted.model || extractedFromRecord.model || "",
   };
   const stack = parsed && typeof parsed === "object" ? [parsed] : [];
   const seen = new Set();
@@ -1298,6 +1299,94 @@ export async function clearLocalEvidenceFiles(configuredDirectory) {
   return {
     ...(await getLocalEvidenceStorageOverview(configuredDirectory)),
     deletedCount: deletedImportIds.length + deletedCaptureIds.length,
+    deletedImportIds,
+    deletedCaptureIds,
+  };
+}
+
+export function collectCurrentLocalEvidenceIds(products = []) {
+  const protectedImportIds = new Set();
+  const protectedCaptureIds = new Set();
+  const addImport = (id, file = "") => {
+    const direct = String(id || "");
+    const fromFile = path.basename(String(file || "")).match(automaticEvidenceFilenamePattern)?.[1] || "";
+    if (importIdPattern.test(direct)) protectedImportIds.add(direct);
+    else if (fromFile) protectedImportIds.add(fromFile);
+  };
+  const addCapture = (id, file = "") => {
+    const direct = String(id || "");
+    const fromFile = path.basename(String(file || "")).match(browserCaptureSourceFilenamePattern)?.[1] || "";
+    if (browserCaptureIdPattern.test(direct)) protectedCaptureIds.add(direct);
+    else if (fromFile) protectedCaptureIds.add(fromFile);
+  };
+
+  for (const product of Array.isArray(products) ? products : []) {
+    const snapshot = product?.lastSnapshot;
+    if (snapshot && typeof snapshot === "object") {
+      addImport(snapshot.localImportId, snapshot.localImportFile);
+      addCapture(snapshot.browserEvidenceId, snapshot.browserEvidenceFile);
+      addCapture(snapshot.materialEvidenceId, snapshot.materialEvidenceFile);
+      addCapture(snapshot.buyerShowEvidenceId, snapshot.buyerShowEvidenceFile);
+    }
+    addCapture(product?.searchMainImageEvidenceId, product?.searchMainImageEvidenceFile);
+  }
+  return { protectedImportIds: [...protectedImportIds], protectedCaptureIds: [...protectedCaptureIds] };
+}
+
+export async function clearLocalEvidenceHistoryFiles(configuredDirectory, {
+  protectedImportIds = [],
+  protectedCaptureIds = [],
+} = {}) {
+  const directory = configuredDirectory === undefined
+    ? await configuredLocalEvidenceDirectory()
+    : resolveLocalEvidenceDirectory(configuredDirectory);
+  const protectedImports = new Set([...protectedImportIds].filter((value) => importIdPattern.test(String(value || ""))));
+  const protectedCaptures = new Set([...protectedCaptureIds].filter((value) => browserCaptureIdPattern.test(String(value || ""))));
+  const files = await automaticEvidenceFiles(directory);
+  const sourceFiles = await browserCaptureSourceFiles(directory);
+  const deletedImportIds = [];
+  const deletedCaptureIds = [];
+  let deletedFileCount = 0;
+  let reclaimedBytes = 0;
+
+  for (const file of files) {
+    if (protectedImports.has(file.importId)) continue;
+    try {
+      const record = JSON.parse(await fs.readFile(file.file, "utf8"));
+      if (record?.origin !== "automatic-capture" || record.importId !== file.importId) continue;
+      await fs.rm(file.file, { force: true });
+      deletedImportIds.push(file.importId);
+      deletedFileCount += 1;
+      reclaimedBytes += file.size;
+    } catch {
+      // A file changed after scanning; leave it untouched instead of guessing ownership.
+    }
+  }
+
+  for (const file of sourceFiles) {
+    if (protectedCaptures.has(file.captureId)) continue;
+    try {
+      const record = JSON.parse(await fs.readFile(file.file, "utf8"));
+      if (record?.captureType !== "account-browser-local-source" || record.captureId !== file.captureId) continue;
+      const artifacts = await browserCaptureArtifactFiles(directory, file.captureId);
+      await removeBrowserCaptureArtifacts(directory, file.captureId);
+      deletedCaptureIds.push(file.captureId);
+      deletedFileCount += artifacts.length;
+      reclaimedBytes += artifacts.reduce((total, artifact) => total + artifact.size, 0);
+    } catch {
+      // A file changed after scanning; leave it untouched instead of guessing ownership.
+    }
+  }
+
+  return {
+    ...(await getLocalEvidenceStorageOverview(configuredDirectory)),
+    deletedCount: deletedImportIds.length + deletedCaptureIds.length,
+    deletedFileCount,
+    deletedImportCount: deletedImportIds.length,
+    deletedSourceFileCount: deletedCaptureIds.length,
+    reclaimedBytes,
+    protectedImportCount: files.filter((file) => protectedImports.has(file.importId)).length,
+    protectedSourceFileCount: sourceFiles.filter((file) => protectedCaptures.has(file.captureId)).length,
     deletedImportIds,
     deletedCaptureIds,
   };

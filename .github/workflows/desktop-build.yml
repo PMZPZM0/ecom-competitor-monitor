@@ -12,6 +12,8 @@ on:
 jobs:
   windows:
     runs-on: windows-latest
+    env:
+      CSC_IDENTITY_AUTO_DISCOVERY: false
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -24,7 +26,7 @@ jobs:
       - run: npm run pack:win -- --publish never
       - uses: actions/upload-artifact@v4
         with:
-          name: 电商竞品监控-Windows
+          name: 经营罗盘-Windows
           path: release/*.exe
           if-no-files-found: error
           compression-level: 0
@@ -58,7 +60,7 @@ jobs:
       - name: Verify ad-hoc signature and DMG integrity
         shell: bash
         run: |
-          app_path="$(find release -type d -name '电商竞品监控.app' -print -quit)"
+          app_path="$(find release -type d -name '经营罗盘.app' -print -quit)"
           test -n "$app_path"
           codesign --verify --deep --strict --verbose=2 "$app_path"
           codesign -dv --verbose=4 "$app_path" 2>&1 | grep -q 'Signature=adhoc'
@@ -67,7 +69,7 @@ jobs:
           hdiutil verify "$dmg_path"
       - uses: actions/upload-artifact@v4
         with:
-          name: 电商竞品监控-macOS-${{ matrix.arch }}
+          name: 经营罗盘-macOS-${{ matrix.arch }}
           path: release/*.dmg
           if-no-files-found: error
           compression-level: 0
@@ -77,12 +79,19 @@ jobs:
     needs: [windows, macos]
     runs-on: ubuntu-latest
     steps:
+      - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
         with:
-          pattern: 电商竞品监控-*
+          pattern: 经营罗盘-*
           path: release-assets
           merge-multiple: true
       - name: Publish GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release create "$GITHUB_REF_NAME" release-assets/* --repo "$GITHUB_REPOSITORY" --title "电商竞品监控 $GITHUB_REF_NAME" --generate-notes --verify-tag
+        run: |
+          notes_file="docs/releases/${GITHUB_REF_NAME}.md"
+          if [ -f "$notes_file" ]; then
+            gh release create "$GITHUB_REF_NAME" release-assets/* --repo "$GITHUB_REPOSITORY" --title "经营罗盘 $GITHUB_REF_NAME" --notes-file "$notes_file" --verify-tag
+          else
+            gh release create "$GITHUB_REF_NAME" release-assets/* --repo "$GITHUB_REPOSITORY" --title "经营罗盘 $GITHUB_REF_NAME" --generate-notes --verify-tag
+          fi

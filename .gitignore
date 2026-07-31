@@ -24,6 +24,13 @@ output
 dist-ssr
 *.local
 
+# Team cloud runtime state. Source code is versioned; team reports, users,
+# sessions and deployment-specific configuration are never committed.
+-workspace.json
+cloud-data-hub/.runtime-env
+cloud-data-hub/data/
+cloud-data-hub/.test-data/
+
 # Editor directories and files
 .vscode/*
 !.vscode/extensions.json

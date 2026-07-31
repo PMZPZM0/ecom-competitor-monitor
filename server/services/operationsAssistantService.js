@@ -16,8 +16,20 @@ import {
   stopQwenPawBackend,
 } from "./qwenPawRuntimeService.js";
 import { normalizeQwenPawAlerts } from "./qwenPawFeishuService.js";
+import { normalizeCloudSync, publicCloudSync } from "./cloudSyncService.js";
+import { buildOperationsWorkspace as buildOperationsWorkspaceCore } from "../../shared/operationsCore.js";
 
-export const OPERATIONS_REPORT_TYPES = Object.freeze(["promotion", "market", "audience", "competitor"]);
+// Report type is inferred from the export's contents.  The older generic types
+// remain valid so that existing local data keeps working after the warehouse
+// upgrade.
+export const OPERATIONS_REPORT_TYPES = Object.freeze([
+  // This order is intentional: it is also the manual import order in the UI.
+  "category", "product", "scenario", "promotion", "campaign",
+  "market", "audience", "competitor",
+]);
+export const OPERATIONS_REPORT_INPUT_TYPES = OPERATIONS_REPORT_TYPES;
+export const OPERATIONS_PERIOD_KINDS = Object.freeze(["day", "week", "month", "custom"]);
+export const OPERATIONS_UNASSIGNED_STORE_NAME = "未归属店铺";
 // Exported operational reports can be large, especially when WPS includes
 // full campaign dimensions. Keep this high enough for normal exports while
 // retaining a bounded in-memory upload.
@@ -26,6 +38,10 @@ const MAX_REPORTS = 180;
 const MAX_ROWS_PER_REPORT = 5_000;
 const MAX_SCREENSHOTS_PER_ANALYSIS = 3;
 const MAX_CHAT_MESSAGES = 80;
+const MAX_SALES_DEDUCTIONS = 500;
+// Version 2 rebuilds the local ledger after the promotion-type field repair.
+// Otherwise a previously cached ledger can keep the old, mis-mapped channel.
+const OPERATIONS_LEDGER_VERSION = 2;
 
 const DEFAULT_TARGETS = Object.freeze({ targetRoi: 2, maxFeeRate: 0.3, dailyBudgetCap: 0 });
 const DEFAULT_DAILY_REPORT = Object.freeze({ enabled: false, time: "09:30", lastRunAt: null, lastSentAt: null, lastError: "" });
@@ -35,23 +51,58 @@ const QWENPAW_PROVIDER_ID = "ecommerce-monitor-model";
 const serviceDirectory = path.dirname(fileURLToPath(import.meta.url));
 let qwenPawOperationsContextUrl = "http://127.0.0.1:4317/api/operations/agent-context";
 const qwenPawAgentToolToken = crypto.randomBytes(32).toString("base64url");
+let qwenPawConsoleStart = null;
+let qwenPawConsoleStartSignature = "";
 
 const FIELD_ALIASES = Object.freeze({
+  reportDate: ["统计日期", "日期", "数据日期", "报表日期", "统计周期", "统计时间", "数据周期", "date", "reportdate"],
   storeName: ["店铺", "店铺名称", "所属店铺", "storename", "store", "shop"],
-  productId: ["商品id", "宝贝id", "itemid", "productid", "商品编号"],
-  productName: ["商品名称", "宝贝名称", "推广商品", "产品名称", "productname", "商品", "宝贝", "product"],
+  productId: ["商品id", "宝贝id", "主体id", "itemid", "productid", "商品编号"],
+  productName: ["商品名称", "宝贝名称", "推广商品", "主体名称", "产品名称", "productname", "商品", "宝贝", "product"],
   productStage: ["商品阶段", "产品阶段", "新品老品", "productstage", "stage"],
-  campaignName: ["计划名称", "推广计划", "campaignname", "计划", "campaign"],
-  category: ["类目名称", "一级类目名称", "二级类目名称", "类目", "商品类目", "一级类目", "category"],
+  // "场景名字" is the promotion type, not the plan name. Keeping it out of
+  // this list means an export without a plan column still retains its type.
+  campaignName: ["计划名称", "计划名字", "推广计划", "campaignname", "计划", "campaign"],
+  // A product promotion export may contain both a plan name and the platform
+  // channel (for example 全站推广 / 关键词推广). Keep them separate: plans are
+  // not a stable channel dimension and must never be used to relabel spend.
+  // Some historical Wanxiangtai exports put a plan-level value in
+  // "场景名字" and the real promotion type in "原二级场景名字". Prefer the
+  // latter whenever it exists; current exports where the two values agree are
+  // unaffected.
+  channel: ["推广渠道", "原二级场景名字", "场景名字", "推广场景", "一级场景", "营销场景", "推广类型", "投放渠道", "渠道", "场景", "channel"],
+  category: ["类目名称", "二级类目名称", "一级类目名称", "类目", "商品类目", "一级类目", "category"],
+  primaryCategory: ["一级类目名称", "一级类目", "primarycategory"],
+  secondaryCategory: ["二级类目名称", "二级类目", "secondarycategory"],
   audienceName: ["人群名称", "定向人群", "audiencename", "人群", "audience"],
   spend: ["消耗", "花费", "推广花费", "广告消耗", "cost", "spend"],
-  revenue: ["成交金额", "支付金额", "成交额", "成交金额元", "gmv", "revenue"],
+  revenue: ["总成交金额", "支付金额", "支付成交金额", "成交金额", "成交额", "成交金额元", "gmv", "revenue"],
+  refundAmount: ["售中售后成功退款金额", "成功退款金额", "退款金额", "退款总金额", "退款", "refundamount", "refund"],
   roi: ["roi", "投入产出比", "投产"],
-  orders: ["订单数", "成交订单数", "成交笔数", "orders"],
+  orders: ["总成交笔数", "支付订单数", "订单数", "成交订单数", "成交笔数", "orders"],
   clicks: ["点击量", "点击次数", "clicks"],
   impressions: ["展现量", "曝光量", "impressions"],
   conversionRate: ["转化率", "成交转化率", "conversionrate", "cvr"],
   audienceSize: ["人群规模", "覆盖人数", "人群数", "覆盖量", "audiencesize"],
+  visitors: ["商品访客数", "访客数", "访客", "uv", "visitors"],
+  pageViews: ["商品浏览量", "浏览量", "浏览", "pv", "pageviews"],
+  favorites: ["商品收藏人数", "收藏人数", "收藏量", "favorites"],
+  cartUsers: ["商品加购人数", "加购人数", "加购用户数", "cartusers"],
+  cartItems: ["商品加购件数", "加购件数", "cartitems"],
+  paidBuyers: ["支付买家数", "成交买家数", "paidbuyers"],
+  paidItems: ["支付件数", "成交件数", "paiditems"],
+  bounceRate: ["商品详情页跳出率", "跳出率", "bouncerate"],
+  collectionCartRate: ["收藏加购率", "访问加购转化率", "加购转化率", "collectioncartrate"],
+  averageDwellSeconds: ["平均停留时长", "平均停留时间", "averagedwell"],
+  cpc: ["单次点击成本", "平均点击花费", "点击单价", "cpc"],
+  costPerCollectCart: ["单次收加成本", "收藏加购成本", "costpercollectcart"],
+});
+
+const PRODUCT_CATALOG_ALIASES = Object.freeze({
+  storeName: ["店铺名", "店铺名称", "所属店铺", "店铺", "storename", "store", "shop"],
+  productId: ["商品ID", "宝贝ID", "ID", "主体ID", "itemid", "productid", "商品编号"],
+  category: ["品类名", "类目名称", "商品类目", "类目", "category"],
+  model: ["型号", "商品型号", "产品型号", "款式型号", "model"],
 });
 
 const EXACT_MATCH_ALIASES = new Set(["商品", "宝贝", "product", "店铺", "shop", "计划", "campaign", "类目", "category", "人群", "audience"]);
@@ -127,13 +178,31 @@ function numeric(value, { percent = false } = {}) {
 
 function rowValue(row, aliases) {
   const normalizedAliases = aliases.map((alias) => headerKey(alias));
-  for (const [header, value] of Object.entries(row || {})) {
-    const key = headerKey(header);
-    if (!key) continue;
-    if (value === "" || value === null || value === undefined) continue;
-    if (normalizedAliases.some((alias) => key === alias || (!EXACT_MATCH_ALIASES.has(alias) && (key.includes(alias) || alias.includes(key))))) return value;
+  const entries = Object.entries(row || {}).filter(([header, value]) => headerKey(header) && value !== "" && value !== null && value !== undefined);
+  // The field priority is intentional.  A promotion export can include both
+  // "总成交金额" and several pre-sale/attribution columns; the exact business
+  // metric must win rather than whichever column happens to be first.
+  for (const alias of normalizedAliases) {
+    const exact = entries.find(([header]) => headerKey(header) === alias);
+    if (exact) return exact[1];
+  }
+  for (const alias of normalizedAliases) {
+    if (EXACT_MATCH_ALIASES.has(alias)) continue;
+    const fuzzy = entries.find(([header]) => {
+      const key = headerKey(header);
+      return key.includes(alias) || alias.includes(key);
+    });
+    if (fuzzy) return fuzzy[1];
   }
   return undefined;
+}
+
+function rowHasColumn(row, aliases) {
+  const normalizedAliases = aliases.map((alias) => headerKey(alias));
+  return Object.keys(row || {}).some((header) => {
+    const key = headerKey(header);
+    return normalizedAliases.some((alias) => key === alias || (!EXACT_MATCH_ALIASES.has(alias) && (key.includes(alias) || alias.includes(key))));
+  });
 }
 
 function dateOnly(value, fallback = new Date()) {
@@ -141,18 +210,130 @@ function dateOnly(value, fallback = new Date()) {
   if (/^\d{4}-\d{2}-\d{2}$/.test(candidate)) return candidate;
   const parsed = Date.parse(candidate);
   const date = Number.isFinite(parsed) ? new Date(parsed) : fallback;
-  return date.toISOString().slice(0, 10);
+  // Imported dates and dashboard filters are business-calendar dates. Using
+  // UTC here can move a locally imported late-night value into the next day.
+  return [date.getFullYear(), String(date.getMonth() + 1).padStart(2, "0"), String(date.getDate()).padStart(2, "0")].join("-");
+}
+
+function isoDate(value) {
+  const candidate = String(value || "").trim();
+  return /^\d{4}-\d{2}-\d{2}$/.test(candidate) ? candidate : "";
+}
+
+function dateStrings(value) {
+  const source = String(value || "");
+  return [...source.matchAll(/20\d{2}[./年-]\d{1,2}[./月-]\d{1,2}/g)]
+    .map((match) => match[0].replace(/[./年月]/g, "-").replace(/-+$/g, ""))
+    .map((item) => {
+      const parts = item.split("-").map(Number);
+      if (parts.length !== 3 || parts.some((part) => !Number.isInteger(part))) return "";
+      const [year, month, day] = parts;
+      if (month < 1 || month > 12 || day < 1 || day > 31) return "";
+      return `${year}-${String(month).padStart(2, "0")}-${String(day).padStart(2, "0")}`;
+    })
+    .filter(Boolean);
+}
+
+function detectReportPeriod(rows) {
+  const values = [];
+  for (const row of rows.slice(0, 5_000)) {
+    const suppliedDate = rowValue(row, FIELD_ALIASES.reportDate);
+    if (suppliedDate !== undefined) values.push(String(suppliedDate));
+  }
+  const dates = values.flatMap(dateStrings).sort();
+  if (!dates.length) return null;
+  const start = dates[0];
+  const end = dates.at(-1) || start;
+  return { start, end, label: start === end ? start : `${start} 至 ${end}` };
+}
+
+function periodKindFor(start, end) {
+  const startTime = Date.parse(`${start}T00:00:00Z`);
+  const endTime = Date.parse(`${end}T00:00:00Z`);
+  const days = Number.isFinite(startTime) && Number.isFinite(endTime)
+    ? Math.floor((endTime - startTime) / 86_400_000) + 1
+    : 1;
+  if (days <= 1) return "day";
+  if (days <= 8) return "week";
+  if (days >= 28 && days <= 32) return "month";
+  return "custom";
 }
 
 function totalRow(row) {
-  return /^(合计|汇总|总计|total)$/i.test(text(row.productName || row.campaignName || row.audienceName));
+  return /^(合计|汇总|总计|total)$/i.test(text(row.productName || row.campaignName || row.audienceName || row.category));
+}
+
+function isStoredNormalizedRow(row) {
+  return Boolean(row && typeof row === "object" && [
+    "storeName", "productId", "productName", "spend", "grossRevenue", "revenue", "refundAmount", "refundDataAvailable", "roi",
+  ].every((field) => Object.hasOwn(row, field)));
+}
+
+function normalizeStoredRow(row) {
+  const spend = numeric(row.spend);
+  const grossRevenue = numeric(row.grossRevenue);
+  const refundDataAvailable = Boolean(row.refundDataAvailable);
+  const refundAmount = refundDataAvailable ? numeric(row.refundAmount) ?? 0 : null;
+  const revenue = numeric(row.revenue) ?? (Number.isFinite(grossRevenue) ? grossRevenue - (refundAmount || 0) : null);
+  const computedRoi = Number.isFinite(spend) && spend > 0 && Number.isFinite(grossRevenue) ? grossRevenue / spend : null;
+  return {
+    storeName: text(row.storeName, 80),
+    productId: text(row.productId, 80),
+    productName: text(row.productName, 120),
+    productStage: ["new", "mature", "unknown"].includes(row.productStage) ? row.productStage : "unknown",
+    campaignName: text(row.campaignName, 120),
+    channel: text(row.channel, 120),
+    category: text(row.category, 80),
+    primaryCategory: text(row.primaryCategory, 80),
+    secondaryCategory: text(row.secondaryCategory, 80),
+    audienceName: text(row.audienceName, 120),
+    spend,
+    grossRevenue,
+    revenue,
+    refundAmount,
+    refundDataAvailable,
+    roi: numeric(row.roi) ?? computedRoi,
+    orders: numeric(row.orders),
+    clicks: numeric(row.clicks),
+    impressions: numeric(row.impressions),
+    conversionRate: numeric(row.conversionRate, { percent: true }),
+    audienceSize: numeric(row.audienceSize),
+    visitors: numeric(row.visitors),
+    pageViews: numeric(row.pageViews),
+    favorites: numeric(row.favorites),
+    cartUsers: numeric(row.cartUsers),
+    cartItems: numeric(row.cartItems),
+    paidBuyers: numeric(row.paidBuyers),
+    paidItems: numeric(row.paidItems),
+    bounceRate: numeric(row.bounceRate, { percent: true }),
+    collectionCartRate: numeric(row.collectionCartRate, { percent: true }),
+    averageDwellSeconds: numeric(row.averageDwellSeconds),
+    cpc: numeric(row.cpc),
+    costPerCollectCart: numeric(row.costPerCollectCart),
+  };
 }
 
 function normalizeRow(row) {
+  const normalizedRecord = Object.hasOwn(row || {}, "grossRevenue") || Object.hasOwn(row || {}, "refundAmount");
   const spend = numeric(rowValue(row, FIELD_ALIASES.spend));
-  const revenue = numeric(rowValue(row, FIELD_ALIASES.revenue));
+  const suppliedRevenue = normalizedRecord
+    ? numeric(row.grossRevenue)
+    : numeric(rowValue(row, FIELD_ALIASES.revenue));
+  const refundDataAvailable = normalizedRecord
+    ? Boolean(row.refundDataAvailable)
+    : rowHasColumn(row, FIELD_ALIASES.refundAmount);
+  const suppliedRefundAmount = normalizedRecord
+    ? numeric(row.refundAmount)
+    : numeric(rowValue(row, FIELD_ALIASES.refundAmount));
+  const refundAmount = refundDataAvailable ? suppliedRefundAmount ?? 0 : null;
   const suppliedRoi = numeric(rowValue(row, FIELD_ALIASES.roi));
-  const computedRoi = Number.isFinite(spend) && spend > 0 && Number.isFinite(revenue) ? revenue / spend : null;
+  const grossRevenue = Number.isFinite(suppliedRevenue)
+    ? suppliedRevenue
+    : Number.isFinite(spend) && Number.isFinite(suppliedRoi) ? spend * suppliedRoi : null;
+  const revenue = normalizedRecord
+    ? numeric(row.revenue)
+    : Number.isFinite(grossRevenue) ? grossRevenue - (refundAmount || 0) : null;
+  const computedRoi = Number.isFinite(spend) && spend > 0 && Number.isFinite(grossRevenue) ? grossRevenue / spend : null;
   const productStageText = text(rowValue(row, FIELD_ALIASES.productStage), 30).toLowerCase();
   return {
     storeName: text(rowValue(row, FIELD_ALIASES.storeName), 80),
@@ -160,16 +341,34 @@ function normalizeRow(row) {
     productName: text(rowValue(row, FIELD_ALIASES.productName), 120),
     productStage: /新|^new$/.test(productStageText) ? "new" : /老|成熟|^mature$/.test(productStageText) ? "mature" : "unknown",
     campaignName: text(rowValue(row, FIELD_ALIASES.campaignName), 120),
+    channel: text(rowValue(row, FIELD_ALIASES.channel), 120),
     category: text(rowValue(row, FIELD_ALIASES.category), 80),
+    primaryCategory: text(rowValue(row, FIELD_ALIASES.primaryCategory), 80),
+    secondaryCategory: text(rowValue(row, FIELD_ALIASES.secondaryCategory), 80),
     audienceName: text(rowValue(row, FIELD_ALIASES.audienceName), 120),
     spend,
     revenue,
+    grossRevenue,
+    refundAmount,
+    refundDataAvailable,
     roi: Number.isFinite(computedRoi) ? computedRoi : suppliedRoi,
     orders: numeric(rowValue(row, FIELD_ALIASES.orders)),
     clicks: numeric(rowValue(row, FIELD_ALIASES.clicks)),
     impressions: numeric(rowValue(row, FIELD_ALIASES.impressions)),
     conversionRate: numeric(rowValue(row, FIELD_ALIASES.conversionRate), { percent: true }),
     audienceSize: numeric(rowValue(row, FIELD_ALIASES.audienceSize)),
+    visitors: numeric(rowValue(row, FIELD_ALIASES.visitors)),
+    pageViews: numeric(rowValue(row, FIELD_ALIASES.pageViews)),
+    favorites: numeric(rowValue(row, FIELD_ALIASES.favorites)),
+    cartUsers: numeric(rowValue(row, FIELD_ALIASES.cartUsers)),
+    cartItems: numeric(rowValue(row, FIELD_ALIASES.cartItems)),
+    paidBuyers: numeric(rowValue(row, FIELD_ALIASES.paidBuyers)),
+    paidItems: numeric(rowValue(row, FIELD_ALIASES.paidItems)),
+    bounceRate: numeric(rowValue(row, FIELD_ALIASES.bounceRate), { percent: true }),
+    collectionCartRate: numeric(rowValue(row, FIELD_ALIASES.collectionCartRate), { percent: true }),
+    averageDwellSeconds: numeric(rowValue(row, FIELD_ALIASES.averageDwellSeconds)),
+    cpc: numeric(rowValue(row, FIELD_ALIASES.cpc)),
+    costPerCollectCart: numeric(rowValue(row, FIELD_ALIASES.costPerCollectCart)),
   };
 }
 
@@ -177,8 +376,70 @@ function normalizedRows(rows) {
   return (Array.isArray(rows) ? rows : [])
     .filter((row) => row && typeof row === "object" && !Array.isArray(row))
     .slice(0, MAX_ROWS_PER_REPORT)
-    .map(normalizeRow)
+    .map((row) => isStoredNormalizedRow(row) ? normalizeStoredRow(row) : normalizeRow(row))
     .filter((row) => Object.values(row).some((value) => value !== "" && value !== null && value !== "unknown"));
+}
+
+function promotionMappingKey(report, row, { includeStore = true } = {}) {
+  const productId = text(row?.productId, 80).replace(/\s+/g, "");
+  const planName = text(row?.campaignName, 120);
+  if (!productId || !planName) return "";
+  const storeName = text(row?.storeName || report?.storeName, 80);
+  return [includeStore ? storeName : "", productId, planName].map(joinKey).join("\u0000");
+}
+
+function looksLikePromotionType(value) {
+  const label = text(value, 120);
+  if (!label || /计划|商品|产品/.test(label)) return false;
+  return /全站|关键词|直通车|万相台|引力魔方|超级推荐|品销宝|钻展|淘客|推广|营销/.test(label);
+}
+
+/**
+ * Early local imports stored a plan name in both `campaignName` and `channel`.
+ * Recover only a single promotion type verified by another local source row
+ * with the same store/product/plan identity. Ambiguous data is never guessed.
+ */
+function repairLegacyPromotionChannels(reports) {
+  const mappings = new Map();
+  const addMapping = (key, channel) => {
+    if (!key || !channel) return;
+    if (!mappings.has(key)) mappings.set(key, new Set());
+    mappings.get(key).add(channel);
+  };
+  for (const report of reports) {
+    if (!["campaign", "promotion"].includes(report.type)) continue;
+    for (const row of report.rows) {
+      const channel = text(row.channel, 120);
+      const planName = text(row.campaignName, 120);
+      if (!channel || !planName || channel === planName) continue;
+      addMapping(promotionMappingKey(report, row), channel);
+      addMapping(promotionMappingKey(report, row, { includeStore: false }), channel);
+    }
+  }
+  const resolve = (report, row) => {
+    const channel = text(row.channel, 120);
+    const planName = text(row.campaignName, 120);
+    if (!channel || channel !== planName || looksLikePromotionType(channel)) return channel;
+    for (const key of [
+      promotionMappingKey(report, row),
+      promotionMappingKey(report, row, { includeStore: false }),
+    ]) {
+      const candidates = mappings.get(key);
+      if (candidates?.size === 1) return [...candidates][0];
+    }
+    return channel;
+  };
+  return reports.map((report) => {
+    if (!["campaign", "promotion"].includes(report.type)) return report;
+    let changed = false;
+    const rows = report.rows.map((row) => {
+      const channel = resolve(report, row);
+      if (channel === row.channel) return row;
+      changed = true;
+      return { ...row, channel };
+    });
+    return changed ? { ...report, rows } : report;
+  });
 }
 
 function decodeCsv(buffer) {
@@ -343,12 +604,8 @@ export function isSupportedOperationsFile(file) {
   return Boolean(reportKind(file));
 }
 
-export async function parseOperationsFile(file) {
-  if (!file?.buffer?.length) throw Object.assign(new Error("请选择有效的数据文件或截图。"), { status: 400 });
-  if (file.buffer.length > OPERATIONS_MAX_UPLOAD_BYTES) throw Object.assign(new Error("运营数据文件不能超过 64 MB。"), { status: 413 });
+async function parseTabularOperationsFile(file) {
   const kind = reportKind(file);
-  if (!kind) throw Object.assign(new Error("支持 Excel、WPS、CSV、TSV、TXT、JSON、PNG、JPG 或 WEBP。"), { status: 400 });
-  if (kind === "screenshot") return { kind, columns: [], rows: [] };
   let rows;
   if (kind === "xlsx") rows = await parseWorkbook(file.buffer);
   else if (kind === "xls") rows = parseLegacyWorkbook(file.buffer);
@@ -357,29 +614,213 @@ export async function parseOperationsFile(file) {
     const parsed = JSON.parse(file.buffer.toString("utf8"));
     rows = Array.isArray(parsed) ? parsed : Array.isArray(parsed?.data) ? parsed.data : [];
   }
+  return { kind, rows };
+}
+
+export async function parseOperationsFile(file) {
+  if (!file?.buffer?.length) throw Object.assign(new Error("请选择有效的数据文件或截图。"), { status: 400 });
+  if (file.buffer.length > OPERATIONS_MAX_UPLOAD_BYTES) throw Object.assign(new Error("运营数据文件不能超过 64 MB。"), { status: 413 });
+  const kind = reportKind(file);
+  if (!kind) throw Object.assign(new Error("支持 Excel、WPS、CSV、TSV、TXT、JSON、PNG、JPG 或 WEBP。"), { status: 400 });
+  if (kind === "screenshot") return { kind, columns: [], rows: [], period: null };
+  const parsedFile = await parseTabularOperationsFile(file);
+  const rows = parsedFile.rows;
   if (!rows.length) throw Object.assign(new Error("报表中没有可识别的数据行。"), { status: 400 });
   const columns = uniqueStrings(rows.flatMap((row) => Object.keys(row || {})), 200);
-  return { kind, columns, rows: normalizedRows(rows) };
+  const normalized = normalizedRows(rows);
+  if (!normalized.length) throw Object.assign(new Error("已读取文件，但没有识别到可计算的经营数据。"), { status: 400 });
+  return {
+    kind,
+    columns,
+    rows: normalized,
+    // A download/export timestamp belongs to the filename or workbook
+    // metadata, not necessarily to the business data. Only report fields
+    // such as \"统计日期\" or \"统计周期\" may determine this period.
+    period: detectReportPeriod(rows),
+    detectedType: detectOperationsReportType({
+      fileName: file.originalname,
+      columns,
+      rows,
+    }),
+  };
+}
+
+function catalogEntryKey(storeName, productId) {
+  return `${joinKey(storeName)}:${text(productId, 80).replace(/\s+/g, "")}`;
+}
+
+function normalizeProductCatalogEntries(entries) {
+  const normalized = [];
+  for (const [index, entry] of (Array.isArray(entries) ? entries : []).entries()) {
+    const storeName = text(entry?.storeName, 80);
+    const productId = text(entry?.productId, 80).replace(/\s+/g, "");
+    const category = text(entry?.category, 80);
+    const model = text(entry?.model, 80);
+    if (!productId || (!category && !model)) continue;
+    normalized.push({
+      // Legacy catalog records had no identity or timestamp. Preserve their
+      // original array order as version order so migrating local data never
+      // replaces a newer mapping with an older one.
+      id: text(entry?.id, 80) || `catalog_legacy_${crypto.createHash("sha256").update(`${storeName}\n${productId}\n${category}\n${model}\n${index}`).digest("hex").slice(0, 20)}`,
+      storeName,
+      productId,
+      category,
+      model,
+      sourceName: text(entry?.sourceName, 160),
+      createdAt: typeof entry?.createdAt === "string" ? entry.createdAt : "",
+    });
+  }
+  return normalized.slice(-20_000);
+}
+
+export function createProductCatalogEntries(entries, { sourceName = "", now = new Date() } = {}) {
+  const createdAt = nowIso(now);
+  return normalizeProductCatalogEntries(entries).map((entry) => ({
+    ...entry,
+    id: `catalog_${crypto.randomUUID()}`,
+    sourceName: text(sourceName || entry.sourceName, 160),
+    createdAt,
+  }));
+}
+
+export async function parseProductCatalogFile(file) {
+  if (!file?.buffer?.length) throw Object.assign(new Error("请选择 ID 型号表。"), { status: 400 });
+  if (file.buffer.length > OPERATIONS_MAX_UPLOAD_BYTES) throw Object.assign(new Error("ID 型号表不能超过 64 MB。"), { status: 413 });
+  const kind = reportKind(file);
+  if (!kind || kind === "screenshot" || kind === "json") {
+    throw Object.assign(new Error("ID 型号表支持 Excel、WPS、CSV、TSV 或 TXT。"), { status: 400 });
+  }
+  const parsedFile = await parseTabularOperationsFile(file);
+  if (!parsedFile.rows.length) throw Object.assign(new Error("ID 型号表中没有可识别的数据行。"), { status: 400 });
+  const columns = uniqueStrings(parsedFile.rows.flatMap((row) => Object.keys(row || {})), 200);
+  const entries = normalizeProductCatalogEntries(parsedFile.rows.map((row) => ({
+    storeName: text(rowValue(row, PRODUCT_CATALOG_ALIASES.storeName), 80),
+    productId: text(rowValue(row, PRODUCT_CATALOG_ALIASES.productId), 80),
+    category: text(rowValue(row, PRODUCT_CATALOG_ALIASES.category), 80),
+    model: text(rowValue(row, PRODUCT_CATALOG_ALIASES.model), 80),
+  })));
+  if (!entries.length) {
+    throw Object.assign(new Error("未识别到有效商品 ID。请确认表头包含 ID，且每行至少提供型号或品类。"), { status: 400 });
+  }
+  return {
+    kind: parsedFile.kind,
+    columns,
+    entries,
+    skippedRows: Math.max(0, parsedFile.rows.length - entries.length),
+  };
+}
+
+function isCategorySpendSource({ fileName = "", columns = [], rows = [] } = {}) {
+  const name = normalizeUploadedFilename(fileName);
+  if (/(?:分类目场景|类目场景|营销场景|类目付费)/.test(name)) return true;
+
+  const headers = uniqueStrings([
+    ...(Array.isArray(columns) ? columns : []),
+    ...((Array.isArray(rows) ? rows : []).slice(0, 5).flatMap((row) => Object.keys(row || {}))),
+  ], 200).map(headerKey);
+  const hasCategory = headers.some((header) => ["类目", "类目名称", "二级类目名称", "商品类目"].includes(header));
+  const hasScenario = headers.some((header) => /(?:场景|推广渠道|一级场景)/.test(header));
+  const hasProductIdentity = headers.some((header) => ["商品id", "宝贝id", "主体id", "商品名称", "宝贝名称"].includes(header));
+  return hasCategory && hasScenario && !hasProductIdentity;
+}
+
+function canonicalOperationsReportType(type, source = {}) {
+  // “品类付费” was a duplicate label for the same category-level spend
+  // dataset. Keep the legacy identifier readable, but route actual category
+  // scenario exports to the single `scenario` calculation path.
+  if (type === "promotion" && isCategorySpendSource(source)) return "scenario";
+  return type;
+}
+
+function detectOperationsReportType({ fileName = "", columns = [], rows = [] } = {}) {
+  const name = normalizeUploadedFilename(fileName).toLowerCase();
+  const headers = uniqueStrings([
+    ...(Array.isArray(columns) ? columns : []),
+    ...((Array.isArray(rows) ? rows : []).slice(0, 5).flatMap((row) => Object.keys(row || {}))),
+  ], 200).map(headerKey);
+  const hasHeader = (pattern) => headers.some((header) => pattern.test(header));
+  const hasProduct = hasHeader(/^(?:商品id|宝贝id|主体id|商品名称|宝贝名称|推广商品|主体名称)$/);
+  const hasCategory = hasHeader(/^(?:一级类目名称|二级类目名称|类目名称|商品类目|类目)$/);
+  const hasSpend = hasHeader(/^(?:花费|消耗|推广花费|费用)$/);
+  const hasRefund = hasHeader(/(?:退款)/);
+  const hasRevenue = hasHeader(/(?:支付金额|成交金额|总成交金额|交易金额|销售金额)/);
+  const hasPromotionDimension = hasHeader(/(?:计划|推广方式|推广渠道|场景|资源位)/);
+
+  // Keep the category-paid legacy export manual. It has a distinct accounting
+  // meaning but is intentionally not exposed in the current three-type uploader.
+  if (isCategorySpendSource({ fileName, columns, rows })) return null;
+  if (hasCategory && hasRevenue && (hasRefund || /(?:品类360|标准类目|品类报表)/.test(name))) return "category";
+  if (hasProduct && hasSpend && (hasPromotionDimension || /(?:商品报表|单品付费|商品推广|推广报表)/.test(name))) return "campaign";
+  if (hasProduct && hasRevenue && !hasSpend && /(?:商品.*全部|商品排行|生意参谋.*商品)/.test(name)) return "product";
+  if (hasProduct && hasRevenue && !hasSpend) return "product";
+  return null;
 }
 
 export function normalizeOperationsState(value = {}) {
-  const reports = (Array.isArray(value?.reports) ? value.reports : [])
+  const normalizedReports = (Array.isArray(value?.reports) ? value.reports : [])
     .filter((report) => report && OPERATIONS_REPORT_TYPES.includes(report.type))
     .slice(-MAX_REPORTS)
-    .map((report) => ({
-      id: text(report.id, 80),
-      type: report.type,
-      storeName: text(report.storeName, 80),
-      reportDate: dateOnly(report.reportDate),
-      sourceName: text(report.sourceName, 80),
-      fileName: text(normalizeUploadedFilename(report.fileName), 160),
-      kind: ["xls", "xlsx", "csv", "json", "screenshot"].includes(report.kind) ? report.kind : "csv",
-      columns: uniqueStrings(report.columns, 200),
-      rows: normalizedRows(report.rows),
-      screenshotPath: typeof report.screenshotPath === "string" ? report.screenshotPath : "",
-      screenshotMimeType: text(report.screenshotMimeType, 80),
-      importedAt: typeof report.importedAt === "string" ? report.importedAt : nowIso(),
-    }));
+    .map((report) => {
+      const fileName = text(normalizeUploadedFilename(report.fileName), 160);
+      const columns = uniqueStrings(report.columns, 200);
+      const rows = normalizedRows(report.rows);
+      const type = canonicalOperationsReportType(report.type, { fileName, columns, rows });
+      const detectedType = OPERATIONS_REPORT_TYPES.includes(report.detectedType)
+        ? canonicalOperationsReportType(report.detectedType, { fileName, columns, rows })
+        : type;
+      const dataSignature = normalizedReportDataSignature(report, rows);
+      return {
+        id: text(report.id, 80),
+        type,
+        storeName: text(report.storeName, 80),
+        reportDate: dateOnly(report.reportDate),
+        periodStart: dateOnly(report.periodStart || report.reportDate),
+        periodEnd: dateOnly(report.periodEnd || report.reportDate),
+        periodLabel: text(report.periodLabel, 80),
+        periodKind: OPERATIONS_PERIOD_KINDS.includes(report.periodKind)
+          ? report.periodKind
+          : periodKindFor(dateOnly(report.periodStart || report.reportDate), dateOnly(report.periodEnd || report.reportDate)),
+        detectedType,
+        sourceName: text(report.sourceName, 80),
+        fileName,
+        kind: ["xls", "xlsx", "csv", "json", "screenshot"].includes(report.kind) ? report.kind : "csv",
+        columns,
+        rows,
+        screenshotPath: typeof report.screenshotPath === "string" ? report.screenshotPath : "",
+        screenshotMimeType: text(report.screenshotMimeType, 80),
+        importedAt: typeof report.importedAt === "string" ? report.importedAt : nowIso(),
+        dataSignature,
+        cloudOrigin: report?.cloudOrigin && typeof report.cloudOrigin === "object"
+          ? {
+            endpoint: text(report.cloudOrigin.endpoint, 300),
+            teamId: text(report.cloudOrigin.teamId, 120),
+            remoteReportId: text(report.cloudOrigin.remoteReportId, 120),
+            revision: Math.max(0, Math.floor(Number(report.cloudOrigin.revision) || 0)),
+            syncedAt: typeof report.cloudOrigin.syncedAt === "string" ? report.cloudOrigin.syncedAt : null,
+          }
+          : null,
+      };
+    });
+  const reports = repairLegacyPromotionChannels(normalizedReports);
+  const ledgerSourceSignature = operationsLedgerSourceSignature(reports);
+  const storedLedgerVersion = Number(value?.ledgerVersion || 0);
+  const ledger = storedLedgerVersion === OPERATIONS_LEDGER_VERSION
+    && value?.ledgerSourceSignature === ledgerSourceSignature
+    ? normalizeOperationsLedger(value?.ledger, reports)
+    : buildOperationsLedger(reports);
+  const productCatalog = normalizeProductCatalogEntries(value?.productCatalog);
+  const storeNames = uniqueStrings([
+    ...(Array.isArray(value?.storeNames) ? value.storeNames : []),
+    ...reports.map((report) => report.storeName),
+    ...productCatalog.map((entry) => entry.storeName),
+  ], 80);
+  const catalogSource = value?.productCatalogSource || {};
+  const productCatalogSource = productCatalog.length
+    ? {
+      fileName: text(normalizeUploadedFilename(catalogSource.fileName), 160),
+      updatedAt: typeof catalogSource.updatedAt === "string" ? catalogSource.updatedAt : null,
+    }
+    : { fileName: "", updatedAt: null };
   const targets = Object.fromEntries(Object.entries(value?.targets || {}).flatMap(([key, target]) => {
     const targetRoi = numeric(target?.targetRoi);
     const maxFeeRate = numeric(target?.maxFeeRate, { percent: true });
@@ -398,15 +839,38 @@ export function normalizeOperationsState(value = {}) {
     .filter((item) => item && ["user", "assistant"].includes(item.role) && text(item.content, 4_000))
     .slice(-MAX_CHAT_MESSAGES)
     .map((item) => ({ id: text(item.id, 80), role: item.role, content: text(item.content, 4_000), createdAt: typeof item.createdAt === "string" ? item.createdAt : nowIso() }));
+  const salesDeductions = (Array.isArray(value?.salesDeductions) ? value.salesDeductions : [])
+    .map((item) => {
+      const reportDate = dateOnly(item?.reportDate);
+      const amount = numeric(item?.amount);
+      return {
+        id: text(item?.id, 80),
+        storeName: text(item?.storeName, 80),
+        reportDate,
+        amount,
+        note: text(item?.note, 240),
+        createdAt: typeof item?.createdAt === "string" ? item.createdAt : nowIso(),
+      };
+    })
+    .filter((item) => item.id && item.storeName && item.reportDate && Number.isFinite(item.amount) && item.amount > 0)
+    .slice(-MAX_SALES_DEDUCTIONS);
   const schedule = value?.dailyReport || {};
   return {
     reports,
+    ledgerVersion: OPERATIONS_LEDGER_VERSION,
+    ledgerSourceSignature,
+    ledger,
+    storeNames,
+    productCatalog,
+    productCatalogSource,
     targets,
     feedback,
     chat,
+    salesDeductions,
     principles: text(value?.principles, 4_000),
     qwenPawInstallDirectory: normalizeQwenPawInstallDirectory(value?.qwenPawInstallDirectory),
     qwenPawAlerts: normalizeQwenPawAlerts(value?.qwenPawAlerts),
+    cloudSync: normalizeCloudSync(value?.cloudSync),
     dailyReport: {
       ...DEFAULT_DAILY_REPORT,
       enabled: Boolean(schedule.enabled),
@@ -416,6 +880,56 @@ export function normalizeOperationsState(value = {}) {
       lastError: text(schedule.lastError, 300),
     },
     analyses: (Array.isArray(value?.analyses) ? value.analyses : []).filter(Boolean).slice(-60),
+  };
+}
+
+/** Clears generated operating analyses while retaining every source dataset and chat record. */
+export function clearOperationsAnalyses(stateInput) {
+  const state = normalizeOperationsState(stateInput);
+  return { ...state, analyses: [] };
+}
+
+/**
+ * A store name is only a local assignment. Removing it must not erase source
+ * reports or catalog rows, so their explicit assignment becomes unassigned.
+ */
+export function unassignOperationsStore(stateInput, storeName) {
+  const state = normalizeOperationsState(stateInput);
+  const target = text(storeName, 80);
+  if (!target || target === OPERATIONS_UNASSIGNED_STORE_NAME) return null;
+  const matchesTarget = (value) => String(value || "").localeCompare(target, "zh-CN", { sensitivity: "accent" }) === 0;
+  if (!state.storeNames.some(matchesTarget)) return null;
+
+  let reportCount = 0;
+  let productCatalogCount = 0;
+  let salesDeductionCount = 0;
+  const reports = state.reports.map((report) => {
+    if (!matchesTarget(report.storeName)) return report;
+    reportCount += 1;
+    return { ...report, storeName: OPERATIONS_UNASSIGNED_STORE_NAME };
+  });
+  const productCatalog = state.productCatalog.map((entry) => {
+    if (!matchesTarget(entry.storeName)) return entry;
+    productCatalogCount += 1;
+    return { ...entry, storeName: OPERATIONS_UNASSIGNED_STORE_NAME };
+  });
+  const salesDeductions = state.salesDeductions.map((deduction) => {
+    if (!matchesTarget(deduction.storeName)) return deduction;
+    salesDeductionCount += 1;
+    return { ...deduction, storeName: OPERATIONS_UNASSIGNED_STORE_NAME };
+  });
+
+  return {
+    state: normalizeOperationsState({
+      ...state,
+      reports,
+      productCatalog,
+      salesDeductions,
+      storeNames: state.storeNames.filter((name) => !matchesTarget(name)),
+    }),
+    reportCount,
+    productCatalogCount,
+    salesDeductionCount,
   };
 }
 
@@ -429,13 +943,45 @@ export async function persistOperationsScreenshot(file, { dataDir, reportId }) {
 }
 
 export function createOperationsReport(input, parsed, { file, screenshotPath = "", now = new Date() } = {}) {
-  const type = OPERATIONS_REPORT_TYPES.includes(input?.type) ? input.type : "promotion";
+  // Report category is chosen by the operator.  Do not infer it from a file
+  // name or a loose header match: a wrong automatic classification is worse
+  // than asking for one deliberate manual selection.
+  const requestedType = OPERATIONS_REPORT_TYPES.includes(input?.type) ? input.type : "market";
+  const type = canonicalOperationsReportType(requestedType, {
+    fileName: file?.originalname,
+    columns: parsed?.columns,
+    rows: parsed?.rows,
+  });
   const id = `ops_${crypto.randomUUID()}`;
+  const detectedPeriod = parsed?.period || null;
+  const requestedPeriodKind = OPERATIONS_PERIOD_KINDS.includes(input?.periodKind) ? input.periodKind : "";
+  const requestedDate = isoDate(text(input?.reportDate, 40));
+  const requestedStart = isoDate(input?.periodStart);
+  const requestedEnd = isoDate(input?.periodEnd);
+  const isScreenshot = parsed?.kind === "screenshot";
+  // For data files, a date is part of the data contract. Never turn an
+  // unknown reporting day into the import day or the export filename date.
+  const periodStart = requestedStart
+    || ((!requestedPeriodKind || requestedPeriodKind === "day") && requestedDate)
+    || detectedPeriod?.start
+    || (isScreenshot ? dateOnly(now) : "");
+  const periodEnd = requestedEnd || requestedDate || detectedPeriod?.end || (isScreenshot ? dateOnly(now) : "");
+  if (!periodStart || !periodEnd) {
+    throw Object.assign(new Error("未检测到报表统计日期。请选择统计日期或统计区间后再导入；下载日期不会作为统计日期使用。"), { status: 400 });
+  }
+  const periodKind = OPERATIONS_PERIOD_KINDS.includes(input?.periodKind)
+    ? input.periodKind
+    : periodKindFor(periodStart, periodEnd);
   return {
     id,
     type,
     storeName: text(input?.storeName, 80),
-    reportDate: dateOnly(input?.reportDate, now),
+    reportDate: periodEnd,
+    periodStart,
+    periodEnd,
+    periodLabel: periodStart === periodEnd ? periodEnd : `${periodStart} 至 ${periodEnd}`,
+    periodKind,
+    detectedType: type,
     sourceName: text(input?.sourceName, 80),
     fileName: text(normalizeUploadedFilename(file?.originalname), 160),
     kind: parsed.kind,
@@ -444,7 +990,202 @@ export function createOperationsReport(input, parsed, { file, screenshotPath = "
     screenshotPath,
     screenshotMimeType: parsed.kind === "screenshot" ? String(file?.mimetype || "image/png") : "",
     importedAt: nowIso(now),
+    // The data hash lets the local ledger invalidate itself without repeatedly
+    // serializing every raw report on each page switch.
+    dataSignature: crypto.createHash("sha256").update(JSON.stringify(parsed.rows || [])).digest("hex"),
   };
+}
+
+function normalizedReportDataSignature(report, rows) {
+  const saved = text(report?.dataSignature, 80).toLowerCase();
+  if (/^[a-f0-9]{64}$/.test(saved)) return saved;
+  return crypto.createHash("sha256").update(JSON.stringify(rows || [])).digest("hex");
+}
+
+function operationsLedgerSourceSignature(reports) {
+  const source = reports.map((report) => [
+    report.id,
+    report.type,
+    report.storeName,
+    report.periodKind,
+    report.periodStart,
+    report.periodEnd,
+    report.importedAt,
+    report.dataSignature,
+  ]);
+  return crypto.createHash("sha256").update(JSON.stringify(source)).digest("hex");
+}
+
+function ledgerEntityFor(report, row) {
+  const type = report.type;
+  const productId = text(row.productId, 80).replace(/\s+/g, "");
+  const productName = text(row.productName, 120);
+  const category = text(row.secondaryCategory || row.category || row.primaryCategory, 80);
+  const audienceName = text(row.audienceName, 120);
+  if (["product", "campaign", "promotion"].includes(type) && (productId || productName)) {
+    return { entityType: "product", entityKey: productId ? `id:${productId}` : `name:${joinKey(productName)}` };
+  }
+  if (["category", "scenario"].includes(type) && category) {
+    return { entityType: "category", entityKey: `category:${joinKey(category)}` };
+  }
+  if (["audience", "competitor"].includes(type) && audienceName) {
+    return { entityType: "audience", entityKey: `audience:${joinKey(audienceName)}` };
+  }
+  const fallback = productName || category || audienceName || row.campaignName || "未归类";
+  return { entityType: "generic", entityKey: `generic:${joinKey(fallback) || "unknown"}` };
+}
+
+function ledgerStoreName(report, row) {
+  // The selected report store is the operator's explicit assignment. It must
+  // win over a stale store name embedded in a downloaded export.
+  return text(report.storeName || row.storeName || reportSnapshotStore(report), 80);
+}
+
+function newLedgerLine(report, row, entity, storeName) {
+  return {
+    sourceReportId: report.id,
+    type: report.type,
+    entityType: entity.entityType,
+    entityKey: entity.entityKey,
+    storeName,
+    periodKind: report.periodKind,
+    periodStart: report.periodStart,
+    periodEnd: report.periodEnd,
+    reportDate: report.reportDate,
+    productId: text(row.productId, 80).replace(/\s+/g, ""),
+    productName: text(row.productName, 120),
+    productStage: row.productStage,
+    campaignName: text(row.campaignName, 120),
+    // Promotion rows retain the channel dimension so a product's full
+    // channel breakdown remains available after ledger aggregation.
+    channel: text(row.channel, 120),
+    category: text(row.category, 80),
+    primaryCategory: text(row.primaryCategory, 80),
+    secondaryCategory: text(row.secondaryCategory, 80),
+    audienceName: text(row.audienceName, 120),
+    spend: 0,
+    grossRevenue: 0,
+    revenue: 0,
+    refundAmount: 0,
+    refundDataAvailable: false,
+    orders: 0,
+    clicks: 0,
+    impressions: 0,
+    visitors: 0,
+    pageViews: 0,
+    favorites: 0,
+    cartUsers: 0,
+    cartItems: 0,
+    paidBuyers: 0,
+    paidItems: 0,
+    audienceSize: 0,
+    averageDwellSeconds: 0,
+    rowCount: 0,
+    _revenueRows: 0,
+    _refundDataRows: 0,
+  };
+}
+
+function addLedgerRow(line, row) {
+  const sumFields = [
+    "spend", "grossRevenue", "revenue", "refundAmount", "orders", "clicks",
+    "impressions", "visitors", "pageViews", "favorites", "cartUsers", "cartItems",
+    "paidBuyers", "paidItems", "audienceSize", "averageDwellSeconds",
+  ];
+  for (const field of sumFields) {
+    if (Number.isFinite(row[field])) line[field] += row[field];
+  }
+  if (Number.isFinite(row.revenue)) {
+    line._revenueRows += 1;
+    if (row.refundDataAvailable) line._refundDataRows += 1;
+  }
+  line.rowCount += 1;
+}
+
+function finalizeLedgerLine(line) {
+  const { _revenueRows, _refundDataRows, ...stored } = line;
+  return {
+    ...stored,
+    refundDataAvailable: _revenueRows > 0 && _refundDataRows === _revenueRows,
+    roi: stored.spend > 0 ? stored.revenue / stored.spend : null,
+  };
+}
+
+export function buildOperationsLedger(reports = []) {
+  const grouped = new Map();
+  for (const report of reports) {
+    if (!report?.id || report.kind === "screenshot") continue;
+    for (const rawRow of report.rows || []) {
+      const row = normalizeStoredRow(rawRow);
+      if (totalRow(row) || (report.type === "category" && !categoryDetailRow(row))) continue;
+      const entity = ledgerEntityFor(report, row);
+      const storeName = ledgerStoreName(report, row);
+      const channel = ["campaign", "promotion"].includes(report.type) ? text(row.channel, 120) : "";
+      const campaignName = ["campaign", "promotion"].includes(report.type) ? text(row.campaignName, 120) : "";
+      const key = [
+        report.id,
+        report.type,
+        storeName,
+        report.periodKind,
+        report.periodStart,
+        report.periodEnd,
+        entity.entityType,
+        entity.entityKey,
+        channel,
+        campaignName,
+      ].join("\u0000");
+      if (!grouped.has(key)) grouped.set(key, newLedgerLine(report, row, entity, storeName));
+      addLedgerRow(grouped.get(key), row);
+    }
+  }
+  return [...grouped.values()].map(finalizeLedgerLine);
+}
+
+function normalizeOperationsLedger(ledger, reports) {
+  const reportsById = new Map(reports.map((report) => [report.id, report]));
+  const normalized = [];
+  for (const entry of Array.isArray(ledger) ? ledger : []) {
+    const report = reportsById.get(text(entry?.sourceReportId, 80));
+    if (!report) continue;
+    const row = normalizeStoredRow(entry);
+    const entityType = ["product", "category", "audience", "generic"].includes(entry?.entityType)
+      ? entry.entityType
+      : ledgerEntityFor(report, row).entityType;
+    const entityKey = text(entry?.entityKey, 240) || ledgerEntityFor(report, row).entityKey;
+    const rowCount = Math.max(1, Math.min(MAX_ROWS_PER_REPORT, Math.floor(numeric(entry?.rowCount) || 1)));
+    const draft = newLedgerLine(report, row, { entityType, entityKey }, ledgerStoreName(report, row));
+    const { _revenueRows, _refundDataRows, ...base } = draft;
+    normalized.push({
+      ...base,
+      ...row,
+      sourceReportId: report.id,
+      type: report.type,
+      entityType,
+      entityKey,
+      storeName: ledgerStoreName(report, row),
+      periodKind: report.periodKind,
+      periodStart: report.periodStart,
+      periodEnd: report.periodEnd,
+      reportDate: report.reportDate,
+      rowCount,
+      refundDataAvailable: Boolean(entry?.refundDataAvailable),
+      roi: Number.isFinite(row.spend) && row.spend > 0 && Number.isFinite(row.revenue) ? row.revenue / row.spend : null,
+    });
+  }
+  return normalized;
+}
+
+function ledgerBackedReports(reports, ledger) {
+  const rowsByReport = new Map();
+  for (const row of ledger) {
+    if (!rowsByReport.has(row.sourceReportId)) rowsByReport.set(row.sourceReportId, []);
+    rowsByReport.get(row.sourceReportId).push(row);
+  }
+  return reports.map((report) => ({
+    ...report,
+    sourceRowCount: report.rows.length,
+    rows: rowsByReport.get(report.id) || [],
+  }));
 }
 
 function reportSnapshotDate(report) {
@@ -471,15 +1212,38 @@ function aggregate(rows) {
   const values = rows.reduce((result, row) => ({
     spend: result.spend + (Number.isFinite(row.spend) ? row.spend : 0),
     revenue: result.revenue + (Number.isFinite(row.revenue) ? row.revenue : 0),
+    grossRevenue: result.grossRevenue + (Number.isFinite(row.grossRevenue) ? row.grossRevenue : Number.isFinite(row.revenue) ? row.revenue : 0),
+    refundAmount: result.refundAmount + (Number.isFinite(row.refundAmount) ? row.refundAmount : 0),
+    revenueRows: result.revenueRows + (Number.isFinite(row.revenue) ? 1 : 0),
+    refundDataRows: result.refundDataRows + (row.refundDataAvailable ? 1 : 0),
     orders: result.orders + (Number.isFinite(row.orders) ? row.orders : 0),
     clicks: result.clicks + (Number.isFinite(row.clicks) ? row.clicks : 0),
     impressions: result.impressions + (Number.isFinite(row.impressions) ? row.impressions : 0),
-  }), { spend: 0, revenue: 0, orders: 0, clicks: 0, impressions: 0 });
+    visitors: result.visitors + (Number.isFinite(row.visitors) ? row.visitors : 0),
+    pageViews: result.pageViews + (Number.isFinite(row.pageViews) ? row.pageViews : 0),
+    favorites: result.favorites + (Number.isFinite(row.favorites) ? row.favorites : 0),
+    cartUsers: result.cartUsers + (Number.isFinite(row.cartUsers) ? row.cartUsers : 0),
+    cartItems: result.cartItems + (Number.isFinite(row.cartItems) ? row.cartItems : 0),
+    paidBuyers: result.paidBuyers + (Number.isFinite(row.paidBuyers) ? row.paidBuyers : 0),
+    paidItems: result.paidItems + (Number.isFinite(row.paidItems) ? row.paidItems : 0),
+  }), {
+    spend: 0, revenue: 0, grossRevenue: 0, refundAmount: 0, revenueRows: 0, refundDataRows: 0,
+    orders: 0, clicks: 0, impressions: 0,
+    visitors: 0, pageViews: 0, favorites: 0, cartUsers: 0, cartItems: 0, paidBuyers: 0, paidItems: 0,
+  });
+  const { revenueRows: _revenueRows, refundDataRows: _refundDataRows, ...totals } = values;
   return {
-    ...values,
-    feeRate: values.revenue > 0 ? values.spend / values.revenue : null,
+    ...totals,
+    netGsv: values.revenue,
+    refundDataAvailable: values.revenueRows > 0 && values.refundDataRows === values.revenueRows,
+    feeRate: values.refundDataAvailable && values.revenue > 0 ? values.spend / values.revenue : null,
     roi: values.spend > 0 ? values.revenue / values.spend : null,
-    conversionRate: values.clicks > 0 ? values.orders / values.clicks : null,
+    conversionRate: values.clicks > 0
+      ? values.orders / values.clicks
+      : values.visitors > 0 ? values.paidBuyers / values.visitors : null,
+    collectionCartRate: values.visitors > 0 ? values.cartUsers / values.visitors : null,
+    cpc: values.clicks > 0 ? values.spend / values.clicks : null,
+    costPerCollectCart: values.cartUsers > 0 ? values.spend / values.cartUsers : null,
   };
 }
 
@@ -571,10 +1335,11 @@ function buildOperationsArchive(reports) {
     const date = reportSnapshotDate(report);
     const storeName = reportSnapshotStore(report);
     const key = [date, report.type, storeName].join("|");
-    if (!groups.has(key)) groups.set(key, { key, date, type: report.type, storeName, reports: [], rows: [] });
+    if (!groups.has(key)) groups.set(key, { key, date, type: report.type, storeName, reports: [], rows: [], rowCount: 0 });
     const group = groups.get(key);
     group.reports.push(report);
     group.rows.push(...report.rows);
+    group.rowCount += Number(report.sourceRowCount) || report.rows.length;
   }
 
   const snapshots = [...groups.values()].map((group) => ({
@@ -583,7 +1348,7 @@ function buildOperationsArchive(reports) {
     type: group.type,
     storeName: group.storeName,
     reportCount: group.reports.length,
-    rowCount: group.rows.length,
+    rowCount: group.rowCount,
     sources: uniqueStrings(group.reports.map((report) => report.sourceName || report.fileName), 8),
     metrics: aggregate(group.rows),
     comparison: { previousDate: null, spendChange: null, revenueChange: null, roiChange: null, feeRateChange: null },
@@ -625,13 +1390,752 @@ function buildOperationsArchive(reports) {
       snapshots: day.snapshots.sort((left, right) => left.type.localeCompare(right.type) || left.storeName.localeCompare(right.storeName)),
     }))
     .sort((left, right) => right.date.localeCompare(left.date));
-  return { days, totalReports: reports.length, totalRows: reports.reduce((sum, report) => sum + report.rows.length, 0) };
+  return {
+    days,
+    totalReports: reports.length,
+    totalRows: reports.reduce((sum, report) => sum + (Number(report.sourceRowCount) || report.rows.length), 0),
+  };
 }
 
-export function buildOperationsWorkspace(value = {}, { now = new Date() } = {}) {
-  const state = normalizeOperationsState(value);
+function datasetGroupKey(type, row) {
+  if (type === "category" || type === "scenario") return row.category || row.campaignName || row.productName;
+  if (type === "promotion") return row.campaignName || row.productName || row.category;
+  if (type === "audience" || type === "competitor") return row.audienceName || row.productName || row.campaignName;
+  return row.productName || row.campaignName || row.productId || row.category;
+}
+
+// 生意参谋的标准类目导出会在同一张表中附带一级类目的汇总行。
+// 例如“厨房电器 / 厨房电器 / 厨房电器”并不是一个可经营的二级
+// 类目，而是其下全部明细的合计。它若参与聚合，会让类目 GMV、
+// 退款、费率和 Top 图全部重复计算。因此这类行在任何类目入口都
+// 必须直接排除，不能在没有明细时再作为兜底数据展示。
+function categoryParentSummaryRow(row) {
+  const primary = joinKey(row?.primaryCategory);
+  const secondary = joinKey(row?.secondaryCategory);
+  return Boolean(primary && secondary && primary === secondary);
+}
+
+function categoryDetailRow(row) {
+  return !categoryParentSummaryRow(row);
+}
+
+function buildDatasetViews(state) {
+  return OPERATIONS_REPORT_TYPES.map((type) => {
+    const typeReports = state.reports.filter((report) => report.type === type && report.kind !== "screenshot");
+    const reportDate = typeReports.map(reportSnapshotDate).sort().at(-1) || "";
+    const reports = typeReports.filter((report) => reportSnapshotDate(report) === reportDate);
+    const rows = reports.flatMap((report) => report.rows.map((row) => ({ ...row, report }))).filter((row) => !totalRow(row));
+    // Parent summary rows must never flow into a dataset: other surfaces (the
+    // warehouse, overview cards and generic category table) also consume this
+    // result, not only the category dashboard.
+    const effectiveRows = type === "category"
+      ? rows.filter(categoryDetailRow)
+      : rows.length ? rows : reports.flatMap((report) => report.rows.map((row) => ({ ...row, report })));
+    const groups = groupedRows(effectiveRows, "_dataset", (row) => datasetGroupKey(type, row))
+      .sort((left, right) => (right.revenue - left.revenue) || (right.spend - left.spend) || (right.visitors - left.visitors))
+      .slice(0, 50);
+    return {
+      type,
+      date: reportDate,
+      period: reports[0]?.periodLabel || reportDate,
+      reportCount: reports.length,
+      rowCount: effectiveRows.length,
+      metrics: aggregate(effectiveRows),
+      groups,
+      columns: uniqueStrings(reports.flatMap((report) => report.columns), 200),
+    };
+  }).filter((dataset) => dataset.reportCount > 0);
+}
+
+function firstDataset(datasets, types) {
+  return types.map((type) => datasets.find((dataset) => dataset.type === type)).find(Boolean) || null;
+}
+
+function datasetSource(dataset) {
+  return dataset ? { type: dataset.type, period: dataset.period, rowCount: dataset.rowCount } : null;
+}
+
+function joinKey(value) {
+  return text(value, 240).toLowerCase().replace(/[\s\-_/\\()[\]{}（）【】,.，。:：;；'"`~!！@#￥$%^&*+=|<>?？]/g, "");
+}
+
+function joinedRow(report, row) {
+  return {
+    ...row,
+    report,
+    storeName: row.storeName || reportSnapshotStore(report),
+  };
+}
+
+function latestReportsForTypes(reports, types) {
+  const result = [];
+  for (const type of types) {
+    const items = reports.filter((report) => report.type === type && report.kind !== "screenshot");
+    const date = items.map(reportSnapshotDate).sort().at(-1);
+    if (date) result.push(...items.filter((report) => reportSnapshotDate(report) === date));
+  }
+  return result;
+}
+
+function reportsForDashboardScope(reports, types, filters = {}) {
+  const items = reports.filter((report) => types.includes(report.type) && report.kind !== "screenshot");
+  // Without an explicit date range, preserve the landing view's existing
+  // latest-snapshot behavior. A date preset, however, represents a requested
+  // calculation range and must aggregate each included reporting period.
+  if (!String(filters.start || "") || !String(filters.end || "")) {
+    return latestReportsForTypes(items, types);
+  }
+  const latestByScope = new Map();
+  for (const report of items) {
+    const key = [report.type, joinKey(reportSnapshotStore(report)), reportPeriodKey(report)].join("\u0000");
+    const current = latestByScope.get(key);
+    if (!current || String(report.importedAt || "") >= String(current.importedAt || "")) {
+      latestByScope.set(key, report);
+    }
+  }
+  return [...latestByScope.values()].sort((left, right) => (
+    reportPeriodKey(left).localeCompare(reportPeriodKey(right))
+    || String(left.type).localeCompare(String(right.type))
+    || reportSnapshotStore(left).localeCompare(reportSnapshotStore(right), "zh-CN")
+  ));
+}
+
+function reportPeriodKey(report) {
+  const date = reportSnapshotDate(report);
+  const start = String(report?.periodStart || date);
+  const end = String(report?.periodEnd || date);
+  return `${start}:${end}`;
+}
+
+function sourcePeriodCoverage(referenceReports, availableReports) {
+  const referencePeriods = [...new Set(referenceReports.map(reportPeriodKey))].sort();
+  const availablePeriods = [...new Set(availableReports.map(reportPeriodKey))].sort();
+  const complete = referencePeriods.length > 0
+    && referencePeriods.length === availablePeriods.length
+    && referencePeriods.every((value, index) => value === availablePeriods[index]);
+  return {
+    complete,
+    referencePeriods,
+    availablePeriods,
+    missingPeriods: referencePeriods.filter((value) => !availablePeriods.includes(value)),
+    extraPeriods: availablePeriods.filter((value) => !referencePeriods.includes(value)),
+  };
+}
+
+function sourcePeriodWarning(referenceReports, availableReports, label) {
+  const coverage = sourcePeriodCoverage(referenceReports, availableReports);
+  const { referencePeriods, availablePeriods } = coverage;
+  if (!referencePeriods.length || coverage.complete) return null;
+  const labels = (reports, periods) => periods
+    .map((period) => reports.find((report) => reportPeriodKey(report) === period))
+    .filter(Boolean)
+    .map((report) => report.periodLabel || reportSnapshotDate(report));
+  const details = [
+    coverage.missingPeriods.length ? `经营有 ${labels(referenceReports, coverage.missingPeriods).join("、")}` : "",
+    coverage.extraPeriods.length ? `${label}有 ${labels(availableReports, coverage.extraPeriods).join("、")}` : "",
+  ].filter(Boolean).join("；");
+  if (!availablePeriods.length) return `${details}，尚未导入对应的${label}报表；推广花费、ROI 和费率不会凭空补算。`;
+  return `${details}。净 GSV 与已导入花费会分别展示；ROI 和费率不计算，避免跨周期误导。`;
+}
+
+function detailRows(reports) {
+  return reports.flatMap((report) => report.rows.map((row) => joinedRow(report, row))).filter((row) => !totalRow(row));
+}
+
+function categoryDetailRows(reports) {
+  return reports.flatMap((report) => {
+    return report.rows
+      .map((row) => joinedRow(report, row))
+      .filter((row) => !totalRow(row) && categoryDetailRow(row));
+  });
+}
+
+function categoryName(row) {
+  return text(row.secondaryCategory || row.category || row.primaryCategory, 120);
+}
+
+function entityMetric(rows) {
+  return aggregate(rows || []);
+}
+
+function newEntity(name, key, { productId = "", storeName = "", model = "", category = "", matchStatus = "unmatched" } = {}) {
+  return {
+    key,
+    name: name || "未命名对象",
+    productId,
+    storeName,
+    model,
+    category,
+    matchStatus,
+    sales: entityMetric([]),
+    promotion: entityMetric([]),
+    salesCount: 0,
+    promotionCount: 0,
+  };
+}
+
+function hydrateEntity(entity, salesRows, promotionRows, matchStatus, periodCoverage = sourcePeriodCoverage(
+  salesRows.map((row) => row.report).filter(Boolean),
+  promotionRows.map((row) => row.report).filter(Boolean),
+)) {
+  const sales = entityMetric(salesRows);
+  const promotion = entityMetric(promotionRows);
+  const revenue = sales.revenue;
+  const spend = promotion.spend;
+  const rateAvailable = periodCoverage.complete
+    && sales.refundDataAvailable
+    && salesRows.length > 0
+    && promotionRows.length > 0
+    && revenue > 0;
+  return {
+    ...entity,
+    matchStatus,
+    sales,
+    promotion,
+    salesCount: salesRows.length,
+    promotionCount: promotionRows.length,
+    revenue,
+    grossRevenue: sales.grossRevenue,
+    refundAmount: sales.refundAmount,
+    refundDataAvailable: sales.refundDataAvailable,
+    spend,
+    promotionRevenue: promotion.revenue,
+    promotionChannels: buildPromotionChannels(promotionRows),
+    promotionCoverageComplete: periodCoverage.complete,
+    roi: promotion.roi,
+    feeRate: rateAvailable ? spend / revenue : null,
+    visitors: sales.visitors,
+    paidBuyers: sales.paidBuyers,
+    conversionRate: sales.conversionRate,
+    clicks: promotion.clicks,
+    impressions: promotion.impressions,
+    orders: promotion.orders,
+    salesDeduction: 0,
+    managementRoi: rateAvailable && spend > 0 ? sales.revenue / spend : null,
+  };
+}
+
+function promotionPlanName(row) {
+  return text(row?.campaignName, 120) || text(row?.channel, 120) || "未命名计划";
+}
+
+function promotionChannelName(row) {
+  const channel = text(row?.channel, 120);
+  const planName = text(row?.campaignName, 120);
+  // A source may legitimately omit the plan column. Its promotion type must
+  // remain visible rather than being mistaken for a damaged legacy row.
+  if (channel && (!planName || channel !== planName || looksLikePromotionType(channel))) return channel;
+  return "未识别推广类型";
+}
+
+function buildPromotionPlans(rows) {
+  const grouped = groupByJoinValue(rows, promotionPlanName);
+  return [...grouped.values()]
+    .map((group) => {
+      const metrics = aggregate(group.rows);
+      return {
+        name: group.value,
+        rowCount: group.rows.length,
+        spend: metrics.spend,
+        promotionRevenue: metrics.revenue,
+        roi: metrics.roi,
+        clicks: metrics.clicks,
+        impressions: metrics.impressions,
+        orders: metrics.orders,
+      };
+    })
+    .sort((left, right) => right.spend - left.spend || right.promotionRevenue - left.promotionRevenue || left.name.localeCompare(right.name, "zh-CN"));
+}
+
+function buildPromotionChannels(rows) {
+  const grouped = groupByJoinValue(rows, promotionChannelName);
+  return [...grouped.values()]
+    .map((group) => {
+      const metrics = aggregate(group.rows);
+      return {
+        name: group.value,
+        rowCount: group.rows.length,
+        planCount: new Set(group.rows.map(promotionPlanName)).size,
+        spend: metrics.spend,
+        promotionRevenue: metrics.revenue,
+        roi: metrics.roi,
+        clicks: metrics.clicks,
+        impressions: metrics.impressions,
+        orders: metrics.orders,
+        plans: buildPromotionPlans(group.rows),
+      };
+    })
+    .sort((left, right) => right.spend - left.spend || right.promotionRevenue - left.promotionRevenue || left.name.localeCompare(right.name, "zh-CN"));
+}
+
+function deductionMatchesPeriod(deduction, storeName, periodStart, periodEnd) {
+  return deduction.storeName === storeName
+    && deduction.reportDate >= periodStart
+    && deduction.reportDate <= periodEnd;
+}
+
+function deductionTotal(deductions, storeName, periodStart, periodEnd) {
+  return deductions
+    .filter((deduction) => deductionMatchesPeriod(deduction, storeName, periodStart, periodEnd))
+    .reduce((total, deduction) => total + deduction.amount, 0);
+}
+
+function applyStoreSalesDeduction(entity, amount) {
+  if (!Number.isFinite(amount) || amount <= 0) return entity;
+  const revenue = Math.max(0, entity.revenue - amount);
+  const sales = { ...entity.sales, revenue, netGsv: revenue };
+  const managementRoi = entity.promotionCoverageComplete && entity.spend > 0 ? revenue / entity.spend : null;
+  const feeRate = entity.promotionCoverageComplete && entity.refundDataAvailable && entity.spend > 0 && revenue > 0
+    ? entity.spend / revenue
+    : entity.refundDataAvailable && entity.spend === 0 && revenue > 0
+      ? 0
+      : null;
+  return { ...entity, sales, revenue, salesDeduction: amount, managementRoi, feeRate };
+}
+
+function groupByJoinValue(rows, valueFor) {
+  const groups = new Map();
+  for (const row of rows) {
+    const value = text(valueFor(row), 240);
+    const key = joinKey(value);
+    if (!key) continue;
+    if (!groups.has(key)) groups.set(key, { key, value, rows: [] });
+    groups.get(key).rows.push(row);
+  }
+  return groups;
+}
+
+function buildProductCatalogIndex(entries) {
+  const exact = new Map();
+  const entriesByProductId = new Map();
+  for (const entry of entries || []) {
+    exact.set(catalogEntryKey(entry.storeName, entry.productId), entry);
+    const current = entriesByProductId.get(entry.productId) || [];
+    current.push(entry);
+    entriesByProductId.set(entry.productId, current);
+  }
+  return { exact, entriesByProductId };
+}
+
+function findProductCatalogEntry(index, productId, storeName) {
+  if (!productId) return null;
+  const exact = index.exact.get(catalogEntryKey(storeName, productId));
+  if (exact) return exact;
+  const storeAgnostic = index.exact.get(catalogEntryKey("", productId));
+  if (storeAgnostic) return storeAgnostic;
+  const entries = index.entriesByProductId.get(productId) || [];
+  return entries.length === 1 ? entries[0] : null;
+}
+
+function applyProductCatalog(rows, productCatalog) {
+  const catalogIndex = buildProductCatalogIndex(productCatalog);
+  return rows.map((row) => {
+    const mapping = findProductCatalogEntry(catalogIndex, row.productId, row.storeName);
+    return {
+      ...row,
+      // A manually maintained mapping is the operator's explicit category
+      // definition. The report category remains a fallback for unmapped IDs.
+      category: mapping?.category || row.category,
+      model: mapping?.model || row.model || "",
+    };
+  });
+}
+
+// Product joins use item ID first. A name match is intentionally only a
+// fallback for exports without a shared ID; unmatched records stay visible.
+function productJoinKey(row, value = row?.productId || row?.productName) {
+  return `${joinKey(row?.storeName)}:${joinKey(value)}`;
+}
+
+function buildProductMatrix(salesRows, promotionRows, productCatalog = [], periodCoverage) {
+  const salesById = groupByJoinValue(salesRows.filter((row) => row.productId), (row) => productJoinKey(row, row.productId));
+  const salesByName = groupByJoinValue(salesRows.filter((row) => row.productName), (row) => productJoinKey(row, row.productName));
+  const promotionsById = groupByJoinValue(promotionRows.filter((row) => row.productId), (row) => productJoinKey(row, row.productId));
+  const promotionsByName = groupByJoinValue(promotionRows.filter((row) => row.productName), (row) => productJoinKey(row, row.productName));
+  const consumedPromotionGroups = new Set();
+  const entities = [];
+
+  for (const salesGroup of salesById.values()) {
+    const sample = salesGroup.rows[0] || {};
+    const promotions = promotionsById.get(salesGroup.key)?.rows || [];
+    if (promotions.length) consumedPromotionGroups.add(`id:${salesGroup.key}`);
+    entities.push(hydrateEntity(
+      newEntity(sample.productName || sample.productId, `product:${salesGroup.key}`, { productId: sample.productId, storeName: sample.storeName }),
+      salesGroup.rows,
+      promotions,
+      promotions.length ? "id" : "sales-only",
+      periodCoverage,
+    ));
+  }
+
+  for (const salesGroup of salesByName.values()) {
+    const sample = salesGroup.rows[0] || {};
+    // Rows carrying an ID were already represented above.
+    if (sample.productId) continue;
+    const promotionGroup = promotionsByName.get(salesGroup.key);
+    const promotions = promotionGroup?.rows || [];
+    if (promotions.length) consumedPromotionGroups.add(`name:${promotionGroup.key}`);
+    entities.push(hydrateEntity(
+      newEntity(sample.productName, `product-name:${salesGroup.key}`, { storeName: sample.storeName }),
+      salesGroup.rows,
+      promotions,
+      promotions.length ? "name" : "sales-only",
+      periodCoverage,
+    ));
+  }
+
+  for (const promotionGroup of promotionsById.values()) {
+    if (consumedPromotionGroups.has(`id:${promotionGroup.key}`)) continue;
+    const sample = promotionGroup.rows[0] || {};
+    entities.push(hydrateEntity(
+      newEntity(sample.productName || sample.productId, `promotion:${promotionGroup.key}`, { productId: sample.productId, storeName: sample.storeName }),
+      [],
+      promotionGroup.rows,
+      "promotion-only",
+      periodCoverage,
+    ));
+  }
+
+  for (const promotionGroup of promotionsByName.values()) {
+    if (consumedPromotionGroups.has(`name:${promotionGroup.key}`)) continue;
+    const sample = promotionGroup.rows[0] || {};
+    // groupByJoinValue normalizes its key once more, so the lookup must use
+    // the same normalized key. Without this, every ID-backed promotion row
+    // was emitted again as a name-backed entity and doubled item totals.
+    if (sample.productId && promotionsById.has(joinKey(productJoinKey(sample, sample.productId)))) continue;
+    const salesGroup = salesByName.get(promotionGroup.key);
+    entities.push(hydrateEntity(
+      newEntity(sample.productName, `promotion-name:${promotionGroup.key}`, { storeName: sample.storeName }),
+      salesGroup?.rows || [],
+      promotionGroup.rows,
+      salesGroup?.rows?.length ? "name" : "promotion-only",
+      periodCoverage,
+    ));
+  }
+
+  const catalogIndex = buildProductCatalogIndex(productCatalog);
+  const sourceByProductId = new Map();
+  for (const row of [...salesRows, ...promotionRows]) {
+    if (row.productId && !sourceByProductId.has(productJoinKey(row, row.productId))) {
+      sourceByProductId.set(productJoinKey(row, row.productId), row);
+    }
+  }
+  return entities
+    .map((entity) => {
+      const source = sourceByProductId.get(productJoinKey(entity, entity.productId)) || {};
+      const mapping = findProductCatalogEntry(catalogIndex, entity.productId, entity.storeName || source.storeName);
+      return {
+        ...entity,
+        model: mapping?.model || "",
+        category: mapping?.category || text(source.category, 80),
+      };
+    })
+    .sort((left, right) => (right.spend - left.spend) || (right.revenue - left.revenue) || left.name.localeCompare(right.name));
+}
+
+const CATEGORY_PART_ALIASES = new Map([
+  ["电热火锅", "电火锅"],
+  ["绞肉", "绞肉机"],
+]);
+
+function categoryPartKeys(value) {
+  return new Set(text(value, 240)
+    .split(/[/／、,，]+/)
+    .map((part) => joinKey(part))
+    .filter(Boolean)
+    .map((part) => CATEGORY_PART_ALIASES.get(part) || part));
+}
+
+function categoryGroupsMatch(left, right) {
+  const leftParts = categoryPartKeys(left);
+  const rightParts = categoryPartKeys(right);
+  return [...leftParts].some((part) => rightParts.has(part));
+}
+
+function alignPromotionCategories(salesByCategory, promotionByCategory) {
+  const aligned = new Map();
+  for (const promotionGroup of promotionByCategory.values()) {
+    let target = salesByCategory.get(promotionGroup.key);
+    if (!target) {
+      const candidates = [...salesByCategory.values()]
+        .filter((salesGroup) => categoryGroupsMatch(promotionGroup.value, salesGroup.value));
+      // A promotion row must belong to exactly one category. Ambiguous names
+      // stay separate so a single spend can never be counted twice.
+      if (candidates.length === 1) target = candidates[0];
+    }
+    const key = target?.key || promotionGroup.key;
+    const current = aligned.get(key) || {
+      key,
+      value: target?.value || promotionGroup.value,
+      rows: [],
+    };
+    current.rows.push(...promotionGroup.rows);
+    aligned.set(key, current);
+  }
+  return aligned;
+}
+
+function buildCategoryMatrix(salesRows, promotionRows, periodCoverage) {
+  const salesByCategory = groupByJoinValue(salesRows, categoryName);
+  const promotionByCategory = alignPromotionCategories(
+    salesByCategory,
+    groupByJoinValue(promotionRows, categoryName),
+  );
+  const keys = new Set([...salesByCategory.keys(), ...promotionByCategory.keys()]);
+  return [...keys].map((key) => {
+    const salesGroup = salesByCategory.get(key);
+    const promotionGroup = promotionByCategory.get(key);
+    const sample = salesGroup?.rows[0] || promotionGroup?.rows[0] || {};
+    const sales = salesGroup?.rows || [];
+    const promotion = promotionGroup?.rows || [];
+    return hydrateEntity(
+      newEntity(categoryName(sample), `category:${key}`),
+      sales,
+      promotion,
+      sales.length && promotion.length ? "name" : sales.length ? "sales-only" : "promotion-only",
+      periodCoverage,
+    );
+  }).sort((left, right) => (right.revenue - left.revenue) || (right.spend - left.spend) || left.name.localeCompare(right.name));
+}
+
+function buildStoreMatrix(productRows, campaignRows, fallbackStoreName = "") {
+  const salesByStore = groupByJoinValue(productRows, (row) => row.storeName || fallbackStoreName || "未标记店铺");
+  const promotionByStore = groupByJoinValue(campaignRows, (row) => row.storeName || fallbackStoreName || "未标记店铺");
+  const keys = new Set([...salesByStore.keys(), ...promotionByStore.keys()]);
+  return [...keys].map((key) => {
+    const salesGroup = salesByStore.get(key);
+    const promotionGroup = promotionByStore.get(key);
+    const sample = salesGroup?.rows[0] || promotionGroup?.rows[0] || {};
+    const sales = salesGroup?.rows || [];
+    const promotion = promotionGroup?.rows || [];
+    return hydrateEntity(
+      newEntity(sample.storeName || fallbackStoreName || "未标记店铺", `store:${key}`),
+      sales,
+      promotion,
+      sales.length && promotion.length ? "name" : sales.length ? "sales-only" : "promotion-only",
+    );
+  }).sort((left, right) => (right.revenue - left.revenue) || (right.spend - left.spend));
+}
+
+function buildStoreTrend(reports, salesDeductions) {
+  const grouped = new Map();
+  for (const report of reports.filter((item) => ["product", "category", "campaign"].includes(item.type) && item.kind !== "screenshot")) {
+    const date = reportSnapshotDate(report);
+    if (!grouped.has(date)) grouped.set(date, {
+      date,
+      product: [],
+      category: [],
+      campaign: [],
+      productReports: [],
+      categoryReports: [],
+      campaignReports: [],
+    });
+    grouped.get(date)[report.type].push(...report.rows.filter((row) => !totalRow(row)));
+    grouped.get(date)[`${report.type}Reports`].push(report);
+  }
+  return [...grouped.values()].map((item) => {
+    const salesReports = item.productReports.length ? item.productReports : item.categoryReports;
+    const sales = entityMetric(item.product.length ? item.product : item.category.filter(categoryDetailRow));
+    const promotion = entityMetric(item.campaign);
+    const coverage = sourcePeriodCoverage(salesReports, item.campaignReports);
+    const storeRows = item.product.length ? item.product : item.category.filter(categoryDetailRow);
+    const storeNames = new Set(storeRows.map((row) => row.storeName).filter(Boolean));
+    const salesDeduction = salesDeductions
+      .filter((deduction) => deduction.reportDate === item.date && storeNames.has(deduction.storeName))
+      .reduce((total, deduction) => total + deduction.amount, 0);
+    const revenue = Math.max(0, sales.revenue - salesDeduction);
+    return {
+      date: item.date,
+      revenue,
+      grossRevenue: sales.grossRevenue,
+      refundAmount: sales.refundAmount,
+      salesDeduction,
+      spend: promotion.spend,
+      promotionRevenue: promotion.revenue,
+      promotionCoverageComplete: coverage.complete,
+      roi: coverage.complete && promotion.spend > 0 ? revenue / promotion.spend : null,
+      feeRate: coverage.complete && sales.refundDataAvailable && revenue > 0 ? promotion.spend / revenue : null,
+    };
+  }).sort((left, right) => left.date.localeCompare(right.date));
+}
+
+function buildOperationsDashboard(state) {
+  const scopedReports = reportsForDashboardScope(
+    state.reports,
+    ["product", "category", "campaign"],
+    state.filters,
+  );
+  const scopedProductReports = scopedReports.filter((report) => report.type === "product");
+  const scopedCategoryReports = scopedReports.filter((report) => report.type === "category");
+  const scopedCampaignReports = scopedReports.filter((report) => report.type === "campaign");
+  // The selected range is the calculation boundary. Every report inside it
+  // contributes to its own source metric; a missing promotion export must
+  // never make that day's confirmed sales disappear from GSV, charts, or
+  // product/category rankings.
+  const productReports = scopedProductReports;
+  const campaignReports = scopedCampaignReports;
+  const categoryReports = scopedCategoryReports;
+  const categoryCampaignReports = scopedCampaignReports;
+  const productRows = detailRows(productReports);
+  const campaignRows = detailRows(campaignReports);
+  const categoryRows = categoryDetailRows(categoryReports);
+  // Product ranking is the preferred store-sales source. A category report is
+  // still an audited sales ledger, so use it only when the selected period
+  // has no product report at all (for example a historical monthly import).
+  const storeSalesReports = productReports.length ? productReports : categoryReports;
+  const storeSalesRows = productReports.length ? productRows : categoryRows;
+  const storePromotionCoverage = sourcePeriodCoverage(storeSalesReports, campaignReports);
+  const categoryPromotionCoverage = sourcePeriodCoverage(categoryReports, categoryCampaignReports);
+  const mappedCampaignRows = applyProductCatalog(detailRows(categoryCampaignReports), state.productCatalog);
+  const storeName = reportSnapshotStore(storeSalesReports[0] || campaignReports[0] || {});
+  const sourcePeriodStart = String(state.filters?.start || storeSalesReports.map((report) => report.periodStart).sort()[0] || "");
+  const sourcePeriodEnd = String(state.filters?.end || storeSalesReports.map((report) => report.periodEnd).sort().at(-1) || "");
+  const stores = buildStoreMatrix(storeSalesRows, campaignRows, storeName).map((store) => applyStoreSalesDeduction(
+    store,
+    deductionTotal(state.salesDeductions, store.name, sourcePeriodStart, sourcePeriodEnd),
+  ));
+  const products = buildProductMatrix(productRows, campaignRows, state.productCatalog, storePromotionCoverage);
+  // Category spend now comes exclusively from item-level promotion exports
+  // grouped by the current ID catalog. This makes the category sum reconcile
+  // exactly to the store's item-level promotion spend.
+  const categories = buildCategoryMatrix(categoryRows, mappedCampaignRows, categoryPromotionCoverage);
+  const linkedProducts = products.filter((item) => item.matchStatus === "id" || item.matchStatus === "name");
+  const linkedCategories = categories.filter((item) => item.matchStatus === "name");
+  return {
+    store: stores[0] || hydrateEntity(newEntity(storeName || "本店", "store:empty"), [], [], "unmatched"),
+    stores,
+    products,
+    categories,
+    coverage: {
+      products: { linked: linkedProducts.length, salesOnly: products.filter((item) => item.matchStatus === "sales-only").length, promotionOnly: products.filter((item) => item.matchStatus === "promotion-only").length },
+      categories: { linked: linkedCategories.length, salesOnly: categories.filter((item) => item.matchStatus === "sales-only").length, promotionOnly: categories.filter((item) => item.matchStatus === "promotion-only").length },
+    },
+    trend: buildStoreTrend(scopedReports, state.salesDeductions),
+    salesDeductions: state.salesDeductions.filter((deduction) => (
+      deduction.reportDate >= sourcePeriodStart
+      && deduction.reportDate <= sourcePeriodEnd
+      && stores.some((store) => store.name === deduction.storeName)
+    )),
+    totalSalesDeduction: stores.reduce((total, store) => total + store.salesDeduction, 0),
+    sources: {
+      storeSales: storeSalesReports[0] ? datasetSource({ type: storeSalesReports[0].type, period: storeSalesReports[0].periodLabel, rowCount: storeSalesRows.length }) : null,
+      storePromotion: campaignReports[0] ? datasetSource({ type: "campaign", period: campaignReports[0].periodLabel, rowCount: campaignRows.length }) : null,
+      categorySales: categoryReports[0] ? datasetSource({ type: "category", period: categoryReports[0].periodLabel, rowCount: categoryRows.length }) : null,
+      categoryPromotion: categoryCampaignReports[0] ? datasetSource({ type: "campaign", period: categoryCampaignReports[0].periodLabel, rowCount: mappedCampaignRows.length }) : null,
+    },
+    sourceWarnings: {
+      storePromotion: sourcePeriodWarning(storeSalesReports, scopedCampaignReports, "单品付费"),
+      categoryPromotion: sourcePeriodWarning(scopedCategoryReports, scopedCampaignReports, "单品付费"),
+    },
+    sourceCoverage: {
+      storePromotionComplete: storePromotionCoverage.complete,
+      categoryPromotionComplete: categoryPromotionCoverage.complete,
+    },
+  };
+}
+
+function reportMatchesWorkspaceFilters(report, filters = {}) {
+  const sourcePeriodKind = String(filters.sourcePeriodKind || "");
+  const legacyPeriodKind = String(filters.periodKind || "all");
+  // `periodKind` historically doubled as the display range mode. Keep that
+  // behaviour for existing callers, while `sourcePeriodKind` now explicitly
+  // selects daily, weekly, monthly or custom source ledgers.
+  const periodKind = sourcePeriodKind || legacyPeriodKind;
+  if (periodKind !== "all" && periodKind !== "auto" && (sourcePeriodKind || periodKind !== "custom") && report.periodKind !== periodKind) return false;
+  const storeName = text(filters.storeName, 80);
+  if (storeName && storeName !== "all" && reportSnapshotStore(report) !== storeName) return false;
+  const start = String(filters.start || "");
+  const end = String(filters.end || "");
+  if (start && report.periodEnd < start) return false;
+  if (end && report.periodStart > end) return false;
+  return true;
+}
+
+function dateRangePeriodKind(start, end) {
+  if (!start || !end || start > end) return "custom";
+  if (start === end) return "day";
+  const startDate = new Date(`${start}T00:00:00`);
+  const endDate = new Date(`${end}T00:00:00`);
+  const days = Math.round((endDate.getTime() - startDate.getTime()) / 86_400_000) + 1;
+  const isCalendarWeek = ((startDate.getDay() + 6) % 7) === 0 && days === 7;
+  if (isCalendarWeek) return "week";
+  const lastOfMonth = new Date(startDate.getFullYear(), startDate.getMonth() + 1, 0).getDate();
+  if (startDate.getDate() === 1 && startDate.getFullYear() === endDate.getFullYear()
+    && startDate.getMonth() === endDate.getMonth() && endDate.getDate() === lastOfMonth) return "month";
+  return "custom";
+}
+
+function reportsForAutomaticSource(reports, filters = {}) {
+  const start = String(filters.start || "");
+  const end = String(filters.end || "");
+  if (!start || !end) return reports;
+  const preferredKind = dateRangePeriodKind(start, end);
+  const groups = new Map();
+  for (const report of reports) {
+    const key = [report.type, joinKey(reportSnapshotStore(report))].join("\u0000");
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key).push(report);
+  }
+  const selected = [];
+  for (const candidates of groups.values()) {
+    const contained = candidates.filter((report) => report.periodStart >= start && report.periodEnd <= end);
+    const preferred = contained.filter((report) => report.periodKind === preferredKind);
+    // A complete month/week/custom export is authoritative for that group.
+    // When it is absent, aggregate daily exports instead of mixing ledgers.
+    if (preferred.length) {
+      selected.push(...preferred);
+      continue;
+    }
+    const daily = contained.filter((report) => report.periodKind === "day");
+    if (daily.length) {
+      selected.push(...daily);
+      continue;
+    }
+    const exact = contained.filter((report) => report.periodStart === start && report.periodEnd === end);
+    if (exact.length) selected.push(...exact);
+  }
+  return selected;
+}
+
+function buildOperationsWorkspaceLegacy(value = {}, { now = new Date(), filters = {} } = {}) {
+  const normalized = normalizeOperationsState(value);
+  const matchedReports = normalized.reports.filter((report) => reportMatchesWorkspaceFilters(report, filters));
+  const selectedReports = String(filters.sourcePeriodKind || "") === "auto"
+    ? reportsForAutomaticSource(matchedReports, filters)
+    : matchedReports;
+  const state = {
+    ...normalized,
+    filters,
+    // All calculations below operate exclusively on locally aggregated
+    // ledger rows. Raw report rows remain in `normalized.reports` for
+    // warehouse preview, renaming and deletion.
+    reports: ledgerBackedReports(selectedReports, normalized.ledger),
+  };
   const currentDate = state.reports.map(reportSnapshotDate).sort().at(-1) || "";
-  const rows = promotionRows(state, currentDate);
+  const dashboard = buildOperationsDashboard(state);
+  const datasets = buildDatasetViews(state);
+  // The dashboard has already guaranteed period alignment.  Reuse that exact
+  // source pair for the Agent and summary logic instead of independently
+  // picking each report type's latest date.
+  const storeOverview = {
+    revenue: dashboard.store.sales,
+    performance: {
+      ...dashboard.store.promotion,
+      ...(dashboard.store.salesDeduction > 0 ? { feeRate: dashboard.store.feeRate } : {}),
+    },
+    // Platform ROI remains attributable-revenue / spend. This second metric
+    // is the management ROI after the operator's approved sales exclusions.
+    managementRoi: dashboard.store.managementRoi,
+    salesDeduction: dashboard.store.salesDeduction,
+    revenueSource: dashboard.sources.storeSales,
+    performanceSource: dashboard.sourceWarnings.storePromotion ? null : dashboard.sources.storePromotion,
+  };
+  const preferredDataset = firstDataset(datasets, ["campaign", "promotion", "scenario", "product", "category"]);
+  const rows = preferredDataset
+    ? state.reports.filter((report) => report.type === preferredDataset.type && reportSnapshotDate(report) === preferredDataset.date)
+      .flatMap((report) => report.rows.map((row) => ({ ...row, report })))
+      .filter((row) => !totalRow(row) && (preferredDataset.type !== "category" || categoryDetailRow(row)))
+    : promotionRows(state, currentDate);
   const total = aggregate(rows);
   const productGroups = groupedRows(rows, "productName", (row) => row.campaignName || row.productId).map((item) => {
     const members = rows.filter((row) => (row.productName || row.campaignName || row.productId || "未归类") === item.name);
@@ -639,20 +2143,45 @@ export function buildOperationsWorkspace(value = {}, { now = new Date() } = {}) 
     return { ...item, key: representative.productId || item.name, productStage: representative.productStage || "unknown" };
   }).sort((left, right) => right.spend - left.spend);
   const freshness = hasFreshData(state.reports, now);
-  const suggestions = freshness.fresh ? buildSuggestions(productGroups, state, currentDate || now.toISOString().slice(0, 10)) : [];
+  // A period-wide budget action needs the same sales and promotion periods.
+  // Partial promotion exports remain visible as imported spend, but never
+  // drive a seemingly complete ROI or fee-rate recommendation.
+  const joinedSuggestionProducts = dashboard.products.filter((item) => (
+    (item.matchStatus === "id" || item.matchStatus === "name")
+    && item.promotionCoverageComplete
+  ));
+  const suggestionProducts = joinedSuggestionProducts.length
+    ? joinedSuggestionProducts
+    : !dashboard.sources.storeSales || dashboard.sourceCoverage.storePromotionComplete
+      ? productGroups.map((item) => ({ ...item, feeRate: null }))
+      : [];
+  const suggestions = freshness.fresh
+    ? buildSuggestions(suggestionProducts, state, currentDate || now.toISOString().slice(0, 10))
+    : [];
   const audienceReports = state.reports.filter((report) => ["audience", "competitor"].includes(report.type) && (!currentDate || reportSnapshotDate(report) === currentDate));
   const audienceRows = audienceReports.flatMap((report) => report.rows.map((row) => ({ ...row, report })));
   const audienceGroups = groupedRows(audienceRows, "audienceName", (row) => row.productName || row.campaignName)
     .sort((left, right) => (right.revenue - left.revenue) || (right.audienceSize || 0) - (left.audienceSize || 0)).slice(0, 12);
   const feedbackBySuggestion = Object.fromEntries(state.feedback.map((item) => [item.suggestionId, item]));
   return {
-    reports: state.reports.slice().sort((left, right) => Date.parse(right.importedAt) - Date.parse(left.importedAt)),
+    reports: selectedReports.slice().sort((left, right) => Date.parse(right.importedAt) - Date.parse(left.importedAt)),
+    storeNames: uniqueStrings([
+      ...state.storeNames,
+    ], 80),
+    // Keep the full append-only catalog available to the warehouse UI. The
+    // dashboard resolves only the latest record for each store + item ID.
+    productCatalog: state.productCatalog.slice().reverse(),
+    productCatalogSource: state.productCatalogSource,
     currentDate,
+    datasets,
+    dashboard,
     archive: buildOperationsArchive(state.reports),
     profile: { principles: state.principles, dailyReport: state.dailyReport, targets: state.targets },
+    salesDeductions: dashboard.salesDeductions,
     freshness,
     totals: total,
     products: productGroups.slice(0, 50),
+    storeOverview,
     stores: groupedRows(rows, "storeName", () => "未标记店铺").sort((left, right) => right.spend - left.spend),
     categories: groupedRows(rows, "category", () => "未标记类目").sort((left, right) => right.spend - left.spend).slice(0, 20),
     audiences: audienceGroups,
@@ -660,7 +2189,23 @@ export function buildOperationsWorkspace(value = {}, { now = new Date() } = {}) 
     analyses: state.analyses.slice().reverse(),
     chat: state.chat,
     qwenPawAlerts: state.qwenPawAlerts,
+    cloudSync: publicCloudSync(state.cloudSync),
+    filters: {
+      periodKind: ["all", ...OPERATIONS_PERIOD_KINDS].includes(String(filters.periodKind || "")) ? String(filters.periodKind || "all") : "all",
+      sourcePeriodKind: ["auto", "all", ...OPERATIONS_PERIOD_KINDS].includes(String(filters.sourcePeriodKind || ""))
+        ? String(filters.sourcePeriodKind || "all")
+        : "all",
+      start: String(filters.start || ""),
+      end: String(filters.end || ""),
+      storeName: text(filters.storeName, 80),
+    },
   };
+}
+
+// This is the single ledger/dashboard implementation used by desktop, the
+// cloud hub, and the browser-local operations workspace.
+export function buildOperationsWorkspace(value = {}, options = {}) {
+  return buildOperationsWorkspaceCore(value, options);
 }
 
 export function operationsAgentContextText(workspace) {
@@ -668,8 +2213,9 @@ export function operationsAgentContextText(workspace) {
   // types. Keep this compact so an ordinary data question has one small local
   // tool read before the model answers.
   return JSON.stringify({
-    source: "电商竞品监控本机运营数据",
+    source: "经营罗盘本机运营数据",
     freshness: workspace.freshness,
+    storeOverview: workspace.storeOverview,
     totals: workspace.totals,
     products: workspace.products.slice(0, 15),
     categories: workspace.categories.slice(0, 12),
@@ -685,9 +2231,28 @@ function localOperationsAnalysis(workspace) {
     return { mode: "rule", summary: "运营数据已过期，未生成预算调整结论。请先导入最新报表。", insights: [], actions: [], createdAt: nowIso() };
   }
   const total = workspace.totals;
+  const overview = workspace.storeOverview || { revenue: total, performance: total, revenueSource: null, performanceSource: null };
+  const revenueSource = overview.revenueSource?.type || "当前报表";
+  const performanceSource = overview.performanceSource?.type || "当前报表";
+  const promotionCoverageIncomplete = Boolean(workspace.dashboard?.sources?.storeSales)
+    && workspace.dashboard?.sourceCoverage?.storePromotionComplete === false;
+  const coverageWarning = workspace.dashboard?.sourceWarnings?.storePromotion;
+  if (promotionCoverageIncomplete) {
+    return {
+      mode: "rule",
+      summary: "本地销售与单品付费报表统计周期未对齐，暂不生成整周期费率、ROI 或预算调整建议。",
+      insights: [
+        `整店净 GSV ${fixedNumber(overview.revenue.revenue)}（支付 ${fixedNumber(overview.revenue.grossRevenue)} - 退款 ${fixedNumber(overview.revenue.refundAmount)}；来源：${revenueSource}）。`,
+        `已导入单品推广消耗 ${fixedNumber(overview.performance.spend)}；${coverageWarning || "缺少对应周期的单品付费报表"}。`,
+      ],
+      actions: [],
+      createdAt: nowIso(),
+    };
+  }
+  const managementRoi = overview.managementRoi ?? overview.performance.roi;
   const insights = [
-    `当前汇总消耗 ${fixedNumber(total.spend)}，成交 ${fixedNumber(total.revenue)}，ROI ${fixedNumber(total.roi)}。`,
-    `整体费率 ${percentNumber(total.feeRate)}，已覆盖 ${workspace.products.length} 个单品。`,
+    `整店净 GSV ${fixedNumber(overview.revenue.revenue)}（支付 ${fixedNumber(overview.revenue.grossRevenue)} - 退款 ${fixedNumber(overview.revenue.refundAmount)}；来源：${revenueSource}）；推广消耗 ${fixedNumber(overview.performance.spend)}，ROI ${fixedNumber(overview.performance.roi)}（来源：${performanceSource}）。`,
+    `经营 ROI ${fixedNumber(managementRoi)}、推广费率 ${percentNumber(overview.performance.feeRate)}（净 GSV ÷ 推广花费；推广花费 ÷ 净 GSV），已覆盖 ${workspace.products.length} 个可优化单品。`,
   ];
   return {
     mode: "rule",
@@ -741,6 +2306,7 @@ export async function analyzeOperationsWorkspace(modelConfig, workspace, { princ
   const images = await screenshotContent(reports);
   const context = {
     freshness: workspace.freshness,
+    storeOverview: workspace.storeOverview,
     totals: workspace.totals,
     products: workspace.products.slice(0, 20),
     categories: workspace.categories.slice(0, 12),
@@ -919,7 +2485,7 @@ export function qwenPawWorkspaceAgentInstructions(operatingPrinciples = "") {
   const principlesBlock = principles
     ? `## 当前运营思路（必须遵循）\n\n${principles}\n\n每一项运营建议都必须按上述思路作为判断约束。若它与当前本地数据冲突，要明确指出冲突、说明依据并给出替代方案。\n\n`
     : "## 当前运营思路\n\n暂未设置额外运营思路；仍须严格依据本地数据回答。\n\n";
-  return `# 电商运营助手\n\n${principlesBlock}你是电商竞品监控应用的本机运营 Agent。通过 ecommerce_monitor MCP 工具查询和执行应用任务。
+  return `# 电商运营助手\n\n${principlesBlock}你是经营罗盘应用的本机运营 Agent。通过 ecommerce_monitor MCP 工具查询和执行应用任务。
 普通业务动作可直接执行并说明结果，包括查价、启停监控、设置监控价、重试本地解析、导入报表、经营分析和创建生图任务。
 删除商品、清空记录、删除账号、修改模型密钥和账号登录资料必须要求用户明确确认。
 价格任务必须调用 capture_product_price 或 get_product_prices，严禁访问淘宝、天猫、浏览器、Cookie、外部网页或任意本地文件。
@@ -945,7 +2511,7 @@ async function writeQwenPawWorkspace(installDirectory, operatingPrinciples) {
   }
   const skillDirectory = path.join(skillsDirectory, "ecommerce-operations-assistant");
   await fs.mkdir(skillDirectory, { recursive: true });
-  await fs.writeFile(path.join(skillDirectory, "SKILL.md"), "---\nname: ecommerce-operations-assistant\ndescription: Analyze only the local ecommerce operations context supplied by 电商竞品监控.\n---\n\n# 电商运营数据分析\n\n需要本机数据或动作时，只能调用 ecommerce_monitor MCP 工具。工具结果是唯一事实来源。\n", "utf8");
+  await fs.writeFile(path.join(skillDirectory, "SKILL.md"), "---\nname: ecommerce-operations-assistant\ndescription: Analyze only the local ecommerce operations context supplied by 经营罗盘.\n---\n\n# 电商运营数据分析\n\n需要本机数据或动作时，只能调用 ecommerce_monitor MCP 工具。工具结果是唯一事实来源。\n", "utf8");
   await fs.writeFile(path.join(workspace, "skill.json"), `${JSON.stringify({ schema_version: "workspace-skill-manifest.v1", version: 0, skills: { "ecommerce-operations-assistant": { enabled: true, channels: ["all"], source: "customized" } } }, null, 2)}\n`, "utf8");
   return workspace;
 }
@@ -963,7 +2529,7 @@ function qwenPawApplicationMcp(installDirectory, workspace) {
     clients: {
       ecommerce_monitor: {
         name: "ecommerce_monitor",
-        description: "电商竞品监控本机商品、价格、监控、运营数据和 AI 创作工具。",
+        description: "经营罗盘本机商品、价格、监控、运营数据和 AI 创作工具。",
         enabled: true,
         transport: "stdio",
         command: process.execPath,
@@ -990,7 +2556,7 @@ async function configureQwenPawProvider(runtime, plan) {
       method: "POST",
       body: JSON.stringify({
         id: QWENPAW_PROVIDER_ID,
-        name: "电商竞品监控文字模型",
+        name: "经营罗盘文字模型",
         default_base_url: plan.resolved.baseUrl,
         api_key_prefix: "",
         chat_model: "OpenAIChatModel",
@@ -1075,10 +2641,10 @@ async function configureQwenPawAgent(runtime, installDirectory, plan, operatingP
   return workspace;
 }
 
-async function syncQwenPawOperationsAgent(installDirectory, modelConfig, operatingPrinciples = "") {
+async function syncQwenPawOperationsAgent(installDirectory, modelConfig, operatingPrinciples = "", preparedPlan = null) {
   const status = qwenPawLocalRuntimeStatus(installDirectory);
   if (!status.installed) throw Object.assign(new Error("尚未安装 QwenPaw，请先在运营思路旁点击安装。"), { status: 503 });
-  const plan = qwenPawSyncPlan(status.installDirectory, modelConfig, operatingPrinciples);
+  const plan = preparedPlan || qwenPawSyncPlan(status.installDirectory, modelConfig, operatingPrinciples);
   const runtime = await startQwenPawBackend(status.installDirectory);
   await configureQwenPawProvider(runtime, plan);
   const workspace = await configureQwenPawAgent(runtime, status.installDirectory, plan, operatingPrinciples);
@@ -1096,16 +2662,35 @@ async function syncQwenPawOperationsAgent(installDirectory, modelConfig, operati
 }
 
 export async function stopQwenPawOperationsConsole() {
+  qwenPawConsoleStart = null;
+  qwenPawConsoleStartSignature = "";
   await stopQwenPawBackend();
 }
 
 export async function startQwenPawOperationsConsole(installDirectory, modelConfig, operatingPrinciples = "") {
-  const synced = await syncQwenPawOperationsAgent(installDirectory, modelConfig, operatingPrinciples);
-  return {
-    ...synced,
-    running: true,
-    consoleUrl: qwenPawBackendUrl(synced.runtime, "/console"),
-  };
+  const status = qwenPawLocalRuntimeStatus(installDirectory);
+  if (!status.installed) throw Object.assign(new Error("尚未安装 QwenPaw，请先完成安装。"), { status: 503 });
+  const plan = qwenPawSyncPlan(status.installDirectory, modelConfig, operatingPrinciples);
+  if (qwenPawConsoleStart && qwenPawConsoleStartSignature === plan.signature) return qwenPawConsoleStart;
+
+  const startup = (async () => {
+    const synced = await syncQwenPawOperationsAgent(status.installDirectory, modelConfig, operatingPrinciples, plan);
+    return {
+      ...synced,
+      running: true,
+      consoleUrl: qwenPawBackendUrl(synced.runtime, "/console"),
+    };
+  })();
+  qwenPawConsoleStart = startup;
+  qwenPawConsoleStartSignature = plan.signature;
+  try {
+    return await startup;
+  } finally {
+    if (qwenPawConsoleStart === startup) {
+      qwenPawConsoleStart = null;
+      qwenPawConsoleStartSignature = "";
+    }
+  }
 }
 
 export function qwenPawRuntimeStatus(installDirectory = "") {

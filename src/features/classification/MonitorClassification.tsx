@@ -31,6 +31,7 @@ type Props = {
   onSchedule: (product: Product, mode: NonNullable<Product['monitorScheduleMode']>, intervalMinutes: number, monitorStartAt: string | null) => Promise<void>
   onMediaPreference: (product: Product, captureMediaAssets: boolean) => Promise<void>
   onSaveSkuMonitorPrice: (product: Product, skuId: string, value: number | null, channel?: MonitorChannel) => Promise<void>
+  onSavePrimarySkuIds: (product: Product, primarySkuIds: string[]) => Promise<void>
   onCapture: (product: Product, options?: ProductCaptureOptions) => Promise<Product | void>
   onRetryBuyerShows: (product: Product) => Promise<Product>
   onCaptureSearchMainImage: (product: Product) => Promise<{ ok: boolean; status: NonNullable<Product['searchMainImageStatus']>; product: Product; message: string }>
@@ -41,6 +42,7 @@ type Props = {
   onCaptureBatch: (products: Product[]) => Promise<RunRecord | void>
   onRequestAdd?: () => void
   batchBusy?: boolean
+  batchBusyProductIds?: string[]
   busyProductId?: string
 }
 
@@ -86,7 +88,7 @@ function searchableText(product: Product) {
   ].filter(Boolean).join(' ').toLocaleLowerCase('zh-CN')
 }
 
-function verifiedMinimum(product: Product) {
+function verifiedMinimumForSku(sku: NonNullable<Product['lastSnapshot']>['skuPrices'][number]) {
   const channels = ['normal', 'billion', 'seckill', 'government', 'surprise', 'gift', 'vip88', 'coin'] as const
   const labels: Record<typeof channels[number], string> = {
     normal: '普通价',
@@ -99,15 +101,38 @@ function verifiedMinimum(product: Product) {
     coin: '淘金币价',
   }
   let best: { value: number; label: string } | null = null
-  for (const sku of product.lastSnapshot?.skuPrices || []) {
-    for (const channel of channels) {
-      const value = channel === 'normal' ? verifiedPriceValue(sku, channel) ?? (sku.resolutionStatus === 'verified' ? normalPriceForSku(sku) : null) : verifiedPriceValue(sku, channel)
-      if (typeof value === 'number' && Number.isFinite(value) && value > 0 && (!best || value < best.value)) {
-        best = { value, label: channel === 'normal' ? publicPriceLabelForSku(sku) : labels[channel] }
-      }
+  for (const channel of channels) {
+    const value = channel === 'normal' ? verifiedPriceValue(sku, channel) ?? (sku.resolutionStatus === 'verified' ? normalPriceForSku(sku) : null) : verifiedPriceValue(sku, channel)
+    if (typeof value === 'number' && Number.isFinite(value) && value > 0 && (!best || value < best.value)) {
+      best = { value, label: channel === 'normal' ? publicPriceLabelForSku(sku) : labels[channel] }
     }
   }
   return best
+}
+
+function visibleSkuPrices(product: Product) {
+  const skuPrices = product.lastSnapshot?.skuPrices || []
+  const skuById = new Map(skuPrices.map((sku) => [sku.skuId, sku]))
+  const primarySkuIds = [...new Set(product.primarySkuIds || [])]
+    .filter((skuId) => skuById.has(skuId))
+    .slice(0, 3)
+  if (primarySkuIds.length) {
+    return primarySkuIds.map((skuId) => {
+      const sku = skuById.get(skuId)!
+      const price = verifiedMinimumForSku(sku)
+      return { skuId, name: sku.name || `SKU ${skuId}`, value: price?.value ?? null, label: price?.label || '暂无已验证价' }
+    })
+  }
+  const automatic = skuPrices
+    .map((sku) => ({ sku, price: verifiedMinimumForSku(sku) }))
+    .sort((left, right) => (left.price?.value ?? Number.POSITIVE_INFINITY) - (right.price?.value ?? Number.POSITIVE_INFINITY))[0]
+  if (!automatic) return [{ skuId: '', name: '暂无 SKU', value: null, label: '待抓取' }]
+  return [{
+    skuId: automatic.sku.skuId,
+    name: automatic.sku.name || `SKU ${automatic.sku.skuId}`,
+    value: automatic.price?.value ?? null,
+    label: automatic.price?.label || '暂无已验证价',
+  }]
 }
 
 function monitorRuleSummary(product: Product) {
@@ -118,6 +143,11 @@ function monitorRuleSummary(product: Product) {
     count: values.length,
     minimum: values.length ? Math.min(...values) : null,
   }
+}
+
+function primarySkuCount(product: Product) {
+  const currentSkuIds = new Set(product.lastSnapshot?.skuPrices?.map((sku) => sku.skuId) || [])
+  return [...new Set(product.primarySkuIds || [])].filter((skuId) => currentSkuIds.has(skuId)).slice(0, 3).length
 }
 
 function accountLabel(product: Product) {
@@ -151,7 +181,7 @@ function productState(product: Product, monitor: Overview['monitor']) {
   }
 }
 
-export function MonitorClassification({ products, monitor, onToggle, onSchedule, onMediaPreference, onSaveSkuMonitorPrice, onCapture, onRetryBuyerShows, onCaptureSearchMainImage, onReparseLocalEvidence, onLocalImport, onDelete, onDeleteBatch, onCaptureBatch, onRequestAdd, batchBusy, busyProductId }: Props) {
+export function MonitorClassification({ products, monitor, onToggle, onSchedule, onMediaPreference, onSaveSkuMonitorPrice, onSavePrimarySkuIds, onCapture, onRetryBuyerShows, onCaptureSearchMainImage, onReparseLocalEvidence, onLocalImport, onDelete, onDeleteBatch, onCaptureBatch, onRequestAdd, batchBusy, batchBusyProductIds, busyProductId }: Props) {
   const [preview, setPreview] = useState<Preview | null>(null)
   const [query, setQuery] = useState('')
   const [shopFilter, setShopFilter] = useState('')
@@ -401,9 +431,10 @@ export function MonitorClassification({ products, monitor, onToggle, onSchedule,
           {pageProducts.map((product) => {
             const { primary } = productImages(product)
             const state = productState(product, monitor)
-            const currentPrice = verifiedMinimum(product)
+            const skuPriceCards = visibleSkuPrices(product)
             const rules = monitorRuleSummary(product)
-            const busy = busyProductId === product.id || Boolean(batchBusy)
+            const mainSkuCount = primarySkuCount(product)
+            const busy = busyProductId === product.id || batchBusyProductIds?.includes(product.id) === true
             const captureBusy = quickActionKey === `${product.id}:capture`
             const syncBusy = quickActionKey === `${product.id}:sync`
             const monitorBusy = quickActionKey === `${product.id}:monitor`
@@ -420,13 +451,21 @@ export function MonitorClassification({ products, monitor, onToggle, onSchedule,
                     <span className="min-w-0 flex-1">
                       <span className="flex min-w-0 items-center gap-2"><span className="truncate text-sm font-semibold leading-5 text-slate-950" title={productTitle(product)}>{productTitle(product)}</span>{product.captureMode === 'local-only' && <FileJson className="h-3.5 w-3.5 shrink-0 text-sky-600" />}</span>
                       <span className="mt-1 flex min-w-0 flex-wrap items-center gap-x-2 gap-y-0.5 text-xs text-slate-500"><span className="max-w-48 truncate">{productShopName(product)}</span><span>{productModel(product)}</span><span className="tabular-nums text-slate-400">ID {productItemId(product) || '未识别'}</span></span>
-                      <span className="mt-1 flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1 text-[11px] text-slate-400"><Badge className={accountClass(product)}>{accountLabel(product)}</Badge><Badge className={state.badge}>{state.label}</Badge><span>{product.lastSnapshot?.skuPrices?.length || 0} 个 SKU</span><span className={state.tone === 'red' ? 'text-red-600' : ''}>{state.detail}</span></span>
+                      <span className="mt-1 flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1 text-[11px] text-slate-400"><Badge className={accountClass(product)}>{accountLabel(product)}</Badge><Badge className={state.badge}>{state.label}</Badge><span>{product.lastSnapshot?.skuPrices?.length || 0} 个 SKU</span><span className={mainSkuCount ? 'font-medium text-sky-700' : ''}>主 SKU {mainSkuCount} 个</span><span className={state.tone === 'red' ? 'text-red-600' : ''}>{state.detail}</span></span>
                     </span>
                     <Eye className="h-4 w-4 shrink-0 text-slate-300 transition group-hover:text-sky-600" />
                   </button>
                   <div className="product-list-price min-w-0">
-                    <div className={`text-xl font-semibold leading-none tabular-nums ${currentPrice == null ? 'text-slate-400' : 'text-slate-950'}`}>{currentPrice == null ? '--' : currency(currentPrice.value)}</div>
-                    <div className="mt-1 text-[11px] text-slate-500">{currentPrice?.label || '尚未验证价格'}{rules.count ? ` · ${rules.count} 项阈值` : ''}</div>
+                    <div className={`grid gap-1.5 ${skuPriceCards.length > 1 ? 'grid-cols-1 sm:grid-cols-3' : 'grid-cols-1'}`}>
+                      {skuPriceCards.map((sku) => (
+                        <div key={sku.skuId || 'pending'} className="min-w-0 border border-slate-100 bg-slate-50/80 px-2 py-1.5">
+                          <div className="truncate text-[11px] font-medium text-slate-600" title={sku.name}>{sku.name}</div>
+                          <div className={`mt-1 text-base font-semibold leading-none tabular-nums ${sku.value === null ? 'text-slate-400' : 'text-slate-950'}`}>{sku.value === null ? '待抓取' : currency(sku.value)}</div>
+                          <div className="mt-1 truncate text-[10px] text-slate-400">{sku.label}</div>
+                        </div>
+                      ))}
+                    </div>
+                    {rules.count > 0 && <div className="mt-1 text-[11px] text-slate-500">{rules.count} 项阈值</div>}
                   </div>
                   <div className="product-list-actions">
                     <button type="button" onClick={() => setPriceVerificationProductId(product.id)} disabled={!product.lastSnapshot?.skuPrices?.length} className="product-quick-action" title="逐 SKU 核对价格证据、展示金额和计算公式"><ShieldCheck className="h-3.5 w-3.5" /><span>核对</span></button>
@@ -463,7 +502,7 @@ export function MonitorClassification({ products, monitor, onToggle, onSchedule,
               <button type="button" onClick={() => setPreviewProductId('')} className="inline-flex h-9 w-9 items-center justify-center rounded-md text-slate-500 transition hover:bg-slate-100 hover:text-slate-950" title="关闭预览" aria-label="关闭预览"><X className="h-4 w-4" /></button>
             </header>
             <div className="min-h-0 overflow-y-auto p-2 sm:p-4">
-              <ProductMonitorCard product={previewProduct} onToggle={onToggle} onSchedule={onSchedule} onMediaPreference={onMediaPreference} onSaveSkuMonitorPrice={onSaveSkuMonitorPrice} onCapture={onCapture} onRetryBuyerShows={onRetryBuyerShows} onCaptureSearchMainImage={onCaptureSearchMainImage} onReparseLocalEvidence={onReparseLocalEvidence} onLocalImport={onLocalImport} onDelete={onDelete} busy={busyProductId === previewProduct.id} onPreview={setPreview} monitor={monitor} showPrimaryActions={false} />
+              <ProductMonitorCard product={previewProduct} onToggle={onToggle} onSchedule={onSchedule} onMediaPreference={onMediaPreference} onSaveSkuMonitorPrice={onSaveSkuMonitorPrice} onSavePrimarySkuIds={onSavePrimarySkuIds} onCapture={onCapture} onRetryBuyerShows={onRetryBuyerShows} onCaptureSearchMainImage={onCaptureSearchMainImage} onReparseLocalEvidence={onReparseLocalEvidence} onLocalImport={onLocalImport} onDelete={onDelete} busy={busyProductId === previewProduct.id || batchBusyProductIds?.includes(previewProduct.id) === true} onPreview={setPreview} monitor={monitor} showPrimaryActions={false} />
             </div>
           </section>
         </div>

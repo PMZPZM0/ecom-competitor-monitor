@@ -1121,6 +1121,14 @@ test("capture completion preserves monitor prices and settings saved while captu
   assert.equal(merged.monitorScheduleMode, "once");
 });
 
+test("capture metadata never erases an already verified product model", () => {
+  const merged = mergeCapturedProduct(
+    { id: "p1", model: "SY-30FC3077Q", lastSnapshot: { model: "SY-30FC3077Q" } },
+    { id: "p1", model: "", name: "最新标题", lastSnapshot: {} },
+  );
+  assert.equal(merged.model, "SY-30FC3077Q");
+});
+
 test("SKU monitor price updates merge independently and support clearing one SKU", () => {
   const first = setSkuMonitorPrice({ id: "p1", monitorPrice: 99, skuMonitorPrices: { sku1: 139 } }, "sku2", 159);
   const second = setSkuMonitorPrice(first, "sku1", 138.99);

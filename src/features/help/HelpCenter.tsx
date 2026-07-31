@@ -53,7 +53,7 @@ export function HelpCenter({ onNavigate }: { onNavigate: (page: 'settings' | 'mo
 
       <main className="min-w-0 max-w-5xl pb-12">
         <div className="border-b border-slate-200 pb-6">
-          <div className="flex items-center gap-2 text-sm font-medium text-blue-700"><BookOpen className="h-4 w-4" />电商竞品监控使用说明</div>
+          <div className="flex items-center gap-2 text-sm font-medium text-blue-700"><BookOpen className="h-4 w-4" />经营罗盘使用说明</div>
           <h1 className="mt-2 text-2xl font-semibold text-slate-950">从首次授权到自动预警的完整流程</h1>
           <p className="mt-2 max-w-3xl text-sm leading-6 text-slate-600">按本页顺序配置即可。软件所有数据默认保存在当前电脑；暂停监控不会删除商品、价格记录、监控价或定时计划。</p>
         </div>

@@ -1,5 +1,6 @@
-import type { Analysis, AuthSession, BrowserEngineCatalog, BrowserEngineId, CaptureQueueStatus, ExcelSyncResult, ExcelSyncStatus, ImageGenerationJob, ImageGenerationRequest, ImageGenerationResponse, ImageLibraryItem, LarkCliStatus, LocalEvidenceStatus, LocalImportCommitResult, LocalImportPreview, ModelCatalog, ModelCatalogRequest, ModelConfigPatch, ModelConfigTestPayload, ModelConfigTestResult, MonitorChannel, OperationsAnalysis, OperationsChatMessage, OperationsReportType, OperationsTarget, OperationsWorkspace, Overview, PhotoshopOpenResult, PhotoshopSyncResult, Product, QwenPawAlertSettings, QwenPawFeishuTarget, RawDataCaptureResult, RunRecord, Snapshot, UpdateInfo } from '../types/domain'
+import type { Analysis, AuthSession, BrowserEngineCatalog, BrowserEngineId, CaptureQueueStatus, ExcelSyncResult, ExcelSyncStatus, ImageGenerationJob, ImageGenerationRequest, ImageGenerationResponse, ImageLibraryItem, LarkCliStatus, LocalEvidenceHistoryClearResult, LocalEvidenceStatus, LocalImportCommitResult, LocalImportPreview, ModelCatalog, ModelCatalogRequest, ModelConfigPatch, ModelConfigTestPayload, ModelConfigTestResult, MonitorChannel, OperationsAnalysis, OperationsChatMessage, OperationsPeriodKind, OperationsReportInputType, OperationsReport, OperationsSalesDeduction, OperationsTarget, OperationsWorkspace, Overview, PhotoshopOpenResult, PhotoshopSyncResult, Product, QwenPawAlertSettings, QwenPawFeishuTarget, RawDataCaptureResult, RunRecord, Snapshot, UpdateInfo } from '../types/domain'
 import type { ProductRecognitionResult, PromptEnhancementResult, PromptGenerationRequest, PromptGenerationResult, PromptHistoryItem, PromptProductProfile, PromptReferenceFiles, PromptStudioWorkspace, PromptStylePreset, QuickPromptGenerationResult, QuickPromptRequest } from '../features/prompt-studio/types'
+import type { OperationsCloudSync, OperationsProductCatalogEntry, OperationsSourcePeriodKind } from '../types/domain'
 
 const baseUrl = import.meta.env.VITE_API_BASE || ''
 
@@ -43,34 +44,79 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   return response.json()
 }
 
+async function requestDownload(path: string): Promise<{ blob: Blob, fileName: string }> {
+  const response = await fetch(`${baseUrl}${path}`)
+  if (!response.ok) throw new ApiError((await response.text()) || `下载失败：${response.status}`, response.status)
+  const disposition = response.headers.get('content-disposition') || ''
+  const encodedName = disposition.match(/filename\*=UTF-8''([^;]+)/i)?.[1]
+  const quotedName = disposition.match(/filename="?([^";]+)"?/i)?.[1]
+  return {
+    blob: await response.blob(),
+    fileName: encodedName ? decodeURIComponent(encodedName) : quotedName || '商品ID型号表-最新.csv',
+  }
+}
+
 export const api = {
   overview: () => request<Overview>('/api/overview'),
-  operations: () => request<OperationsWorkspace>('/api/operations'),
-  uploadOperationsReport: (file: File, payload: { type: OperationsReportType, storeName?: string, reportDate?: string, sourceName?: string }) => {
+  operations: (filters: { periodKind?: 'all' | OperationsPeriodKind, sourcePeriodKind?: OperationsSourcePeriodKind, start?: string, end?: string, storeName?: string } = {}) => {
+    const query = new URLSearchParams(Object.entries(filters).flatMap(([key, value]) => value ? [[key, value]] : []))
+    return request<OperationsWorkspace>(`/api/operations${query.size ? `?${query}` : ''}`)
+  },
+  operationsCloudSync: () => request<OperationsCloudSync>('/api/operations/cloud-sync'),
+  activateOperationsCloudSync: (payload: { endpoint?: string, code: string, deviceName?: string }) =>
+    request<{ cloudSync: OperationsCloudSync, workspace: OperationsWorkspace }>('/api/operations/cloud-sync/activate', { method: 'POST', body: JSON.stringify(payload) }),
+  disconnectOperationsCloudSync: () =>
+    request<{ cloudSync: OperationsCloudSync, workspace: OperationsWorkspace }>('/api/operations/cloud-sync/disconnect', { method: 'POST', body: '{}' }),
+  runOperationsCloudSync: () =>
+    request<{ result: { inserted: number, updated: number, removed: number, full: boolean, total: number }, workspace: OperationsWorkspace }>('/api/operations/cloud-sync/run', { method: 'POST', body: '{}' }),
+  uploadOperationsReport: (file: File, payload: { type: OperationsReportInputType, storeName?: string, reportDate?: string, periodKind?: OperationsPeriodKind, periodStart?: string, periodEnd?: string, sourceName?: string }) => {
     const body = new FormData()
     body.append('file', file, file.name)
     body.append('type', payload.type)
     body.append('storeName', payload.storeName || '')
     body.append('reportDate', payload.reportDate || '')
+    body.append('periodKind', payload.periodKind || '')
+    body.append('periodStart', payload.periodStart || '')
+    body.append('periodEnd', payload.periodEnd || '')
     body.append('sourceName', payload.sourceName || '')
     return request<{ workspace: OperationsWorkspace }>('/api/operations/reports', { method: 'POST', body })
   },
   previewOperationsReport: (file: File) => {
     const body = new FormData()
     body.append('file', file, file.name)
-    return request<{ fileName: string, kind: 'xls' | 'xlsx' | 'csv' | 'json' | 'screenshot', columns: string[], rowCount?: number, sampleRows: Array<Record<string, unknown>> }>('/api/operations/reports/preview', { method: 'POST', body })
+    return request<{ fileName: string, kind: 'xls' | 'xlsx' | 'csv' | 'json' | 'screenshot', columns: string[], rowCount?: number, period?: { start: string, end: string, label: string } | null, detectedType?: OperationsReportInputType | null, sampleRows: Array<Record<string, unknown>> }>('/api/operations/reports/preview', { method: 'POST', body })
   },
+  uploadProductCatalog: (file: File) => {
+    const body = new FormData()
+    body.append('file', file, file.name)
+    return request<{ importedCount: number, skippedRows: number, workspace: OperationsWorkspace }>('/api/operations/product-catalog/import', { method: 'POST', body })
+  },
+  saveProductCatalogEntry: (payload: { storeName: string, productId: string, category?: string, model?: string }) =>
+    request<{ entry: OperationsProductCatalogEntry, workspace: OperationsWorkspace }>('/api/operations/product-catalog', { method: 'POST', body: JSON.stringify(payload) }),
+  exportProductCatalog: () => requestDownload('/api/operations/product-catalog/export'),
   deleteOperationsReport: (id: string) => request<void>(`/api/operations/reports/${encodeURIComponent(id)}`, { method: 'DELETE' }),
+  renameOperationsReport: (id: string, fileName: string) =>
+    request<{ report: OperationsReport, workspace: OperationsWorkspace }>(`/api/operations/reports/${encodeURIComponent(id)}`, { method: 'PATCH', body: JSON.stringify({ fileName }) }),
+  createOperationsStore: (name: string) =>
+    request<OperationsWorkspace>('/api/operations/stores', { method: 'POST', body: JSON.stringify({ name }) }),
+  deleteOperationsStore: (name: string) =>
+    request<OperationsWorkspace>(`/api/operations/stores/${encodeURIComponent(name)}`, { method: 'DELETE' }),
+  assignOperationsReportsStore: (ids: string[], storeName: string) =>
+    request<{ updatedCount: number, workspace: OperationsWorkspace }>('/api/operations/reports/bulk-store', { method: 'PATCH', body: JSON.stringify({ ids, storeName }) }),
   updateOperationsProfile: (payload: { principles?: string, dailyReport?: { enabled?: boolean, time?: string } }) =>
     request<OperationsWorkspace>('/api/operations/profile', { method: 'PATCH', body: JSON.stringify(payload) }),
+  addOperationsSalesDeduction: (payload: { storeName: string, reportDate: string, amount: number, note?: string }) =>
+    request<{ deduction: OperationsSalesDeduction, workspace: OperationsWorkspace }>('/api/operations/sales-deductions', { method: 'POST', body: JSON.stringify(payload) }),
+  deleteOperationsSalesDeduction: (id: string) =>
+    request<void>(`/api/operations/sales-deductions/${encodeURIComponent(id)}`, { method: 'DELETE' }),
   updateOperationsTarget: (key: string, target: OperationsTarget) =>
     request<OperationsWorkspace>(`/api/operations/targets/${encodeURIComponent(key)}`, { method: 'PUT', body: JSON.stringify(target) }),
-  updateOperationsSuggestionFeedback: (id: string, payload: { status: 'adopted' | 'skipped' | 'outcome', note?: string }) =>
-    request<OperationsWorkspace>(`/api/operations/suggestions/${encodeURIComponent(id)}/feedback`, { method: 'POST', body: JSON.stringify(payload) }),
   analyzeOperations: () => request<{ analysis: OperationsAnalysis, workspace: OperationsWorkspace, sent: boolean, sendError: string }>('/api/operations/analyze', { method: 'POST' }),
+  clearOperationsAnalyses: () => request<{ cleared: number }>('/api/operations/analyses', { method: 'DELETE' }),
   chatOperations: (message: string) => request<{ message: OperationsChatMessage, workspace: OperationsWorkspace }>('/api/operations/chat', { method: 'POST', body: JSON.stringify({ message }) }),
   runOperationsDailyReport: () => request<{ analysis: OperationsAnalysis, workspace: OperationsWorkspace, sent: boolean, sendError: string }>('/api/operations/daily-report/run', { method: 'POST' }),
-  qwenPawStatus: () => request<OperationsWorkspace['qwenPaw']>('/api/operations/qwenpaw'),
+  qwenPawStatus: ({ checkLatest = false }: { checkLatest?: boolean } = {}) =>
+    request<OperationsWorkspace['qwenPaw']>(`/api/operations/qwenpaw?checkLatest=${checkLatest ? '1' : '0'}`),
   updateQwenPawInstallDirectory: (directory: string) => request<OperationsWorkspace['qwenPaw']>('/api/operations/qwenpaw/install-directory', { method: 'PATCH', body: JSON.stringify({ directory }) }),
   openQwenPawInstallDirectory: () => request<{ ok: true; directory: string }>('/api/operations/qwenpaw/open-install-directory', { method: 'POST', body: '{}' }),
   selectQwenPawInstallDirectory: () => request<{ directory: string | null }>('/api/operations/qwenpaw/select-directory', { method: 'POST', body: '{}' }),
@@ -213,6 +259,7 @@ export const api = {
   updateLocalEvidenceSettings: (directory: string | null) =>
     request<LocalEvidenceStatus>('/api/local-evidence', { method: 'PATCH', body: JSON.stringify({ directory }) }),
   deleteLocalEvidence: () => request<LocalEvidenceStatus>('/api/local-evidence', { method: 'DELETE' }),
+  clearLocalEvidenceHistory: () => request<LocalEvidenceHistoryClearResult>('/api/local-evidence/history', { method: 'DELETE' }),
   excelSyncStatus: () => request<ExcelSyncStatus>('/api/excel-sync'),
   syncExcelWorkbook: () => request<ExcelSyncResult>('/api/excel-sync/run', { method: 'POST', body: '{}' }),
   openExcelWorkbook: () => request<{ ok: true; path: string }>('/api/excel-sync/open', { method: 'POST', body: '{}' }),

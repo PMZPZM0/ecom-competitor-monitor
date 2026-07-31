@@ -28,7 +28,7 @@ tag="$(jq -er '.tag_name | select(test("^v[0-9]+\\.[0-9]+\\.[0-9]+([-.][A-Za-z0-
 version="${tag#v}"
 published_at="$(jq -er '.published_at' "$release_json")"
 escaped_version="${version//./\\.}"
-asset_pattern="^EcomMonitor-${escaped_version}-(win-x64\\.exe|mac-x64\\.dmg|mac-arm64\\.dmg)$"
+asset_pattern="^经营罗盘-${escaped_version}-(win-x64\\.exe|mac-x64\\.dmg|mac-arm64\\.dmg)$"
 asset_count="$(jq --arg pattern "$asset_pattern" '[.assets[] | select(.name | test($pattern))] | length' "$release_json")"
 [[ "$asset_count" == "3" ]] || { echo "Expected three release assets, found $asset_count" >&2; exit 1; }
 

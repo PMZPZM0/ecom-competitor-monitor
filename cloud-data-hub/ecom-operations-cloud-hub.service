@@ -1,0 +1,19 @@
+[Unit]
+Description=E-commerce Operations Cloud Hub
+After=network.target
+
+[Service]
+Type=simple
+User=ubuntu
+WorkingDirectory=/opt/ecom-operations-cloud-hub
+EnvironmentFile=/etc/ecom-operations-cloud-hub.env
+ExecStart=/usr/bin/node /opt/ecom-operations-cloud-hub/cloud-data-hub/server.js
+Restart=always
+RestartSec=3
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ReadWritePaths=/var/lib/ecom-operations-cloud-hub
+
+[Install]
+WantedBy=multi-user.target

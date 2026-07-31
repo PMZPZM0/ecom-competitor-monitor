@@ -46,6 +46,13 @@ export function AuthPanel({ sessions, onSaved, onActivate, onDelete }: Props) {
     return () => { cancelled = true }
   }, [])
 
+  async function refreshBrowserEngines() {
+    const catalog = await api.browserEngines()
+    setBrowserEngines(catalog.engines)
+    setBrowserEngine((current) => catalog.engines.some((engine) => engine.id === current) ? current : catalog.defaultEngine)
+    return catalog.engines
+  }
+
   function selectedBrowserForSession(session: AuthSession) {
     const saved = sessionBrowserEngines[session.id] || session.browserEngine
     return browserEngines.some((engine) => engine.id === saved) ? saved as BrowserEngineId : browserEngine
@@ -55,9 +62,22 @@ export function AuthPanel({ sessions, onSaved, onActivate, onDelete }: Props) {
     setBusy(`install:${engine}`)
     try {
       const result = await api.installBrowserEngine(engine)
-      setMessage(`已打开${result.engine.name}官方下载页；安装完成后返回本页即可选择。`)
+      setMessage(`已打开${result.engine.name}官方下载页；安装完成后点击“刷新识别”或直接重新授权，应用会重新检测。`)
     } catch (error) {
       setMessage(error instanceof Error ? error.message : '打开浏览器安装页失败。')
+    } finally {
+      setBusy('')
+    }
+  }
+
+  async function refreshAvailableBrowsers() {
+    setBusy('refresh-engines')
+    try {
+      const engines = await refreshBrowserEngines()
+      const installed = engines.filter((engine) => engine.available).map((engine) => engine.name)
+      setMessage(installed.length ? `已识别可用浏览器：${installed.join('、')}。` : '暂未发现可用浏览器；请完成安装后再点击刷新识别。')
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : '刷新浏览器识别状态失败。')
     } finally {
       setBusy('')
     }
@@ -67,7 +87,8 @@ export function AuthPanel({ sessions, onSaved, onActivate, onDelete }: Props) {
     setBusy('scan')
     setMessage('正在打开独立账号浏览器...')
     try {
-      const selected = browserEngines.find((engine) => engine.id === browserEngine)
+      const engines = await refreshBrowserEngines()
+      const selected = engines.find((engine) => engine.id === browserEngine)
       if (selected && !selected.available) {
         await installBrowser(browserEngine)
         return
@@ -158,7 +179,8 @@ export function AuthPanel({ sessions, onSaved, onActivate, onDelete }: Props) {
 
   async function reauthorizeSession(session: AuthSession) {
     const selectedEngine = selectedBrowserForSession(session)
-    const selected = browserEngines.find((engine) => engine.id === selectedEngine)
+    const engines = await refreshBrowserEngines()
+    const selected = engines.find((engine) => engine.id === selectedEngine)
     if (selected && !selected.available) {
       await installBrowser(selectedEngine)
       return
@@ -239,6 +261,9 @@ export function AuthPanel({ sessions, onSaved, onActivate, onDelete }: Props) {
           <select value={browserEngine} onChange={(event) => setBrowserEngine(event.target.value as BrowserEngineId)} className="h-8 min-w-0 flex-1 rounded border-0 bg-transparent px-2 text-sm text-slate-800 outline-none">
             {browserEngines.map((engine) => <option key={engine.id} value={engine.id}>{engine.name}{engine.available ? ' · 已安装' : ' · 未安装'}</option>)}
           </select>
+          <Button type="button" size="sm" variant="ghost" className="h-8 w-8 shrink-0 p-0" title="重新检测已安装的浏览器" aria-label="刷新浏览器识别" onClick={() => void refreshAvailableBrowsers()} disabled={Boolean(busy)}>
+            <RefreshCw className={`h-3.5 w-3.5 ${busy === 'refresh-engines' ? 'animate-spin' : ''}`} />
+          </Button>
           {browserEngines.find((engine) => engine.id === browserEngine && !engine.available) && (
             <Button type="button" size="sm" variant="secondary" className="h-8 shrink-0" onClick={() => installBrowser(browserEngine)} disabled={Boolean(busy)}><Download className="h-3.5 w-3.5" />安装</Button>
           )}

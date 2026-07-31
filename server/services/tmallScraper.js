@@ -496,6 +496,14 @@ function extractValueByKey(html, key) {
 
 function parseJsonBlobs(html) {
   const blobs = [];
+  const source = String(html || "").trim();
+  if (/^[{[]/.test(source)) {
+    try {
+      blobs.push(JSON.parse(source));
+    } catch {
+      // The captured page may be HTML or a partial inline object.
+    }
+  }
   const patterns = [
     /<script[^>]*type=["']application\/ld\+json["'][^>]*>([\s\S]*?)<\/script>/gi,
     /g_config\s*=\s*({[\s\S]*?});/gi,
@@ -528,6 +536,58 @@ function walk(value, visitor) {
   Object.values(value).forEach((item) => walk(item, visitor));
 }
 
+// Browser evidence keeps observed response bodies as strings. Decode only
+// syntactically valid JSON objects/arrays from that already-saved local
+// evidence so metadata fields remain available without any new network work.
+function walkEmbeddedJson(value, visitor, seenObjects = new Set(), seenTexts = new Set()) {
+  if (typeof value === "string") {
+    const source = value.trim();
+    if (!source || source.length > 4_000_000 || !/^[{[]/.test(source) || seenTexts.has(source)) return;
+    seenTexts.add(source);
+    try {
+      walkEmbeddedJson(JSON.parse(source), visitor, seenObjects, seenTexts);
+    } catch {
+      // A response body can be JSONP or truncated; other local signals remain usable.
+    }
+    return;
+  }
+  if (!value || typeof value !== "object" || seenObjects.has(value)) return;
+  seenObjects.add(value);
+  visitor(value);
+  if (Array.isArray(value)) {
+    value.forEach((item) => walkEmbeddedJson(item, visitor, seenObjects, seenTexts));
+    return;
+  }
+  Object.values(value).forEach((item) => walkEmbeddedJson(item, visitor, seenObjects, seenTexts));
+}
+
+const modelParameterLabelPattern = /型号|产品型号|货号/i;
+
+function modelParameterValue(value) {
+  const candidates = Array.isArray(value)
+    ? value
+    : value && typeof value === "object"
+      ? [value.valueName, value.value, value.valueText, value.text, value.textList]
+      : [value];
+  for (const candidate of candidates.flat()) {
+    const text = cleanText(candidate);
+    if (text && text.length <= 80 && !modelParameterLabelPattern.test(text) && !/^\d+$/.test(text)) return text;
+  }
+  return "";
+}
+
+function modelFromParameterItems(items) {
+  if (!Array.isArray(items)) return "";
+  for (const item of items) {
+    if (!item || typeof item !== "object") continue;
+    const label = [item.propertyName, item.name, item.title, item.label].map(cleanText).join(" ");
+    if (!modelParameterLabelPattern.test(label)) continue;
+    const model = modelParameterValue(item);
+    if (model) return model;
+  }
+  return "";
+}
+
 function extractFromJson(blobs) {
   const images = [];
   const skuImages = [];
@@ -539,10 +599,11 @@ function extractFromJson(blobs) {
   let model = "";
 
   for (const blob of blobs) {
-    walk(blob, (node) => {
-      if (!model && Array.isArray(node.basicParamList)) {
-        const modelParam = node.basicParamList.find((item) => /型号|产品型号|货号/i.test(item.propertyName || item.name || ""));
-        if (modelParam) model = cleanText(modelParam.valueName || modelParam.value || modelParam.text).slice(0, 80);
+    walkEmbeddedJson(blob, (node) => {
+      if (!model) {
+        model = modelFromParameterItems(node.basicParamList)
+          || modelFromParameterItems(node.enhanceParamList)
+          || modelFromParameterItems(node.items);
       }
       for (const [key, value] of Object.entries(node)) {
         const lower = key.toLowerCase();
@@ -701,9 +762,12 @@ function extractShopLogo(html, jsonData, domData) {
 function extractModel(html, jsonData, domData) {
   const candidates = [jsonData.model, domData.model];
   const industryParamVO = extractObjectByKey(html, "industryParamVO");
-  for (const item of [...(industryParamVO?.basicParamList || []), ...(industryParamVO?.enhanceParamList || [])]) {
-    if (/型号|产品型号|货号/i.test(item.propertyName || item.name || "")) candidates.push(item.valueName || item.value || item.text);
-  }
+  const extensionInfoVO = extractObjectByKey(html, "extensionInfoVO");
+  candidates.push(
+    modelFromParameterItems(industryParamVO?.basicParamList),
+    modelFromParameterItems(industryParamVO?.enhanceParamList),
+    ...(extensionInfoVO?.infos || []).flatMap((info) => modelFromParameterItems(info?.items)),
+  );
   const modelMatch = html.match(/(?:型号|产品型号|货号)["'\s:：>]+([A-Za-z0-9][A-Za-z0-9._/-]{2,40})/i);
   if (modelMatch?.[1]) candidates.push(modelMatch[1]);
   return candidates.map(cleanText).find((candidate) => candidate && candidate.length <= 80 && !/型号|产品型号|货号/.test(candidate)) || "";
