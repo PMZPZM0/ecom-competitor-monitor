@@ -4,7 +4,7 @@ protocols:
   - name: 经营罗盘团队云端同步
     schemes:
       - ecom-monitor
-artifactName: 经营罗盘-${version}-${os}-${arch}.${ext}
+artifactName: JingYingLuoPan-${version}-${os}-${arch}.${ext}
 directories:
   output: release
 files:
