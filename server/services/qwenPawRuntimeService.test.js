@@ -50,7 +50,7 @@ test("packaged QwenPaw plugin resolves from Electron's unpacked resource directo
   });
   assert.equal(
     source,
-    path.join("D:/Program Files/电商竞品监控/resources/app.asar.unpacked", "server", "qwenpaw-plugins", "ecommerce-qr-delivery"),
+    path.win32.join("D:/Program Files/电商竞品监控/resources/app.asar.unpacked", "server", "qwenpaw-plugins", "ecommerce-qr-delivery"),
   );
   assert.equal(
     qwenPawBundledPluginSource({ sourceDirectory: "D:/workspace/server/services", unpackedDirectory: "", platform: "win32" }),
