@@ -665,6 +665,186 @@ function DashboardBarChart({
   );
 }
 
+function CategoryContributionPanel({
+  categories,
+}: {
+  categories: OperationsBusinessEntity[];
+}) {
+  const activeCategories = useMemo(
+    () =>
+      categories.filter(
+        (item) =>
+          Math.abs(Number(item.revenue) || 0) >= 0.005 ||
+          Math.abs(Number(item.spend) || 0) >= 0.005,
+      ),
+    [categories],
+  );
+  const rankedCategories = useMemo(
+    () =>
+      [...activeCategories]
+        .sort(
+          (left, right) =>
+            right.revenue - left.revenue || right.spend - left.spend,
+        )
+        .slice(0, 10),
+    [activeCategories],
+  );
+  const totals = useMemo(() => {
+    const revenue = activeCategories.reduce(
+      (sum, item) => sum + item.revenue,
+      0,
+    );
+    const spend = activeCategories.reduce((sum, item) => sum + item.spend, 0);
+    const feeRateAvailable =
+      activeCategories.length > 0 &&
+      activeCategories.every((item) => item.feeRate !== null);
+    return {
+      revenue,
+      spend,
+      feeRate: feeRateAvailable && revenue > 0 ? spend / revenue : null,
+    };
+  }, [activeCategories]);
+  const share = (value: number, total: number) =>
+    total > 0 ? Math.max(0, Math.min(1, value / total)) : 0;
+  const rateClassName = (value: number | null) => {
+    if (value === null) return "border-slate-200 bg-slate-100 text-slate-500";
+    if (value <= 0.08)
+      return "border-emerald-200 bg-emerald-50 text-emerald-700";
+    if (value <= 0.12)
+      return "border-amber-200 bg-amber-50 text-amber-700";
+    return "border-rose-200 bg-rose-50 text-rose-700";
+  };
+
+  if (!activeCategories.length) return null;
+
+  return (
+    <Card className="overflow-hidden border-sky-200">
+      <CardHeader className="gap-4 border-b border-slate-200 bg-sky-50/50 xl:flex-row xl:items-center xl:justify-between">
+        <div className="min-w-0">
+          <div className="text-[11px] font-semibold text-sky-700">经营结构</div>
+          <CardTitle className="mt-1">类目销售贡献与推广效率</CardTitle>
+          <p className="mt-1 text-xs leading-5 text-slate-500">
+            按净 GSV 排名，金额、占比和费率均跟随当前日期、口径与店铺筛选。
+          </p>
+        </div>
+        <dl className="grid min-w-0 overflow-hidden border border-sky-200 bg-white sm:grid-cols-3 xl:min-w-[560px]">
+          <div className="min-w-0 px-3 py-2.5">
+            <dt className="text-[10px] font-semibold text-slate-500">有效类目净 GSV</dt>
+            <dd className="mt-1 truncate text-sm font-semibold text-slate-900" title={money(totals.revenue)}>
+              {money(totals.revenue)}
+            </dd>
+          </div>
+          <div className="min-w-0 border-t border-sky-100 px-3 py-2.5 sm:border-l sm:border-t-0">
+            <dt className="text-[10px] font-semibold text-slate-500">有效类目推广花费</dt>
+            <dd className="mt-1 truncate text-sm font-semibold text-slate-900" title={money(totals.spend)}>
+              {money(totals.spend)}
+            </dd>
+          </div>
+          <div className="min-w-0 border-t border-sky-100 px-3 py-2.5 sm:border-l sm:border-t-0">
+            <dt className="text-[10px] font-semibold text-slate-500">类目整体推广费率</dt>
+            <dd className="mt-1">
+              <span className={`inline-flex border px-2 py-1 text-xs font-semibold ${rateClassName(totals.feeRate)}`}>
+                {percent(totals.feeRate)}
+              </span>
+            </dd>
+          </div>
+        </dl>
+      </CardHeader>
+
+      <div className="grid gap-px border-b border-sky-100 bg-sky-100 lg:grid-cols-3">
+        {[
+          ["销售占比", "类目净 GSV ÷ 有效类目净 GSV 合计"],
+          ["花费占比", "类目推广花费 ÷ 有效类目推广花费合计"],
+          ["类目推广费率", "类目推广花费 ÷ 类目净 GSV"],
+        ].map(([label, formula]) => (
+          <div key={label} className="flex min-w-0 items-center gap-2 bg-sky-50/70 px-4 py-2">
+            <span className="shrink-0 text-[10px] font-semibold text-sky-800">{label}</span>
+            <span className="truncate text-[10px] text-slate-500" title={formula}>{formula}</span>
+          </div>
+        ))}
+      </div>
+
+      <div className="hidden min-h-10 grid-cols-[minmax(150px,0.8fr)_minmax(210px,1fr)_minmax(210px,1fr)_minmax(130px,0.6fr)] items-center gap-5 border-b border-slate-200 bg-slate-50 px-5 text-[10px] font-semibold text-slate-500 lg:grid">
+        <span>排名 / 类目</span>
+        <span>净 GSV / 销售占比</span>
+        <span>推广花费 / 花费占比</span>
+        <span>类目推广费率</span>
+      </div>
+      <div className="divide-y divide-slate-100">
+        {rankedCategories.map((item, index) => {
+          const revenueShare = share(item.revenue, totals.revenue);
+          const spendShare = share(item.spend, totals.spend);
+          return (
+            <div
+              key={item.key}
+              className="grid gap-4 px-4 py-4 transition-colors hover:bg-sky-50/35 lg:grid-cols-[minmax(150px,0.8fr)_minmax(210px,1fr)_minmax(210px,1fr)_minmax(130px,0.6fr)] lg:items-center lg:gap-5 lg:px-5 lg:py-3.5"
+            >
+              <div className="flex min-w-0 items-center gap-3">
+                <span className="grid h-7 w-7 shrink-0 place-items-center border border-sky-200 bg-sky-50 text-[10px] font-semibold text-sky-800">
+                  {String(index + 1).padStart(2, "0")}
+                </span>
+                <div className="min-w-0">
+                  <span className="text-[9px] font-semibold text-slate-400 lg:hidden">类目</span>
+                  <strong className="block truncate text-sm font-semibold text-slate-800" title={item.name}>
+                    {item.name || "--"}
+                  </strong>
+                </div>
+              </div>
+
+              {[
+                {
+                  label: "净 GSV",
+                  value: money(item.revenue),
+                  shareLabel: "销售占比",
+                  shareValue: revenueShare,
+                  barClassName: "bg-emerald-600",
+                },
+                {
+                  label: "推广花费",
+                  value: money(item.spend),
+                  shareLabel: "花费占比",
+                  shareValue: spendShare,
+                  barClassName: "bg-blue-600",
+                },
+              ].map((metric) => (
+                <div key={metric.label} className="min-w-0">
+                  <div className="mb-1.5 flex items-end justify-between gap-3">
+                    <div className="min-w-0">
+                      <span className="block text-[9px] font-semibold text-slate-400 lg:hidden">{metric.label}</span>
+                      <strong className="block truncate text-xs font-semibold text-slate-800" title={metric.value}>{metric.value}</strong>
+                    </div>
+                    <span className="shrink-0 text-[10px] text-slate-500">
+                      {metric.shareLabel} <b className="text-sky-800">{percent(metric.shareValue)}</b>
+                    </span>
+                  </div>
+                  <div className="h-1.5 overflow-hidden bg-slate-100">
+                    <div
+                      className={`h-full ${metric.barClassName}`}
+                      style={{ width: `${(metric.shareValue * 100).toFixed(2)}%` }}
+                    />
+                  </div>
+                </div>
+              ))}
+
+              <div className="flex items-center justify-between gap-3 border-t border-slate-100 pt-3 lg:block lg:border-l lg:border-t-0 lg:pl-4 lg:pt-0">
+                <span className="block text-[10px] font-semibold text-slate-500">类目推广费率</span>
+                <span className={`inline-flex border px-2 py-1 text-xs font-semibold lg:mt-1.5 ${rateClassName(item.feeRate)}`}>
+                  {percent(item.feeRate)}
+                </span>
+                <span className="hidden text-[9px] text-slate-400 lg:mt-1 lg:block">花费 ÷ 净 GSV</span>
+              </div>
+            </div>
+          );
+        })}
+      </div>
+      <div className="flex flex-wrap justify-between gap-2 border-t border-slate-100 bg-slate-50/70 px-5 py-2 text-[10px] text-slate-500">
+        <span>展示前 {rankedCategories.length} 个类目</span>
+        <span>{activeCategories.length} 个有效类目参与占比计算</span>
+      </div>
+    </Card>
+  );
+}
+
 function DashboardLineChart({
   data,
   selectedMetrics,
@@ -2125,6 +2305,7 @@ export function OperationsAssistant({
               </div>
             </Card>
           </section>
+          <CategoryContributionPanel categories={categories} />
           <AnalysisBlock
             analysis={analysis}
             outdated={analysisOutdated}

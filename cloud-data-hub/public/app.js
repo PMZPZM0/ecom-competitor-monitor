@@ -11,8 +11,8 @@ const state = {
   session: null, page: 'operations', mode: 'cloud', workspace: null, overview: null, team: null,
   localReports: [], localMeta: { productCatalog: [], productCatalogSource: { fileName: '', updatedAt: null }, salesDeductions: [] },
   filters: { start: '', end: '', storeName: '', sourcePeriodKind: 'auto' }, datePreset: 'yesterday', customScopeOpen: false,
-  toast: null, activity: null, modal: '', activePanel: 'overview', warehousePanel: 'upload', authMode: 'login', authDraft: { username: '', email: '', password: '', inviteCode: '' }, authFeedback: null, authBusy: '', copiedCode: '', deviceCode: '', selectedTeamId: window.sessionStorage.getItem(SELECTED_TEAM_KEY) || '', teamMenuOpen: false, platformSettings: { allowTeamCreation: true },
-  trendMetrics: ['revenue'], entityUi: { category: { keyword: '', categories: [], models: [], sort: 'revenue', direction: 'desc', expanded: '', filterMenu: '', categoryQuery: '', modelQuery: '' }, product: { keyword: '', categories: [], models: [], sort: 'revenue', direction: 'desc', expanded: '', filterMenu: '', categoryQuery: '', modelQuery: '' } },
+  toast: null, activity: null, modal: '', activePanel: 'overview', warehousePanel: 'upload', authMode: 'login', authDraft: { username: '', email: '', password: '', inviteCode: '' }, authFeedback: null, authBusy: '', bootstrapError: '', copiedCode: '', deviceCode: '', selectedTeamId: window.sessionStorage.getItem(SELECTED_TEAM_KEY) || '', teamMenuOpen: false, platformSettings: { allowTeamCreation: true },
+  trendMetrics: ['revenue'], entityUi: { category: { keyword: '', categories: [], models: [], sort: 'revenue', direction: 'desc', expanded: '', scrollTop: 0, filterMenu: '', categoryQuery: '', modelQuery: '' }, product: { keyword: '', categories: [], models: [], sort: 'revenue', direction: 'desc', expanded: '', scrollTop: 0, filterMenu: '', categoryQuery: '', modelQuery: '' } },
   archiveUi: { selectedIds: [], expandedDate: '', type: 'all', storeName: '', renameId: '', renameValue: '' },
   upload: { mode: '', file: null, preview: null, type: '', storeName: '', periodKind: 'day', periodStart: '', periodEnd: '', sourceName: '', openMenu: '', dateSelecting: 'start', calendarMonth: '' },
   catalogUi: { file: null, page: 0, showCreate: false },
@@ -371,16 +371,49 @@ function entityFilterConfig(field) {
     ? { selection: 'models', query: 'modelQuery', label: '型号' }
     : { selection: 'categories', query: 'categoryQuery', label: '品类' };
 }
-function entityFilterOptions(kind, field, rows) {
-  if (field === 'model') return kind === 'product' ? uniqueSorted(rows.map((row) => row.model || '型号待补')) : [];
-  return uniqueSorted(rows.map((row) => row.category || (kind === 'category' ? row.name : '品类待补')));
+function entityCategory(row, kind) { return row.category || (kind === 'category' ? row.name : '品类待补'); }
+function entityModel(row) { return row.model || '型号待补'; }
+function entitySourceRows(kind) {
+  const dashboard = operationsModel()?.core?.dashboard;
+  return dashboard?.[kind === 'product' ? 'products' : 'categories'] || [];
 }
-function entityFilterMenu(kind, field, options) {
+function entityFilterOptions(kind, field, rows, linked = true) {
+  const ui = entityUi(kind); let source = rows || [];
+  if (linked && kind === 'product') {
+    if (field === 'model' && ui.categories.length) {
+      const categories = new Set(ui.categories);
+      source = source.filter((row) => categories.has(entityCategory(row, kind)));
+    }
+    if (field === 'category' && ui.models.length) {
+      const models = new Set(ui.models);
+      source = source.filter((row) => models.has(entityModel(row)));
+    }
+  }
+  return field === 'model'
+    ? (kind === 'product' ? uniqueSorted(source.map(entityModel)) : [])
+    : uniqueSorted(source.map((row) => entityCategory(row, kind)));
+}
+function normalizeEntitySelectionsToRows(kind, rows) {
+  const ui = entityUi(kind);
+  for (const field of ['category', 'model']) {
+    const config = entityFilterConfig(field); const allowed = new Set(entityFilterOptions(kind, field, rows, false));
+    ui[config.selection] = (ui[config.selection] || []).filter((value) => allowed.has(value));
+  }
+}
+function normalizeEntityLinkedSelection(kind, changedField, rows = entitySourceRows(kind)) {
+  if (kind !== 'product') return;
+  const oppositeField = changedField === 'category' ? 'model' : 'category';
+  const oppositeConfig = entityFilterConfig(oppositeField);
+  const allowed = new Set(entityFilterOptions(kind, oppositeField, rows));
+  entityUi(kind)[oppositeConfig.selection] = (entityUi(kind)[oppositeConfig.selection] || []).filter((value) => allowed.has(value));
+}
+function entityFilterMenu(kind, field, options, totalCount = options.length) {
   const ui = entityUi(kind); const config = entityFilterConfig(field); const query = ui[config.query] || '';
   const normalizedQuery = query.trim().toLocaleLowerCase('zh-CN'); const visible = normalizedQuery ? options.filter((name) => name.toLocaleLowerCase('zh-CN').includes(normalizedQuery)) : options;
   const chosen = ui[config.selection] || []; const isOpen = ui.filterMenu === field;
   const label = chosen.length ? `已选 ${chosen.length} 个${config.label}` : `选择${config.label}`;
-  return `<div class="entity-filter"><button class="entity-filter-trigger ${isOpen ? 'active' : ''}" data-entity-filter-toggle="${kind}:${field}" aria-expanded="${isOpen}">${label}<i>${isOpen ? '▴' : '▾'}</i></button>${isOpen ? `<section class="entity-filter-panel" data-entity-filter-panel="${kind}:${field}"><label class="entity-filter-search"><span>搜索</span><input data-entity-filter-query="${kind}:${field}" value="${escape(query)}" placeholder="搜索${config.label}" autocomplete="off" /></label><div class="entity-filter-actions"><button data-entity-filter-select-all="${kind}:${field}">全选</button><button data-entity-filter-clear="${kind}:${field}">清空</button><small>${visible.length} / ${options.length}</small></div><div class="entity-filter-options">${visible.length ? visible.map((name) => `<label><input type="checkbox" data-entity-filter-option="${kind}:${field}" value="${escape(name)}" ${selected(chosen, name) ? 'checked' : ''}/><span>${escape(name)}</span></label>`).join('') : '<p class="empty">没有匹配的选项</p>'}</div></section>` : ''}</div>`;
+  const oppositeSelection = field === 'category' ? ui.models : ui.categories; const linked = kind === 'product' && oppositeSelection.length > 0;
+  return `<div class="entity-filter entity-filter-${field}"><button class="entity-filter-trigger ${isOpen ? 'active' : ''}" data-entity-filter-toggle="${kind}:${field}" aria-expanded="${isOpen}"><span>${label}${linked ? `<em class="entity-filter-linked">联动 · ${options.length} 可选</em>` : ''}</span><i>${isOpen ? '▴' : '▾'}</i></button>${isOpen ? `<section class="entity-filter-panel" data-entity-filter-panel="${kind}:${field}"><label class="entity-filter-search"><span>搜索</span><input data-entity-filter-query="${kind}:${field}" value="${escape(query)}" placeholder="搜索${config.label}" autocomplete="off" /></label><div class="entity-filter-actions"><button data-entity-filter-select-all="${kind}:${field}">全选</button><button data-entity-filter-clear="${kind}:${field}">清空</button><small>${visible.length} / ${options.length}${linked ? ` · 全部 ${totalCount}` : ''}</small></div><div class="entity-filter-options">${visible.length ? visible.map((name) => `<label><input type="checkbox" data-entity-filter-option="${kind}:${field}" value="${escape(name)}" ${selected(chosen, name) ? 'checked' : ''}/><span>${escape(name)}</span></label>`).join('') : `<p class="empty">${linked ? '当前联动条件下无可选项' : '没有匹配的选项'}</p>`}</div></section>` : ''}</div>`;
 }
 function renderWithEntityFilterFocus(kind, field, caret = 0) {
   render();
@@ -414,8 +447,45 @@ function sumRows(rows) {
   const complete = rows.length > 0 && rows.every((row) => row.promotionCoverageComplete === true);
   return { grossRevenue: total('grossRevenue'), refundAmount: total('refundAmount'), revenue, spend, promotionRevenue: total('promotionRevenue'), refundDataAvailable, complete, roi: complete && spend > 0 ? total('promotionRevenue') / spend : null, feeRate: complete && refundDataAvailable && revenue > 0 ? spend / revenue : null };
 }
+function feeRateTone(value) {
+  if (!hasNumber(value)) return 'neutral';
+  if (Number(value) <= 0.08) return 'good';
+  if (Number(value) <= 0.12) return 'warn';
+  return 'high';
+}
+function entityComparisonChart(rows, kind) {
+  const ranked = [...(rows || [])]
+    .filter((row) => (Number(row.revenue) || 0) > 0 || (Number(row.spend) || 0) > 0)
+    .sort((left, right) => (Number(right.revenue) || 0) - (Number(left.revenue) || 0) || (Number(right.spend) || 0) - (Number(left.spend) || 0))
+    .slice(0, 10);
+  if (!ranked.length) return '';
+  const maxRevenue = Math.max(1, ...ranked.map((row) => Number(row.revenue) || 0));
+  const maxSpend = Math.max(1, ...ranked.map((row) => Number(row.spend) || 0));
+  const width = (value, max) => `${Math.max(0, Math.min(100, (Number(value) || 0) / max * 100)).toFixed(2)}%`;
+  const label = kind === 'product' ? '单品' : '品类';
+  return `<section class="entity-comparison"><header><div><span>TOP 10 · 净 GSV 排名</span><h4>${label}销售与推广花费</h4></div><div class="entity-chart-legend"><i class="revenue"></i><span>净 GSV</span><i class="spend"></i><span>推广花费</span></div></header><div class="entity-bar-list">${ranked.map((row, index) => {
+    const primary = kind === 'product' ? row.model || row.name || '--' : row.name || '--';
+    const secondary = kind === 'product' && row.model ? `${row.productId || '--'} · ${row.name || '--'}` : kind === 'product' ? row.productId || '--' : `${row.promotionChannels?.length || 0} 类推广`;
+    const rate = calculatedPromotion(row).feeRate;
+    return `<article class="entity-bar-row" title="${escape(row.name || primary)}"><div class="entity-bar-label"><i>${String(index + 1).padStart(2, '0')}</i><span><strong>${escape(primary)}</strong><small>${escape(secondary)}</small></span></div><div class="entity-bar-pair"><div><span>净 GSV</span><b class="entity-bar-track"><i class="revenue" style="--bar-width:${width(row.revenue, maxRevenue)}"></i></b><em>${money(row.revenue)}</em></div><div><span>花费</span><b class="entity-bar-track"><i class="spend" style="--bar-width:${width(row.spend, maxSpend)}"></i></b><em>${money(row.spend)}</em></div></div><div class="entity-bar-rate"><span>推广费率</span><b class="fee-rate ${feeRateTone(rate)}">${percent(rate)}</b></div></article>`;
+  }).join('')}</div><footer><span>销售柱与花费柱分别按各自最高值缩放</span><b>${ranked.length} / ${rows.length} 项</b></footer></section>`;
+}
+function categoryContributionPanel(rows) {
+  const active = [...(rows || [])].filter((row) => (Number(row.revenue) || 0) > 0 || (Number(row.spend) || 0) > 0);
+  if (!active.length) return '';
+  const totals = sumRows(active);
+  const totalRevenue = totals.revenue;
+  const totalSpend = totals.spend;
+  const ranked = active.sort((left, right) => (Number(right.revenue) || 0) - (Number(left.revenue) || 0) || (Number(right.spend) || 0) - (Number(left.spend) || 0)).slice(0, 10);
+  const share = (value, total) => total > 0 ? Math.max(0, Math.min(1, (Number(value) || 0) / total)) : 0;
+  return `<article class="card category-contribution"><header class="section-head contribution-title"><div><span class="section-kicker">经营结构</span><h3>类目销售贡献与推广效率</h3><p>按净 GSV 从高到低，金额、占比和费率均使用当前筛选范围。</p></div><dl class="contribution-totals"><div><dt>已关联类目净 GSV</dt><dd>${money(totalRevenue)}</dd></div><div><dt>已关联类目推广花费</dt><dd>${money(totalSpend)}</dd></div><div><dt>类目整体推广费率</dt><dd><b class="fee-rate ${feeRateTone(totals.feeRate)}">${percent(totals.feeRate)}</b></dd></div></dl></header><div class="contribution-formulas" aria-label="指标计算口径"><span><b>销售占比</b><em>类目净 GSV ÷ 已关联类目净 GSV 合计</em></span><span><b>花费占比</b><em>类目推广花费 ÷ 已关联类目推广花费合计</em></span><span><b>类目推广费率</b><em>类目推广花费 ÷ 类目净 GSV</em></span></div><div class="contribution-head"><span>排名 / 类目</span><span><b>净 GSV</b><small>金额 + 销售占比</small></span><span><b>推广花费</b><small>金额 + 花费占比</small></span><span><b>类目推广费率</b><small>花费 ÷ 类目净 GSV</small></span></div><div class="contribution-list">${ranked.map((row, index) => {
+    const revenueShare = share(row.revenue, totalRevenue); const spendShare = share(row.spend, totalSpend);
+    const rate = calculatedPromotion(row).feeRate;
+    return `<div class="contribution-row"><div class="contribution-name"><i>${String(index + 1).padStart(2, '0')}</i><span><small>类目</small><strong title="${escape(row.name || '')}">${escape(row.name || '--')}</strong></span></div><div class="contribution-metric revenue"><span class="contribution-metric-title">净 GSV</span><div><b>${money(row.revenue)}</b><em><small>销售占比</small><strong>${percent(revenueShare)}</strong></em></div><i><b style="--share:${(revenueShare * 100).toFixed(2)}%"></b></i></div><div class="contribution-metric spend"><span class="contribution-metric-title">推广花费</span><div><b>${money(row.spend)}</b><em><small>花费占比</small><strong>${percent(spendShare)}</strong></em></div><i><b style="--share:${(spendShare * 100).toFixed(2)}%"></b></i></div><div class="contribution-rate"><span>类目推广费率</span><b class="fee-rate ${feeRateTone(rate)}">${percent(rate)}</b><small>推广花费 ÷ 类目净 GSV</small></div></div>`;
+  }).join('')}</div><footer><span>展示前 ${ranked.length} 个类目</span><b>${active.length} 个有效类目参与占比计算</b></footer></article>`;
+}
 function promotionTone(name = '') { if (/全站/.test(name)) return 'blue'; if (/关键词/.test(name)) return 'purple'; const tones = ['teal', 'amber', 'rose', 'sky']; let hash = 0; for (const char of name) hash = (hash * 31 + char.charCodeAt(0)) >>> 0; return tones[hash % tones.length]; }
-function promotionDetails(row, columns = 11) {
+function promotionDetails(row) {
   const channels = row?.promotionChannels || [];
   if (!channels.length) return '';
   // Plan rates are calculated in the shared core from the linked product
@@ -423,10 +493,18 @@ function promotionDetails(row, columns = 11) {
   const planMetrics = (plan) => {
     return `<dl class="promotion-plan-metrics"><div><dt>花费</dt><dd>${money(plan.spend)}</dd></div><div><dt>计划成交</dt><dd>${money(plan.promotionRevenue)}</dd></div><div><dt>投产</dt><dd>${fmtNumber(plan.roi)}</dd></div><div class="plan-fee-rate"><dt>计划费率</dt><dd>${percent(plan.feeRate)}</dd></div></dl>`;
   };
-  return `<tr class="promotion-detail"><td colspan="${columns}"><div class="promotion-grid">${channels.map((channel) => {
+  return `<div class="promotion-grid">${channels.map((channel) => {
     const plans = channel.plans?.length ? channel.plans : [{ name: '未分组计划', spend: channel.spend, promotionRevenue: channel.promotionRevenue, roi: channel.roi }];
     return `<section class="promotion-channel ${promotionTone(channel.name)}"><header class="promotion-channel-head"><div><strong>${escape(channel.name || '未识别推广类型')}</strong><span>${plans.length} 个计划</span></div><div class="promotion-channel-summary"><span>关联净 GSV <b>${money(channel.linkedRevenue)}</b></span><span class="channel-fee-rate">${escape(channel.name || '推广')}整体费率 <b>${percent(channel.feeRate)}</b></span><span>花费 <b>${money(channel.spend)}</b></span></div></header><div class="promotion-plan-list">${plans.map((plan) => `<article class="promotion-plan"><strong class="promotion-plan-name" title="${escape(plan.name || '未命名计划')}">${escape(plan.name || '未命名计划')}</strong>${planMetrics(plan)}</article>`).join('')}</div></section>`;
-  }).join('')}</div></td></tr>`;
+  }).join('')}</div>`;
+}
+function promotionDrawer(row, kind) {
+  const channels = row?.promotionChannels || [];
+  const planCount = channels.reduce((sum, channel) => sum + (channel.plans?.length || 0), 0);
+  const verified = calculatedPromotion(row);
+  const title = kind === 'product' ? row.model || row.name || '商品推广详情' : row.name || '品类推广详情';
+  const identity = kind === 'product' ? `${row.productId || '--'} · ${row.name || '--'}` : `${channels.length} 类推广 · ${planCount} 个计划`;
+  return `<div class="promotion-drawer-shell" data-entity-drawer role="dialog" aria-modal="true" aria-label="${escape(title)}推广计划详情"><button class="promotion-drawer-backdrop" data-close-entity-drawer aria-label="关闭推广计划详情"></button><aside class="promotion-drawer"><header><div><span>${kind === 'product' ? '商品推广计划' : '品类推广计划'}</span><h3>${escape(title)}</h3><p>${escape(identity)}</p></div><button class="promotion-drawer-close" data-close-entity-drawer aria-label="关闭">×</button></header><div class="promotion-drawer-kpis"><div><span>净 GSV</span><b>${money(row.revenue)}</b></div><div><span>推广花费</span><b>${money(row.spend)}</b></div><div><span>推广费率</span><b class="fee-rate ${feeRateTone(verified.feeRate)}">${percent(verified.feeRate)}</b></div><div><span>推广结构</span><b>${channels.length} 类 / ${planCount} 个计划</b></div></div><div class="promotion-drawer-body">${promotionDetails(row)}</div></aside></div>`;
 }
 function reportGroupKey(report) { return `${report.periodKind || 'day'}|${report.periodStart || report.reportDate || ''}|${report.periodEnd || report.reportDate || ''}`; }
 function groupedWarehouseReports(reports) {
@@ -468,18 +546,70 @@ function trendView(trend = []) {
 }
 function overviewPanel(workspace) {
   const core = workspace.core || workspace.workspace || workspace; const dashboard = core.dashboard; const store = dashboard.store; const verified = calculatedPromotion(store); const canManage = Boolean(workspace.canManage);
-  return `<section class="workspace-content"><div class="metrics-grid dashboard-metrics">${metric('整店净 GSV', money(store.revenue), store.refundDataAvailable ? `支付 ${money(store.grossRevenue)} · 退款 ${money(store.refundAmount)}${store.salesDeduction ? ` · 扣除 ${money(store.salesDeduction)}` : ''}` : '当前销售报表缺退款字段', 'mint')}${metric('推广花费', money(store.spend), dashboard.sourceCoverage?.storePromotionComplete ? '单品付费周期已完整对齐' : '仅展示已导入消耗，不计算完整费率', 'blue')}${metric('整店经营 ROI', fmtNumber(verified.roi), dashboard.sourceCoverage?.storePromotionComplete ? '推广成交 ÷ 推广花费' : '需同周期单品付费报表', 'orange')}${metric('推广费率', percent(verified.feeRate), dashboard.sourceCoverage?.storePromotionComplete ? '推广花费 ÷ 净 GSV' : '需同周期单品付费报表', 'purple')}</div>${dashboard.sourceWarnings?.storePromotion ? `<div class="data-warning">${escape(dashboard.sourceWarnings.storePromotion)}</div>` : ''}${trendView(dashboard.trend)}<div class="split-grid"><article class="card"><header class="section-head"><div><h3>店铺经营</h3><p>销售和推广只在同名店铺内关联；表内口径与上方一致。</p></div>${canManage ? `<button class="btn secondary small" data-open-deductions>销售扣除</button>` : ''}</header>${storeTable(dashboard.stores)}</article><article class="card"><header class="section-head"><div><h3>数据口径</h3><p>本页严格使用共享 GSV、推广费率和 ROI 公式。</p></div></header><div class="source-list"><div><span>销售来源</span><strong>${escape(dashboard.sources?.storeSales?.type ? TYPE_LABELS[dashboard.sources.storeSales.type] : '未导入')}</strong></div><div><span>推广来源</span><strong>${escape(dashboard.sources?.storePromotion?.type ? TYPE_LABELS[dashboard.sources.storePromotion.type] : '未导入')}</strong></div><div><span>当前统计日期</span><strong>${escape(core.currentDate || '--')}</strong></div><div><span>商品资料库</span><strong>${core.productCatalog?.length || 0} 条版本记录</strong></div></div></article></div></section>`;
+  return `<section class="workspace-content"><div class="metrics-grid dashboard-metrics">${metric('整店净 GSV', money(store.revenue), store.refundDataAvailable ? `支付 ${money(store.grossRevenue)} · 退款 ${money(store.refundAmount)}${store.salesDeduction ? ` · 扣除 ${money(store.salesDeduction)}` : ''}` : '当前销售报表缺退款字段', 'mint')}${metric('推广花费', money(store.spend), dashboard.sourceCoverage?.storePromotionComplete ? '单品付费周期已完整对齐' : '仅展示已导入消耗，不计算完整费率', 'blue')}${metric('整店经营 ROI', fmtNumber(verified.roi), dashboard.sourceCoverage?.storePromotionComplete ? '推广成交 ÷ 推广花费' : '需同周期单品付费报表', 'orange')}${metric('推广费率', percent(verified.feeRate), dashboard.sourceCoverage?.storePromotionComplete ? '推广花费 ÷ 净 GSV' : '需同周期单品付费报表', 'purple')}</div>${dashboard.sourceWarnings?.storePromotion ? `<div class="data-warning">${escape(dashboard.sourceWarnings.storePromotion)}</div>` : ''}${trendView(dashboard.trend)}${categoryContributionPanel(dashboard.categories)}<div class="split-grid"><article class="card"><header class="section-head"><div><h3>店铺经营</h3><p>销售和推广只在同名店铺内关联；表内口径与上方一致。</p></div>${canManage ? `<button class="btn secondary small" data-open-deductions>销售扣除</button>` : ''}</header>${storeTable(dashboard.stores)}</article><article class="card"><header class="section-head"><div><h3>数据口径</h3><p>本页严格使用共享 GSV、推广费率和 ROI 公式。</p></div></header><div class="source-list"><div><span>销售来源</span><strong>${escape(dashboard.sources?.storeSales?.type ? TYPE_LABELS[dashboard.sources.storeSales.type] : '未导入')}</strong></div><div><span>推广来源</span><strong>${escape(dashboard.sources?.storePromotion?.type ? TYPE_LABELS[dashboard.sources.storePromotion.type] : '未导入')}</strong></div><div><span>当前统计日期</span><strong>${escape(core.currentDate || '--')}</strong></div><div><span>商品资料库</span><strong>${core.productCatalog?.length || 0} 条版本记录</strong></div></div></article></div></section>`;
 }
 function storeTable(rows) {
   return `<div class="table-wrap"><table><thead><tr><th>店铺</th><th>支付 / 退款</th><th>净 GSV</th><th>推广花费</th><th>ROI</th><th>费率</th></tr></thead><tbody>${rows?.length ? rows.map((row) => { const verified = calculatedPromotion(row); return `<tr><td><strong>${escape(row.name || '--')}</strong></td><td>${money(row.grossRevenue)}<small class="negative">-${money(row.refundAmount)}</small></td><td><strong>${money(row.revenue)}</strong></td><td>${money(row.spend)}</td><td>${fmtNumber(verified.roi)}</td><td>${percent(verified.feeRate)}</td></tr>`; }).join('') : '<tr><td colspan="6" class="empty-cell">导入商品排行和单品付费报表后显示店铺经营。</td></tr>'}</tbody></table></div>`;
 }
 function entityTable(rows, kind = 'product') {
   if (kind === 'store') return storeTable(rows);
-  const ui = entityUi(kind); const allRows = (rows || []).filter((row) => hasNumber(row.revenue) || hasNumber(row.spend) || hasNumber(row.grossRevenue)); const visible = entityRows(kind, allRows); const summary = sumRows(visible);
+  const ui = entityUi(kind); const allRows = (rows || []).filter((row) => hasNumber(row.revenue) || hasNumber(row.spend) || hasNumber(row.grossRevenue));
+  normalizeEntitySelectionsToRows(kind, allRows);
+  const visible = entityRows(kind, allRows); const summary = sumRows(visible);
   const categories = entityFilterOptions(kind, 'category', allRows); const models = entityFilterOptions(kind, 'model', allRows);
+  const allCategories = entityFilterOptions(kind, 'category', allRows, false); const allModels = entityFilterOptions(kind, 'model', allRows, false);
   const columns = kind === 'product' ? 11 : 9;
   const sortHeader = (label, key) => `<button class="sort-header ${ui.sort === key ? 'active' : ''}" data-entity-sort="${kind}:${key}">${label}<i>${ui.sort === key ? (ui.direction === 'asc' ? '↑' : '↓') : '↕'}</i></button>`;
-  return `<article class="entity-matrix"><header class="matrix-head"><div><h3>${kind === 'product' ? '商品排行经营矩阵' : '品类 360 经营矩阵'}</h3><p>${kind === 'product' ? '商品 ID、型号、品类、销售与每种推广计划在同一行核对。' : '品类花费按商品资料库映射的单品付费汇总，和整店推广花费可核对。'}</p></div><div class="matrix-tools"><label class="search-field"><span>搜索</span><input data-entity-keyword="${kind}" value="${escape(ui.keyword)}" placeholder="名称、ID、型号" /></label>${entityFilterMenu(kind, 'category', categories)}${kind === 'product' ? entityFilterMenu(kind, 'model', models) : ''}<button class="btn text small" data-entity-clear="${kind}">清除筛选</button></div></header><div class="selection-summary"><div><span>当前范围</span><strong>${visible.length} / ${allRows.length} 项</strong></div><div><span>支付 / 退款</span><strong>${money(summary.grossRevenue)}</strong><small>-${money(summary.refundAmount)}</small></div><div><span>净 GSV</span><strong>${money(summary.revenue)}</strong></div><div><span>推广花费</span><strong>${money(summary.spend)}</strong></div><div><span>推广成交</span><strong>${money(summary.promotionRevenue)}</strong></div><div><span>ROI</span><strong>${fmtNumber(summary.roi)}</strong></div><div><span>费率</span><strong>${percent(summary.feeRate)}</strong></div></div><div class="table-wrap entity-table"><table><thead><tr><th>${sortHeader(kind === 'product' ? '商品' : '品类', 'name')}</th>${kind === 'product' ? `<th>${sortHeader('商品 ID', 'productId')}</th><th>${sortHeader('型号 / 品类', 'model')}</th>` : ''}<th>${sortHeader('支付 / 退款', 'grossRevenue')}</th><th>${sortHeader('净 GSV', 'revenue')}</th><th>${sortHeader('推广花费', 'spend')}</th><th>${sortHeader('推广成交', 'promotionRevenue')}</th><th>${sortHeader('ROI', 'roi')}</th><th>${sortHeader('费率', 'feeRate')}</th><th>${sortHeader('推广类型 / 计划', 'promotionCount')}</th><th>关联</th></tr></thead><tbody>${visible.length ? visible.map((row) => { const verified = calculatedPromotion(row); const channels = row.promotionChannels || []; const planCount = channels.reduce((sum, channel) => sum + (channel.planCount || channel.plans?.length || 0), 0); const expanded = ui.expanded === row.key; return `<tr><td><strong title="${escape(row.name || '')}">${escape(row.name || '--')}</strong></td>${kind === 'product' ? `<td class="mono">${escape(row.productId || '--')}</td><td><strong>${escape(row.model || '型号待补')}</strong><small>${escape(row.category || '品类待补')}</small></td>` : ''}<td>${money(row.grossRevenue)}<small class="negative">-${money(row.refundAmount)}</small></td><td><strong>${money(row.revenue)}</strong></td><td>${money(row.spend)}</td><td>${money(row.promotionRevenue)}</td><td>${fmtNumber(verified.roi)}</td><td>${percent(verified.feeRate)}</td><td>${channels.length ? `<button class="promotion-toggle" data-entity-expand="${kind}:${escape(row.key)}">${expanded ? '收起' : '展开'} ${channels.length} 类 / ${planCount} 个计划</button>` : '<small>暂无付费数据</small>'}</td><td><span class="match ${escape(row.matchStatus || 'unmatched')}">${row.matchStatus === 'id' ? 'ID 已关联' : row.matchStatus === 'name' ? '名称关联' : row.matchStatus === 'sales-only' ? '待补推广' : row.matchStatus === 'promotion-only' ? '待补经营' : '未关联'}</span></td></tr>${expanded ? promotionDetails(row, columns) : ''}`; }).join('') : `<tr><td colspan="${columns}" class="empty-cell">${allRows.length ? '没有符合当前筛选条件的数据。' : '导入对应报表后展示关联矩阵。'}</td></tr>`}</tbody></table></div></article>`;
+  return `<article class="entity-matrix"><header class="matrix-head"><div><h3>${kind === 'product' ? '商品排行经营矩阵' : '品类 360 经营矩阵'}</h3><p>${kind === 'product' ? '商品 ID、型号、品类、销售与每种推广计划在同一行核对。' : '品类花费按商品资料库映射的单品付费汇总，和整店推广花费可核对。'}</p></div><div class="matrix-tools"><label class="search-field"><span>搜索</span><input data-entity-keyword="${kind}" value="${escape(ui.keyword)}" placeholder="名称、ID、型号" /></label>${entityFilterMenu(kind, 'category', categories, allCategories.length)}${kind === 'product' ? entityFilterMenu(kind, 'model', models, allModels.length) : ''}<button class="btn text small" data-entity-clear="${kind}">清除筛选</button></div></header><div class="selection-summary"><div><span>当前范围</span><strong>${visible.length} / ${allRows.length} 项</strong></div><div><span>支付 / 退款</span><strong>${money(summary.grossRevenue)}</strong><small>-${money(summary.refundAmount)}</small></div><div><span>净 GSV</span><strong>${money(summary.revenue)}</strong></div><div><span>推广花费</span><strong>${money(summary.spend)}</strong></div><div><span>推广成交</span><strong>${money(summary.promotionRevenue)}</strong></div><div><span>ROI</span><strong>${fmtNumber(summary.roi)}</strong></div><div><span>费率</span><strong>${percent(summary.feeRate)}</strong></div></div>${entityComparisonChart(visible, kind)}<div class="table-wrap entity-table" data-entity-table="${kind}"><table class="${kind}-matrix-table"><thead><tr><th>${sortHeader(kind === 'product' ? '商品' : '品类', 'name')}</th>${kind === 'product' ? `<th>${sortHeader('商品 ID', 'productId')}</th><th>${sortHeader('型号 / 品类', 'model')}</th>` : ''}<th>${sortHeader('支付 / 退款', 'grossRevenue')}</th><th>${sortHeader('净 GSV', 'revenue')}</th><th>${sortHeader('推广花费', 'spend')}</th><th>${sortHeader('推广成交', 'promotionRevenue')}</th><th>${sortHeader('ROI', 'roi')}</th><th>${sortHeader('费率', 'feeRate')}</th><th>${sortHeader('推广类型 / 计划', 'promotionCount')}</th><th>关联</th></tr></thead><tbody>${visible.length ? visible.map((row) => { const verified = calculatedPromotion(row); const channels = row.promotionChannels || []; const planCount = channels.reduce((sum, channel) => sum + (channel.planCount || channel.plans?.length || 0), 0); const expanded = ui.expanded === row.key; const expansionSummary = `${channels.length} 类 / ${planCount} 个计划`; return `<tr class="${expanded ? 'entity-row-active' : ''}" data-entity-row="${escape(row.key)}"><td><strong title="${escape(row.name || '')}">${escape(row.name || '--')}</strong></td>${kind === 'product' ? `<td class="mono">${escape(row.productId || '--')}</td><td><strong>${escape(row.model || '型号待补')}</strong><small>${escape(row.category || '品类待补')}</small></td>` : ''}<td>${money(row.grossRevenue)}<small class="negative">-${money(row.refundAmount)}</small></td><td><strong>${money(row.revenue)}</strong></td><td>${money(row.spend)}</td><td>${money(row.promotionRevenue)}</td><td>${fmtNumber(verified.roi)}</td><td>${percent(verified.feeRate)}</td><td>${channels.length ? `<button class="promotion-toggle" data-entity-kind="${kind}" data-entity-key="${escape(row.key)}" data-entity-summary="${escape(expansionSummary)}" aria-expanded="${expanded}">${expanded ? '收起' : '展开'} ${escape(expansionSummary)}</button>` : '<small>暂无付费数据</small>'}</td><td><span class="match ${escape(row.matchStatus || 'unmatched')}">${row.matchStatus === 'id' ? 'ID 已关联' : row.matchStatus === 'name' ? '名称关联' : row.matchStatus === 'sales-only' ? '待补推广' : row.matchStatus === 'promotion-only' ? '待补经营' : '未关联'}</span></td></tr>`; }).join('') : `<tr><td colspan="${columns}" class="empty-cell">${allRows.length ? '没有符合当前筛选条件的数据。' : '导入对应报表后展示关联矩阵。'}</td></tr>`}</tbody></table></div></article>`;
+}
+function captureEntityScroll() {
+  document.querySelectorAll('[data-entity-table]').forEach((table) => {
+    const ui = entityUi(table.dataset.entityTable);
+    if (ui) ui.scrollTop = table.scrollTop;
+  });
+}
+function restoreEntityScroll() {
+  window.requestAnimationFrame(() => {
+    document.querySelectorAll('[data-entity-table]').forEach((table) => {
+      const ui = entityUi(table.dataset.entityTable);
+      if (ui) table.scrollTop = ui.scrollTop || 0;
+    });
+  });
+}
+function entityDashboardRows(kind) {
+  const dashboard = operationsModel()?.core?.dashboard;
+  return kind === 'product' ? dashboard?.products || [] : kind === 'category' ? dashboard?.categories || [] : [];
+}
+function toggleEntityExpansion(button) {
+  const kind = button.dataset.entityKind; const key = button.dataset.entityKey; const ui = entityUi(kind);
+  const table = button.closest('[data-entity-table]'); const sourceRow = button.closest('tr');
+  if (!ui || !key || !table || !sourceRow) return;
+  const closing = ui.expanded === key; const previousToggle = table.querySelector('.promotion-toggle[aria-expanded="true"]');
+  const previousRow = table.querySelector('.entity-row-active');
+  document.querySelector('[data-entity-drawer]')?.remove();
+  previousRow?.classList.remove('entity-row-active');
+  if (previousToggle) {
+    previousToggle.setAttribute('aria-expanded', 'false');
+    previousToggle.textContent = `展开 ${previousToggle.dataset.entitySummary}`;
+  }
+  ui.expanded = closing ? '' : key;
+  if (!closing) {
+    const row = entityDashboardRows(kind).find((item) => item.key === key);
+    if (!row) { ui.expanded = ''; return; }
+    button.setAttribute('aria-expanded', 'true'); button.textContent = `收起 ${button.dataset.entitySummary}`;
+    sourceRow.classList.add('entity-row-active');
+    document.body.insertAdjacentHTML('beforeend', promotionDrawer(row, kind));
+    const drawer = document.querySelector('[data-entity-drawer]');
+    drawer?.querySelectorAll('[data-close-entity-drawer]').forEach((close) => close.addEventListener('click', () => {
+      drawer.remove();
+      sourceRow.classList.remove('entity-row-active');
+      button.setAttribute('aria-expanded', 'false');
+      button.textContent = `展开 ${button.dataset.entitySummary}`;
+      ui.expanded = '';
+    }));
+    drawer?.querySelector('.promotion-drawer-close')?.focus();
+  }
+  ui.scrollTop = table.scrollTop;
 }
 function warehousePanel(workspace) {
   const model = workspace.core ? workspace : operationsModel(); const core = model.core; const canManage = model.canManage; const panel = state.warehousePanel;
@@ -509,6 +639,7 @@ function catalogWarehouseCard(model, entries) {
 }
 function deductionsWarehouseCard(model) { const deductions = model.core.salesDeductions || []; return `<article class="card"><header class="section-head"><div><h3>销售扣除</h3><p>扣除只作用于整店净 GSV、经营 ROI 和推广费率，不会伪造分摊到单品或品类。</p></div></header>${model.canManage ? `<form id="sales-deduction-form" class="deduction-form"><select name="storeName" required><option value="">选择店铺</option>${model.stores.map((store) => `<option value="${escape(store.name)}">${escape(store.name)}</option>`).join('')}</select><input type="date" name="reportDate" value="${escape(model.core.currentDate || utcDate())}" required /><input type="number" name="amount" min="0.01" step="0.01" placeholder="扣除金额" required /><input name="note" placeholder="备注（可选）" /><button class="btn primary small">保存并重算</button></form>` : '<div class="data-warning">销售扣除由团队管理员维护，成员可查看已生效的经营口径。</div>'}<div class="table-wrap"><table><thead><tr><th>店铺</th><th>统计日期</th><th>扣除金额</th><th>备注</th><th>操作</th></tr></thead><tbody>${deductions.length ? deductions.map((item) => `<tr><td>${escape(item.storeName)}</td><td>${escape(item.reportDate)}</td><td class="negative">-${money(item.amount)}</td><td>${escape(item.note || '--')}</td><td>${model.canManage ? `<button class="btn danger tiny" data-delete-deduction="${escape(item.id)}">删除</button>` : '--'}</td></tr>`).join('') : '<tr><td colspan="5" class="empty-cell">当前范围没有销售扣除。</td></tr>'}</tbody></table></div></article>`; }
 function cloudOperationsView() {
+  if (state.bootstrapError && !state.workspace) return `<section class="load-failure" role="alert"><div><span>数据加载未完成</span><h1>运营数据暂时没有加载出来</h1><p>${escape(state.bootstrapError)}</p></div><button class="btn primary" id="retry-bootstrap">重新加载</button></section>`;
   if (!state.workspace?.hasTeam) return emptyTeamView();
   const model = operationsModel(); const workspace = state.workspace;
   return operationsView(model, `<section class="page-header"><div><div class="eyebrow">${escape(workspace.team.name)} · 团队共享空间</div><h1>运营数据</h1><p>团队统一计算，支持按日报、周报、月报和自定义周期核对经营结果。</p></div><div class="quota"><span>云空间</span><strong>${formatBytes(workspace.storage.usedBytes)} / ${formatBytes(workspace.storage.quotaBytes)}</strong><i><b style="width:${Math.min(100, workspace.storage.usageRatio * 100)}%"></b></i></div></section>`);
@@ -751,8 +882,15 @@ function shell() {
   app.innerHTML = `<div class="app-shell">${topNav()}<main class="app-main">${view}</main>${activity}${state.toast ? `<div class="toast ${state.toast.error ? 'error' : ''}"><span>${escape(state.toast.message)}</span><button id="dismiss-toast">关闭</button></div>` : ''}${state.modal === 'upload' ? uploadModal(state.upload.mode) : state.modal === 'platform-team' ? platformTeamModal() : ''}</div>`;
   prepareDesktopSyncPanel();
   bindShell();
+  restoreEntityScroll();
 }
-function render() { captureTeamDraft(); if (!state.session) loginView(); else shell(); }
+function render() {
+  document.querySelector('[data-entity-drawer]')?.remove();
+  state.entityUi.category.expanded = '';
+  state.entityUi.product.expanded = '';
+  captureTeamDraft(); captureEntityScroll();
+  if (!state.session) loginView(); else shell();
+}
 
 function localDetectedType(rows, fileName = '') {
   const headers = Object.keys(rows?.[0] || {}).map(headerKey); const has = (pattern) => headers.some((header) => pattern.test(header));
@@ -824,11 +962,17 @@ function refreshUploadSubmitState() {
   submit.disabled = !(upload.file && upload.type && upload.storeName && upload.periodStart && upload.periodEnd && upload.periodStart <= upload.periodEnd);
 }
 async function bootstrap() {
-  [state.localReports, state.localMeta] = await Promise.all([localReadAll(), localReadMeta()]);
-  if (state.session) { await Promise.all([loadCloudWorkspace(), loadOverview().catch(() => { state.overview = null; }), loadTeam().catch(() => { state.team = null; })]); }
+  state.bootstrapError = '';
+  try { [state.localReports, state.localMeta] = await Promise.all([localReadAll(), localReadMeta()]); }
+  catch { state.localReports = []; state.localMeta = { productCatalog: [], productCatalogSource: { fileName: '', updatedAt: null }, salesDeductions: [] }; }
+  if (state.session) {
+    const [workspaceResult] = await Promise.allSettled([loadCloudWorkspace(), loadOverview().catch(() => { state.overview = null; }), loadTeam().catch(() => { state.team = null; })]);
+    if (workspaceResult.status === 'rejected') { state.workspace = null; state.bootstrapError = workspaceResult.reason?.message || '团队数据请求失败，请稍后重试。'; }
+  }
   render();
 }
 function bindShell() {
+  document.querySelector('#retry-bootstrap')?.addEventListener('click', async () => { state.bootstrapError = ''; render(); await bootstrap(); });
   document.querySelector('#logout')?.addEventListener('click', async () => { await api('/api/auth/logout', { method: 'POST' }); selectTeam(''); Object.assign(state, { session: null, workspace: null, overview: null, team: null, page: 'operations' }); render(); });
   document.querySelector('#dismiss-toast')?.addEventListener('click', () => { state.toast = null; render(); });
   document.querySelector('#team-switcher-button')?.addEventListener('click', () => { state.teamMenuOpen = !state.teamMenuOpen; render(); });
@@ -891,12 +1035,13 @@ function bindShell() {
   document.querySelectorAll('[data-entity-keyword]').forEach((input) => input.addEventListener('input', (event) => { state.entityUi[event.currentTarget.dataset.entityKeyword].keyword = event.currentTarget.value; render(); }));
   document.querySelectorAll('[data-entity-filter-toggle]').forEach((button) => button.addEventListener('click', () => { const { kind, key: field } = parseEntityTarget(button.dataset.entityFilterToggle); const ui = state.entityUi[kind]; if (!ui || !['category', 'model'].includes(field)) return; ui.filterMenu = ui.filterMenu === field ? '' : field; render(); }));
   document.querySelectorAll('[data-entity-filter-query]').forEach((input) => input.addEventListener('input', (event) => { const { kind, key: field } = parseEntityTarget(event.currentTarget.dataset.entityFilterQuery); const ui = state.entityUi[kind]; if (!ui || !['category', 'model'].includes(field)) return; const config = entityFilterConfig(field); ui[config.query] = event.currentTarget.value; ui.filterMenu = field; renderWithEntityFilterFocus(kind, field, event.currentTarget.selectionStart ?? event.currentTarget.value.length); }));
-  document.querySelectorAll('[data-entity-filter-option]').forEach((input) => input.addEventListener('change', (event) => { const { kind, key: field } = parseEntityTarget(event.currentTarget.dataset.entityFilterOption); const ui = state.entityUi[kind]; if (!ui || !['category', 'model'].includes(field)) return; const config = entityFilterConfig(field); const value = event.currentTarget.value; const current = ui[config.selection] || []; if (ui[config.query].trim()) { ui[config.selection] = event.currentTarget.checked ? [value] : []; ui[config.query] = ''; } else ui[config.selection] = event.currentTarget.checked ? [...new Set([...current, value])] : current.filter((item) => item !== value); ui.filterMenu = field; render(); }));
-  document.querySelectorAll('[data-entity-filter-select-all]').forEach((button) => button.addEventListener('click', () => { const { kind, key: field } = parseEntityTarget(button.dataset.entityFilterSelectAll); const ui = state.entityUi[kind]; if (!ui || !['category', 'model'].includes(field)) return; const config = entityFilterConfig(field); const names = [...document.querySelectorAll(`[data-entity-filter-option="${CSS.escape(`${kind}:${field}`)}"]`)].map((input) => input.value); ui[config.selection] = [...new Set([...(ui[config.selection] || []), ...names])]; ui.filterMenu = field; render(); }));
-  document.querySelectorAll('[data-entity-filter-clear]').forEach((button) => button.addEventListener('click', () => { const { kind, key: field } = parseEntityTarget(button.dataset.entityFilterClear); const ui = state.entityUi[kind]; if (!ui || !['category', 'model'].includes(field)) return; const config = entityFilterConfig(field); ui[config.selection] = []; ui[config.query] = ''; ui.filterMenu = field; render(); }));
+  document.querySelectorAll('[data-entity-filter-option]').forEach((input) => input.addEventListener('change', (event) => { const { kind, key: field } = parseEntityTarget(event.currentTarget.dataset.entityFilterOption); const ui = state.entityUi[kind]; if (!ui || !['category', 'model'].includes(field)) return; const config = entityFilterConfig(field); const value = event.currentTarget.value; const current = ui[config.selection] || []; if (ui[config.query].trim()) { ui[config.selection] = event.currentTarget.checked ? [value] : []; ui[config.query] = ''; } else ui[config.selection] = event.currentTarget.checked ? [...new Set([...current, value])] : current.filter((item) => item !== value); normalizeEntityLinkedSelection(kind, field); ui.filterMenu = field; render(); }));
+  document.querySelectorAll('[data-entity-filter-select-all]').forEach((button) => button.addEventListener('click', () => { const { kind, key: field } = parseEntityTarget(button.dataset.entityFilterSelectAll); const ui = state.entityUi[kind]; if (!ui || !['category', 'model'].includes(field)) return; const config = entityFilterConfig(field); const names = [...document.querySelectorAll(`[data-entity-filter-option="${CSS.escape(`${kind}:${field}`)}"]`)].map((input) => input.value); ui[config.selection] = [...new Set([...(ui[config.selection] || []), ...names])]; normalizeEntityLinkedSelection(kind, field); ui.filterMenu = field; render(); }));
+  document.querySelectorAll('[data-entity-filter-clear]').forEach((button) => button.addEventListener('click', () => { const { kind, key: field } = parseEntityTarget(button.dataset.entityFilterClear); const ui = state.entityUi[kind]; if (!ui || !['category', 'model'].includes(field)) return; const config = entityFilterConfig(field); ui[config.selection] = []; ui[config.query] = ''; normalizeEntityLinkedSelection(kind, field); ui.filterMenu = field; render(); }));
   document.querySelectorAll('[data-entity-clear]').forEach((button) => button.addEventListener('click', () => { const ui = state.entityUi[button.dataset.entityClear]; Object.assign(ui, { keyword: '', categories: [], models: [], expanded: '', filterMenu: '', categoryQuery: '', modelQuery: '' }); render(); }));
   document.querySelectorAll('[data-entity-sort]').forEach((button) => button.addEventListener('click', () => { const [kind, key] = button.dataset.entitySort.split(':'); const ui = state.entityUi[kind]; if (ui.sort === key) ui.direction = ui.direction === 'asc' ? 'desc' : 'asc'; else { ui.sort = key; ui.direction = 'desc'; } render(); }));
-  document.querySelectorAll('[data-entity-expand]').forEach((button) => button.addEventListener('click', () => { const { kind, key } = parseEntityTarget(button.dataset.entityExpand); const ui = state.entityUi[kind]; if (!ui || !key) return; ui.expanded = ui.expanded === key ? '' : key; render(); }));
+  document.querySelectorAll('[data-entity-kind]').forEach((button) => button.addEventListener('click', () => toggleEntityExpansion(button)));
+  document.querySelectorAll('[data-entity-table]').forEach((table) => table.addEventListener('scroll', () => { const ui = entityUi(table.dataset.entityTable); if (ui) ui.scrollTop = table.scrollTop; }, { passive: true }));
   document.querySelectorAll('[data-warehouse-panel]').forEach((button) => button.addEventListener('click', () => { state.warehousePanel = button.dataset.warehousePanel; render(); }));
   document.querySelector('#archive-type')?.addEventListener('change', (event) => { state.archiveUi.type = event.currentTarget.value; state.archiveUi.selectedIds = []; render(); });
   document.querySelector('#archive-store')?.addEventListener('change', (event) => { state.archiveUi.storeName = event.currentTarget.value; state.archiveUi.selectedIds = []; render(); });
@@ -993,4 +1138,4 @@ function bindShell() {
 
 try { await loadPublicSettings(); } catch { state.platformSettings = { allowTeamCreation: true }; }
 try { const session = await api('/api/session'); state.session = session.user; } catch { state.session = null; }
-await bootstrap();
+try { await bootstrap(); } catch (error) { state.bootstrapError = error?.message || '页面初始化失败，请重新加载。'; render(); }

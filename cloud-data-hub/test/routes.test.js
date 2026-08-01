@@ -15,7 +15,7 @@ const htmlSource = await fs.readFile(path.join(root, "public", "index.html"), "u
 
 test("the product brand and team cards expose a clear operating identity", () => {
   assert.match(htmlSource, /<title>经营罗盘 · 团队经营决策<\/title>/);
-  assert.match(htmlSource, /operations-web-22/);
+  assert.match(htmlSource, /operations-web-30/);
   assert.match(appSource, /function brandLockup\(subtitle, compact = false\)/);
   assert.match(appSource, /<strong>经营罗盘<\/strong>/);
   assert.match(appSource, /function teamMemberCount\(team\)/);
@@ -73,17 +73,42 @@ test("active warehouse navigation keeps a legible active state on hover", () => 
   assert.match(stylesSource, /\.warehouse-nav button\.active:hover \{ background: #1f56ad; \}/);
 });
 
-test("entity expansion preserves compound row keys and filter menus stay application managed", () => {
+test("entity expansion uses a detached drawer without rebuilding the large table", () => {
   assert.match(appSource, /function parseEntityTarget\(value\)/);
   assert.match(appSource, /key: source\.slice\(separator \+ 1\)/);
-  assert.match(appSource, /function entityFilterMenu\(kind, field, options\)/);
+  assert.match(appSource, /function entityFilterMenu\(kind, field, options, totalCount = options\.length\)/);
   assert.match(appSource, /data-entity-filter-toggle=/);
   assert.match(appSource, /data-entity-filter-query=/);
   assert.match(appSource, /data-entity-filter-select-all=/);
   assert.match(appSource, /data-entity-filter-clear=/);
   assert.doesNotMatch(appSource, /<details class="filter-menu">/);
-  assert.match(appSource, /promotionDetails\(row, columns\)/);
+  assert.match(appSource, /function promotionDrawer\(row, kind\)/);
+  assert.match(appSource, /data-entity-kind=/);
+  assert.match(appSource, /data-entity-key=/);
+  assert.match(appSource, /function toggleEntityExpansion\(button\)/);
+  assert.match(appSource, /document\.body\.insertAdjacentHTML\('beforeend', promotionDrawer\(row, kind\)\)/);
+  assert.match(appSource, /data-entity-drawer/);
+  assert.match(appSource, /sourceRow\.classList\.add\('entity-row-active'\)/);
+  assert.match(appSource, /function captureEntityScroll\(\)/);
+  assert.match(appSource, /function restoreEntityScroll\(\)/);
+  assert.match(appSource, /const previousToggle = table\.querySelector\('\.promotion-toggle\[aria-expanded="true"\]'\)/);
+  assert.match(appSource, /if \(previousToggle\) \{/);
+  assert.doesNotMatch(appSource, /insertAdjacentHTML\('afterend', promotionDetails/);
+  assert.doesNotMatch(appSource, /getBoundingClientRect\(\)\.height/);
+  assert.doesNotMatch(appSource, /data-entity-expand=/);
   assert.match(stylesSource, /\.entity-filter-panel \{ position: absolute;/);
+  assert.match(stylesSource, /\.entity-table table \{ table-layout: fixed; \}/);
+  assert.match(stylesSource, /\.promotion-drawer-shell \{ position: fixed;/);
+});
+
+test("bootstrap failures render a retryable page instead of leaving the application blank", () => {
+  assert.match(appSource, /bootstrapError: ''/);
+  assert.match(appSource, /class="load-failure" role="alert"/);
+  assert.match(appSource, /id="retry-bootstrap"/);
+  assert.match(appSource, /await Promise\.allSettled\(\[loadCloudWorkspace\(\)/);
+  assert.match(appSource, /workspaceResult\.status === 'rejected'/);
+  assert.match(appSource, /try \{ await bootstrap\(\); \} catch \(error\)/);
+  assert.match(stylesSource, /\.load-failure \{ min-height: 420px;/);
 });
 
 test("expanded promotion plans show comparable metrics without source-row counters", () => {
@@ -94,6 +119,82 @@ test("expanded promotion plans show comparable metrics without source-row counte
   assert.doesNotMatch(appSource, /经营 \$\{row\.salesCount \|\| 0\} 行/);
   assert.doesNotMatch(appSource, /\$\{plan\.rowCount \|\| 0\} 行/);
   assert.match(stylesSource, /\.promotion-plan-metrics \{ display: grid;/);
+});
+
+test("category and product matrices include linked top-ten sales and spend bars", () => {
+  assert.match(appSource, /function entityComparisonChart\(rows, kind\)/);
+  assert.match(appSource, /TOP 10 · 净 GSV 排名/);
+  assert.match(appSource, /entityComparisonChart\(visible, kind\)/);
+  assert.match(appSource, /class="entity-bar-track"/);
+  assert.match(appSource, /width\(row\.revenue, maxRevenue\)/);
+  assert.match(appSource, /width\(row\.spend, maxSpend\)/);
+  assert.match(stylesSource, /\.entity-bar-list \{ display: grid; grid-template-columns: repeat\(2, minmax\(0, 1fr\)\)/);
+  assert.match(stylesSource, /\.entity-bar-track i\.revenue \{ background: #0f9f83; \}/);
+  assert.match(stylesSource, /\.entity-bar-track i\.spend \{ background: #3478d4; \}/);
+});
+
+test("top-ten charts expose promotion fee rate with shared risk thresholds", () => {
+  assert.match(appSource, /function feeRateTone\(value\)/);
+  assert.match(appSource, /Number\(value\) <= 0\.08/);
+  assert.match(appSource, /Number\(value\) <= 0\.12/);
+  assert.match(appSource, /const rate = calculatedPromotion\(row\)\.feeRate/);
+  assert.match(appSource, /class="entity-bar-rate"/);
+  assert.match(appSource, /fee-rate \$\{feeRateTone\(rate\)\}/);
+  assert.match(stylesSource, /\.fee-rate\.good/);
+  assert.match(stylesSource, /\.fee-rate\.warn/);
+  assert.match(stylesSource, /\.fee-rate\.high/);
+  assert.match(stylesSource, /\.fee-rate\.neutral/);
+});
+
+test("comparison charts always use the currently filtered date, store, and period workspace", () => {
+  assert.match(appSource, /state\.workspace = await api\(`\/api\/web\/workspace\?\$\{query\(filters\)\}`\)/);
+  assert.match(appSource, /state\.filters = \{ \.\.\.state\.filters, \.\.\.next \}/);
+  assert.match(appSource, /applyScope\(dateRangeForPreset\(preset\)\)/);
+  assert.match(appSource, /applyScope\(\{ start, end \}\)/);
+  assert.match(appSource, /entityComparisonChart\(visible, kind\)/);
+  assert.match(source, /buildOperationsWorkspace\(\{[\s\S]*reports: reportsForTeam\(db, teamId\)[\s\S]*\}, \{ filters \}\)/);
+});
+
+test("mobile operations view prioritizes executive metrics and converts matrices to cards", () => {
+  assert.match(stylesSource, /Mobile executive view/);
+  assert.match(stylesSource, /\.metrics-grid\.dashboard-metrics \{ grid-template-columns: repeat\(2, minmax\(0, 1fr\)\)/);
+  assert.match(stylesSource, /\.operations-nav-row \.data-tabs \{ display: grid; grid-template-columns: repeat\(4, minmax\(76px, 1fr\)\)/);
+  assert.match(stylesSource, /\.entity-table tbody > tr \{ display: grid; grid-template-columns: repeat\(2, minmax\(0, 1fr\)\)/);
+  assert.match(stylesSource, /\.product-matrix-table td:nth-child\(5\)::before/);
+  assert.match(stylesSource, /\.category-matrix-table td:nth-child\(3\)::before/);
+  assert.match(stylesSource, /\.promotion-drawer \{ top: auto; bottom: 0;/);
+});
+
+test("store overview ranks category sales and exposes sales and spend shares", () => {
+  assert.match(appSource, /function categoryContributionPanel\(rows\)/);
+  assert.match(appSource, /类目销售贡献与推广效率/);
+  assert.match(appSource, /<small>销售占比<\/small>/);
+  assert.match(appSource, /<small>花费占比<\/small>/);
+  assert.match(appSource, /categoryContributionPanel\(dashboard\.categories\)/);
+  assert.match(appSource, /const revenueShare = share\(row\.revenue, totalRevenue\); const spendShare = share\(row\.spend, totalSpend\)/);
+  assert.match(stylesSource, /\.contribution-metric\.revenue > i b \{ background: #0f9f83; \}/);
+  assert.match(stylesSource, /\.contribution-metric\.spend > i b \{ background: #3478d4; \}/);
+});
+
+test("store category structure shows fee rate from spend divided by net GSV", () => {
+  assert.match(appSource, /const totals = sumRows\(active\)/);
+  assert.match(appSource, /整体推广费率/);
+  assert.match(appSource, /percent\(totals\.feeRate\)/);
+  assert.match(appSource, /<span>类目推广费率<\/span>/);
+  assert.match(appSource, /<small>推广花费 ÷ 类目净 GSV<\/small>/);
+  assert.doesNotMatch(appSource, /promotionRevenue\s*\/\s*(?:row\.)?revenue/);
+});
+
+test("store category contribution labels every amount, share, rate, and formula", () => {
+  assert.match(appSource, /类目销售贡献与推广效率/);
+  assert.match(appSource, /销售占比/);
+  assert.match(appSource, /类目净 GSV ÷ 已关联类目净 GSV 合计/);
+  assert.match(appSource, /花费占比/);
+  assert.match(appSource, /类目推广花费 ÷ 已关联类目推广花费合计/);
+  assert.match(appSource, /类目推广费率/);
+  assert.match(appSource, /类目推广花费 ÷ 类目净 GSV/);
+  assert.match(stylesSource, /\.contribution-formulas \{ display: grid;/);
+  assert.match(stylesSource, /grid-template-areas: "name name" "revenue spend" "rate rate"/);
 });
 
 test("registration is invitation-only and the legacy email-code route is explicitly retired", () => {
@@ -215,6 +316,30 @@ test("registration UI collects QQ email, password, and team invitation code", ()
   assert.match(appSource, /注册并加入团队/);
   assert.doesNotMatch(appSource, /name="emailCode"/);
   assert.doesNotMatch(appSource, /id="send-email-code"/);
+});
+
+test("product category and model filters are bidirectionally linked", () => {
+  assert.match(appSource, /function normalizeEntityLinkedSelection\(kind, changedField/);
+  assert.match(appSource, /changedField === 'category' \? 'model' : 'category'/);
+  assert.match(appSource, /entityFilterOptions\(kind, oppositeField, rows\)/);
+  assert.match(appSource, /normalizeEntityLinkedSelection\(kind, field\)/);
+  assert.match(appSource, /entityFilterMenu\(kind, 'category', categories, allCategories\.length\)/);
+  assert.match(appSource, /entityFilterMenu\(kind, 'model', models, allModels\.length\)/);
+  assert.match(appSource, /entity-filter-linked/);
+  assert.match(stylesSource, /\.entity-filter-linked \{/);
+});
+
+test("entity filter panels escape the matrix crop and use the available viewport", () => {
+  assert.match(stylesSource, /\.entity-matrix\{overflow:visible/);
+  assert.match(stylesSource, /\.matrix-head\{position:relative;z-index:12;/);
+  assert.match(stylesSource, /\.entity-filter-panel \{ position: absolute; z-index: 48;/);
+  assert.match(stylesSource, /max-height: min\(470px, calc\(100vh - 150px\)\)/);
+  assert.match(stylesSource, /\.entity-filter-options \{ min-height: 0; max-height: 370px; overflow: auto;/);
+  assert.match(appSource, /class="entity-filter entity-filter-\$\{field\}"/);
+  assert.match(stylesSource, /\.entity-matrix \{ width: 100%; max-width: 100%; \}/);
+  assert.match(stylesSource, /\.matrix-tools \.entity-filter \{ position: static; \}/);
+  assert.match(stylesSource, /\.entity-filter-category \.entity-filter-panel \{ right: auto; left: 12px; \}/);
+  assert.match(stylesSource, /\.entity-filter-model \.entity-filter-panel \{ right: 12px; left: auto; \}/);
 });
 
 test("registration preserves the in-progress form and displays request feedback in the form", () => {
