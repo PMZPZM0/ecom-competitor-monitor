@@ -1,4 +1,4 @@
-import { buildOperationsWorkspace } from '/operationsCore.js?v=20260731-core-6';
+import { buildOperationsWorkspace } from '/operationsCore.js?v=20260801-auto-comparison-8';
 
 const app = document.querySelector('#app');
 const TYPE_LABELS = { category: '品类360', product: '商品排行', promotion: '单品付费', campaign: '单品付费' };
@@ -13,9 +13,10 @@ const state = {
   filters: { start: '', end: '', storeName: '', sourcePeriodKind: 'auto' }, datePreset: 'yesterday', customScopeOpen: false,
   toast: null, activity: null, modal: '', activePanel: 'overview', warehousePanel: 'upload', authMode: 'login', authDraft: { username: '', email: '', password: '', inviteCode: '' }, authFeedback: null, authBusy: '', bootstrapError: '', copiedCode: '', deviceCode: '', selectedTeamId: window.sessionStorage.getItem(SELECTED_TEAM_KEY) || '', teamMenuOpen: false, platformSettings: { allowTeamCreation: true },
   trendMetrics: ['revenue'], entityUi: { category: { keyword: '', categories: [], models: [], sort: 'revenue', direction: 'desc', expanded: '', scrollTop: 0, filterMenu: '', categoryQuery: '', modelQuery: '' }, product: { keyword: '', categories: [], models: [], sort: 'revenue', direction: 'desc', expanded: '', scrollTop: 0, filterMenu: '', categoryQuery: '', modelQuery: '' } },
-  archiveUi: { selectedIds: [], expandedDate: '', type: 'all', storeName: '', renameId: '', renameValue: '' },
-  upload: { mode: '', file: null, preview: null, type: '', storeName: '', periodKind: 'day', periodStart: '', periodEnd: '', sourceName: '', openMenu: '', dateSelecting: 'start', calendarMonth: '' },
-  catalogUi: { file: null, page: 0, showCreate: false },
+  archiveUi: { selectedIds: [], expandedStore: null, expandedDate: '', type: 'all', storeName: '', renameId: '', renameValue: '' },
+  upload: { mode: '', files: [], activeId: '', storeName: '', sourceName: '', openMenu: '', dateSelecting: 'start', calendarMonth: '', status: 'idle', progress: 0, error: '' },
+  catalogUi: { file: null, page: 0, showCreate: false, selectedIds: [], bulkStoreName: '', bulkCategory: '', bulkModel: '' },
+  cardUi: { openPanel: '' },
   teamDraft: { teamId: '', admin: { username: '', password: '' }, members: {} },
 };
 
@@ -316,7 +317,93 @@ function emptyTeamView() {
   const selfCreate = state.platformSettings.allowTeamCreation ? `<form id="create-team" class="onboarding-card"><h2>创建我的团队</h2><p>默认 2 GB 云空间，团队内成员看到同一套计算结果。</p><label class="field"><span>团队名称</span><input name="name" required placeholder="例如：苏泊尔运营组" /></label><label class="field"><span>授权方案</span><select name="plan"><option value="team">团队（默认 6 台设备）</option><option value="personal">个人（默认 2 台设备）</option></select></label><button class="btn primary" type="submit">创建团队</button></form>` : `<article class="onboarding-card onboarding-locked"><h2>暂不开放自助创建</h2><p>当前只允许通过团队邀请码加入。请联系团队管理员获取邀请码。</p></article>`;
   return `<section class="onboarding"><div class="eyebrow">团队空间</div><h1>先建立数据归属</h1><p>运营数据按团队隔离。创建团队后，你会自动成为团队管理员；成员可通过邀请码加入。</p><div class="onboarding-grid">${selfCreate}<form id="accept-invite" class="onboarding-card"><h2>加入已有团队</h2><p>让团队管理员生成成员邀请码。加入后可上传、查看团队数据。</p><label class="field"><span>团队邀请码</span><input name="code" required placeholder="XXXX-XXXX-XXXX" /></label><button class="btn secondary" type="submit">加入团队</button></form></div></section>`;
 }
-function metric(label, value, detail, tone = '') { return `<article class="metric-card ${tone}"><span>${escape(label)}</span><strong>${value}</strong><small>${escape(detail)}</small></article>`; }
+function metric(label, value, detail, tone = '', comparison = '', trendId = '') {
+  const selected = trendId && state.trendMetrics.includes(trendId);
+  const tag = trendId ? 'button' : 'article';
+  const attributes = trendId ? ` type="button" data-trend-toggle="${escape(trendId)}" aria-pressed="${selected}" title="点击${selected ? '取消' : '加入'}经营趋势"` : '';
+  return `<${tag}${attributes} class="metric-card ${tone}${trendId ? ` trend-toggle-card${selected ? ' selected' : ''}` : ''}"><span>${escape(label)}</span><div class="metric-value-row"><strong>${value}</strong>${comparison ? `<div class="metric-comparisons">${comparison}</div>` : ''}</div><small>${escape(detail)}</small></${tag}>`;
+}
+const CUSTOM_METRICS = [
+  ['grossRevenue', '支付金额', 'money', '退款前支付金额'], ['refundAmount', '成功退款金额', 'money', '售中售后成功退款'],
+  ['revenue', '净 GSV', 'money', '支付金额 - 成功退款'], ['spend', '推广花费', 'money', '当前口径推广消耗'],
+  ['promotionRevenue', '推广成交', 'money', '推广平台归因成交'], ['managementRoi', '经营 ROI', 'ratio', '净 GSV ÷ 推广花费'],
+  ['roi', '推广 ROI', 'ratio', '推广成交 ÷ 推广花费'], ['feeRate', '推广费率', 'percent', '推广花费 ÷ 净 GSV'],
+  ['visitors', '访客数', 'number', '经营报表访客'], ['paidBuyers', '支付买家数', 'number', '完成支付的买家'],
+  ['conversionRate', '支付转化率', 'percent', '支付买家数 ÷ 访客数'], ['clicks', '点击量', 'number', '推广点击量'],
+  ['impressions', '展现量', 'number', '推广展现量'], ['orders', '推广订单', 'number', '推广归因订单'],
+  ['pageViews', '浏览量', 'number', '经营报表浏览量'], ['favorites', '收藏人数', 'number', '收藏商品人数'],
+  ['cartUsers', '加购人数', 'number', '加入购物车人数'], ['cartItems', '加购件数', 'number', '加入购物车商品件数'], ['paidItems', '支付件数', 'number', '支付商品件数'],
+  ['cpc', '平均点击花费', 'money', '推广花费 ÷ 点击量'], ['costPerCollectCart', '收藏加购成本', 'money', '推广花费 ÷ 加购人数'],
+].map(([id, label, kind, description]) => ({ id, label, kind, description }));
+const COMPARISON_OPTIONS = [['day', '日环比'], ['week', '周环比'], ['last7', '近 7 天'], ['last15', '近 15 天'], ['month', '月环比'], ['custom', '区间环比']].map(([id, label]) => ({ id, label }));
+function customCardStorageKey(panel) { return `operations-custom-cards-v1:${state.session?.username || 'anonymous'}:${activeTeamId() || state.mode}:${panel}`; }
+function loadCustomCards(panel) { try { const value = JSON.parse(localStorage.getItem(customCardStorageKey(panel)) || '[]'); return Array.isArray(value) ? value.slice(0, 6) : []; } catch { return []; } }
+function saveCustomCards(panel, cards) { localStorage.setItem(customCardStorageKey(panel), JSON.stringify(cards.slice(0, 6))); }
+function automaticComparisonId(preset) {
+  if (preset === 'last-7-days') return 'last7';
+  if (preset === 'last-15-days') return 'last15';
+  if (preset === 'this-week' || preset === 'last-week') return 'week';
+  if (preset === 'this-month' || preset === 'last-month') return 'month';
+  if (preset === 'custom') return 'custom';
+  return 'day';
+}
+function customMetricDefinition(id) { return CUSTOM_METRICS.find((item) => item.id === id) || CUSTOM_METRICS[0]; }
+function customMetricTotals(rows = []) {
+  const total = (key) => rows.reduce((sum, row) => sum + (Number(row?.[key] ?? row?.sales?.[key] ?? row?.promotion?.[key]) || 0), 0);
+  const revenue = total('revenue'); const spend = total('spend'); const visitors = total('visitors'); const paidBuyers = total('paidBuyers'); const clicks = total('clicks'); const cartUsers = total('cartUsers');
+  const rateAvailable = rows.length > 0 && rows.every((row) => Number(row.salesCount) > 0 && Number(row.promotionCount) > 0 && row.refundDataAvailable === true && row.promotionCoverageComplete === true);
+  return {
+    grossRevenue: total('grossRevenue'), refundAmount: total('refundAmount'), revenue, spend, promotionRevenue: total('promotionRevenue'),
+    visitors, paidBuyers, clicks, impressions: total('impressions'), orders: total('orders'), pageViews: total('pageViews'), favorites: total('favorites'), cartUsers, cartItems: total('cartItems'), paidItems: total('paidItems'),
+    managementRoi: rateAvailable && spend > 0 ? revenue / spend : null,
+    roi: spend > 0 ? total('promotionRevenue') / spend : null,
+    feeRate: rateAvailable && revenue > 0 ? spend / revenue : null,
+    conversionRate: visitors > 0 ? paidBuyers / visitors : null,
+    cpc: clicks > 0 ? spend / clicks : null,
+    costPerCollectCart: cartUsers > 0 ? spend / cartUsers : null,
+  };
+}
+function customMetricValue(rows, metricId) { return customMetricTotals(rows)[metricId]; }
+function cardMetricValue(rows, metricId) {
+  if (metricId === 'linkedCount') return rows.filter((row) => Number(row.salesCount) > 0 && Number(row.promotionCount) > 0).length;
+  if (metricId === 'salesOnlyCount') return rows.filter((row) => Number(row.salesCount) > 0 && Number(row.promotionCount) <= 0).length;
+  if (metricId === 'promotionOnlyCount') return rows.filter((row) => Number(row.salesCount) <= 0 && Number(row.promotionCount) > 0).length;
+  return customMetricValue(rows, metricId);
+}
+function formatCustomMetric(metricId, value) { const definition = customMetricDefinition(metricId); if (!hasNumber(value)) return '--'; if (definition.kind === 'money') return money(value); if (definition.kind === 'percent') return percent(value); if (definition.kind === 'ratio') return fmtNumber(value); return fmtNumber(value, 0); }
+function customComparisonTone(delta) { if (!Number.isFinite(delta) || delta === 0) return 'neutral'; return delta > 0 ? 'comparison-up' : 'comparison-down'; }
+function customComparisonRows(panel, comparison, side, visibleRows) {
+  const snapshot = comparison?.[side]; if (!snapshot) return [];
+  if (panel === 'store') return snapshot.store ? [snapshot.store] : [];
+  const source = panel === 'category' ? snapshot.categories || [] : snapshot.products || [];
+  const identities = new Set(visibleRows.flatMap((row) => [row.key, row.productId, row.name, `${row.category || ''}\u0000${row.model || ''}`].filter(Boolean)));
+  return source.filter((row) => panel === 'category' ? identities.has(row.key) || identities.has(row.name) : identities.has(row.key) || identities.has(row.productId) || identities.has(`${row.category || ''}\u0000${row.model || ''}`));
+}
+function comparisonBadges(panel, metricId, comparisonIds, visibleRows) {
+  const comparisons = operationsModel()?.core?.dashboard?.comparisons || {};
+  const definition = customMetricDefinition(metricId);
+  return (comparisonIds || []).map((id) => {
+    const comparison = comparisons[id]; const currentRows = customComparisonRows(panel, comparison, 'current', visibleRows); const previousRows = customComparisonRows(panel, comparison, 'previous', visibleRows);
+    const available = comparison?.currentAvailable && comparison?.previousAvailable && currentRows.length && previousRows.length;
+    const current = available ? cardMetricValue(currentRows, metricId) : null; const previous = available ? cardMetricValue(previousRows, metricId) : null;
+    const delta = hasNumber(current) && hasNumber(previous) ? Number(current) - Number(previous) : null; const relative = delta !== null && Number(previous) !== 0 ? delta / Math.abs(Number(previous)) : null;
+    const label = comparison?.label || COMPARISON_OPTIONS.find((item) => item.id === id)?.label || id;
+    if (delta === null) return `<span class="comparison-badge unavailable" title="当前或同期报表不完整">${escape(label)} 暂无</span>`;
+    const display = relative === null ? (delta === 0 ? '持平' : '新增') : definition.kind === 'percent' ? `${delta >= 0 ? '+' : ''}${(delta * 100).toFixed(1)}pp · ${relative >= 0 ? '+' : ''}${(relative * 100).toFixed(1)}%` : `${relative >= 0 ? '+' : ''}${(relative * 100).toFixed(1)}%`;
+    return `<span class="comparison-badge ${customComparisonTone(delta)}" title="${escape(`${comparison.currentStart} 至 ${comparison.currentEnd} 对比 ${comparison.previousStart} 至 ${comparison.previousEnd}`)}">${escape(label)} ${display}</span>`;
+  }).join('');
+}
+function managedMetricGrid(panel, coreCards, visibleRows) {
+  const customCards = loadCustomCards(panel); const comparisonId = automaticComparisonId(state.datePreset);
+  const coreHtml = coreCards.map((card) => metric(card.label, card.value, card.detail, card.tone, comparisonBadges(panel, card.metricId, [comparisonId], visibleRows))).join('');
+  const customHtml = customCards.map((card) => { const definition = customMetricDefinition(card.metricId); const tone = ['revenue', 'paidBuyers', 'conversionRate', 'paidItems'].includes(card.metricId) ? 'mint' : ['spend', 'promotionRevenue', 'clicks', 'cpc'].includes(card.metricId) ? 'blue' : ['managementRoi', 'roi', 'cartUsers', 'cartItems'].includes(card.metricId) ? 'orange' : ['feeRate', 'refundAmount'].includes(card.metricId) ? 'purple' : ''; return metric(definition.label, formatCustomMetric(card.metricId, customMetricValue(visibleRows, card.metricId)), definition.description, tone, comparisonBadges(panel, card.metricId, [comparisonId], visibleRows), panel === 'store' ? card.metricId : ''); }).join('');
+  return `<div class="managed-metric-grid"><button class="metric-settings-button" data-card-settings="${panel}" title="设置指标卡片" aria-label="设置指标卡片">⚙</button><div class="metrics-grid dashboard-metrics">${coreHtml}${customHtml}</div></div>`;
+}
+function customCardSettingsModal() {
+  const panel = state.cardUi.openPanel; if (!panel) return ''; const cards = loadCustomCards(panel); const used = new Set(cards.map((card) => card.metricId)); const panelLabel = panel === 'store' ? '整店总览' : panel === 'category' ? '品类 360' : '商品排行'; const comparisonId = automaticComparisonId(state.datePreset); const comparisonLabel = COMPARISON_OPTIONS.find((option) => option.id === comparisonId)?.label || '日环比';
+  const customRows = cards.map((card, index) => `<section class="custom-card-editor" data-card-id="${escape(card.id)}"><div><span>自定义 ${index + 1}</span><select data-card-metric="${escape(card.id)}">${CUSTOM_METRICS.map((item) => `<option value="${item.id}" ${item.id === card.metricId ? 'selected' : ''} ${item.id !== card.metricId && used.has(item.id) ? 'disabled' : ''}>${escape(item.label)} · ${escape(item.description)}</option>`).join('')}</select><button class="btn text tiny" data-card-delete="${escape(card.id)}">删除</button></div></section>`).join('');
+  return `<div class="modal custom-card-modal"><section class="modal-card"><header class="modal-head"><div><h3>${panelLabel}指标卡片</h3><p>环比跟随当前统计范围自动计算；自定义卡片从数据表全部可计算字段中新增。</p></div><button class="btn text" data-close-card-settings>关闭</button></header><div class="modal-body"><section class="custom-card-global automatic-comparison"><div><strong>环比已自动匹配：${escape(comparisonLabel)}</strong><small>切换今天、周、月、近 7 日、近 15 日或自定义区间后，全部卡片会立即按对应公式重算。</small></div></section><div class="card-settings-section"><h4>自定义数据卡片</h4><p>经营表与推广表全部可计算指标，最多新增 6 张且不可重复。整店卡片可直接点击加入经营趋势。</p><div class="custom-card-editors">${customRows}</div><button class="btn secondary card-add-button" data-add-custom-card ${cards.length >= 6 ? 'disabled' : ''}>${cards.length >= 6 ? '已达到 6 张上限' : '＋ 从数据表新增指标卡片'}</button></div></div><footer class="modal-actions"><button class="btn primary" data-close-card-settings>完成</button></footer></section></div>`;
+}
 function operationsModel() {
   if (state.mode === 'cloud') {
     const payload = state.workspace;
@@ -349,6 +436,8 @@ function dateRangeForPreset(preset) {
   const today = utcDate(); const weekday = (new Date(`${today}T12:00:00`).getDay() + 6) % 7;
   if (preset === 'today') return { start: today, end: today };
   if (preset === 'yesterday') { const yesterday = addDays(today, -1); return { start: yesterday, end: yesterday }; }
+  if (preset === 'last-7-days') { const end = addDays(today, -1); return { start: addDays(end, -6), end }; }
+  if (preset === 'last-15-days') { const end = addDays(today, -1); return { start: addDays(end, -14), end }; }
   if (preset === 'this-week') return { start: addDays(today, -weekday), end: today };
   if (preset === 'last-week') { const end = addDays(today, -weekday - 1); return { start: addDays(end, -6), end }; }
   if (preset === 'this-month') return monthRange();
@@ -478,10 +567,13 @@ function categoryContributionPanel(rows) {
   const totalSpend = totals.spend;
   const ranked = active.sort((left, right) => (Number(right.revenue) || 0) - (Number(left.revenue) || 0) || (Number(right.spend) || 0) - (Number(left.spend) || 0)).slice(0, 10);
   const share = (value, total) => total > 0 ? Math.max(0, Math.min(1, (Number(value) || 0) / total)) : 0;
+  const maxRevenue = Math.max(1, ...ranked.map((row) => Number(row.revenue) || 0));
+  const maxSpend = Math.max(1, ...ranked.map((row) => Number(row.spend) || 0));
+  const scale = (value, max) => Math.max(0, Math.min(1, (Number(value) || 0) / max));
   return `<article class="card category-contribution"><header class="section-head contribution-title"><div><span class="section-kicker">经营结构</span><h3>类目销售贡献与推广效率</h3><p>按净 GSV 从高到低，金额、占比和费率均使用当前筛选范围。</p></div><dl class="contribution-totals"><div><dt>已关联类目净 GSV</dt><dd>${money(totalRevenue)}</dd></div><div><dt>已关联类目推广花费</dt><dd>${money(totalSpend)}</dd></div><div><dt>类目整体推广费率</dt><dd><b class="fee-rate ${feeRateTone(totals.feeRate)}">${percent(totals.feeRate)}</b></dd></div></dl></header><div class="contribution-formulas" aria-label="指标计算口径"><span><b>销售占比</b><em>类目净 GSV ÷ 已关联类目净 GSV 合计</em></span><span><b>花费占比</b><em>类目推广花费 ÷ 已关联类目推广花费合计</em></span><span><b>类目推广费率</b><em>类目推广花费 ÷ 类目净 GSV</em></span></div><div class="contribution-head"><span>排名 / 类目</span><span><b>净 GSV</b><small>金额 + 销售占比</small></span><span><b>推广花费</b><small>金额 + 花费占比</small></span><span><b>类目推广费率</b><small>花费 ÷ 类目净 GSV</small></span></div><div class="contribution-list">${ranked.map((row, index) => {
     const revenueShare = share(row.revenue, totalRevenue); const spendShare = share(row.spend, totalSpend);
     const rate = calculatedPromotion(row).feeRate;
-    return `<div class="contribution-row"><div class="contribution-name"><i>${String(index + 1).padStart(2, '0')}</i><span><small>类目</small><strong title="${escape(row.name || '')}">${escape(row.name || '--')}</strong></span></div><div class="contribution-metric revenue"><span class="contribution-metric-title">净 GSV</span><div><b>${money(row.revenue)}</b><em><small>销售占比</small><strong>${percent(revenueShare)}</strong></em></div><i><b style="--share:${(revenueShare * 100).toFixed(2)}%"></b></i></div><div class="contribution-metric spend"><span class="contribution-metric-title">推广花费</span><div><b>${money(row.spend)}</b><em><small>花费占比</small><strong>${percent(spendShare)}</strong></em></div><i><b style="--share:${(spendShare * 100).toFixed(2)}%"></b></i></div><div class="contribution-rate"><span>类目推广费率</span><b class="fee-rate ${feeRateTone(rate)}">${percent(rate)}</b><small>推广花费 ÷ 类目净 GSV</small></div></div>`;
+    return `<div class="contribution-row"><div class="contribution-name"><i>${String(index + 1).padStart(2, '0')}</i><span><small>类目</small><strong title="${escape(row.name || '')}">${escape(row.name || '--')}</strong></span></div><div class="contribution-metric revenue"><span class="contribution-metric-title">净 GSV</span><div><b>${money(row.revenue)}</b><em><small>销售占比</small><strong>${percent(revenueShare)}</strong></em></div><i><b style="--share:${(scale(row.revenue, maxRevenue) * 100).toFixed(2)}%"></b></i></div><div class="contribution-metric spend"><span class="contribution-metric-title">推广花费</span><div><b>${money(row.spend)}</b><em><small>花费占比</small><strong>${percent(spendShare)}</strong></em></div><i><b style="--share:${(scale(row.spend, maxSpend) * 100).toFixed(2)}%"></b></i></div><div class="contribution-rate"><span>类目推广费率</span><b class="fee-rate ${feeRateTone(rate)}">${percent(rate)}</b><small>推广花费 ÷ 类目净 GSV</small></div></div>`;
   }).join('')}</div><footer><span>展示前 ${ranked.length} 个类目</span><b>${active.length} 个有效类目参与占比计算</b></footer></article>`;
 }
 function promotionTone(name = '') { if (/全站/.test(name)) return 'blue'; if (/关键词/.test(name)) return 'purple'; const tones = ['teal', 'amber', 'rose', 'sky']; let hash = 0; for (const char of name) hash = (hash * 31 + char.charCodeAt(0)) >>> 0; return tones[hash % tones.length]; }
@@ -508,9 +600,15 @@ function promotionDrawer(row, kind) {
 }
 function reportGroupKey(report) { return `${report.periodKind || 'day'}|${report.periodStart || report.reportDate || ''}|${report.periodEnd || report.reportDate || ''}`; }
 function groupedWarehouseReports(reports) {
-  const groups = new Map();
-  for (const report of reports) { const key = reportGroupKey(report); if (!groups.has(key)) groups.set(key, { key, periodKind: report.periodKind || 'day', start: report.periodStart || report.reportDate || '', end: report.periodEnd || report.reportDate || '', reports: [] }); groups.get(key).reports.push(report); }
-  return [...groups.values()].sort((a, b) => `${b.end}|${b.start}`.localeCompare(`${a.end}|${a.start}`));
+  const stores = new Map();
+  for (const report of reports) {
+    const storeName = String(report.storeName || '').trim() || '未归属店铺';
+    if (!stores.has(storeName)) stores.set(storeName, { key: storeName, storeName, reports: [], periods: new Map() });
+    const store = stores.get(storeName); const periodId = reportGroupKey(report); const key = `${storeName}\u0001${periodId}`;
+    if (!store.periods.has(periodId)) store.periods.set(periodId, { key, periodKind: report.periodKind || 'day', start: report.periodStart || report.reportDate || '', end: report.periodEnd || report.reportDate || '', reports: [] });
+    store.reports.push(report); store.periods.get(periodId).reports.push(report);
+  }
+  return [...stores.values()].map((store) => ({ ...store, dateGroups: [...store.periods.values()].map((group) => ({ ...group, reports: group.reports.slice().sort((a, b) => String(b.importedAt || b.createdAt || '').localeCompare(String(a.importedAt || a.createdAt || ''))) })).sort((a, b) => `${b.end}|${b.start}`.localeCompare(`${a.end}|${a.start}`)) })).sort((a, b) => a.storeName === b.storeName ? 0 : a.storeName === '未归属店铺' ? 1 : b.storeName === '未归属店铺' ? -1 : a.storeName.localeCompare(b.storeName, 'zh-CN'));
 }
 function dataSourceSwitch() {
   return `<div class="data-source-switch"><span>数据来源</span><div class="mode-tabs"><button class="${state.mode === 'cloud' ? 'active' : ''}" data-mode="cloud">团队云数据</button><button class="${state.mode === 'local' ? 'active' : ''}" data-mode="local">本地浏览器数据</button></div></div>`;
@@ -525,28 +623,42 @@ function operationsNav() {
 }
 function modeToolbar() {
   const model = operationsModel();
-  const presets = [['today', '今天'], ['yesterday', '昨天'], ['this-week', '本周'], ['last-week', '上周'], ['this-month', '本月'], ['last-month', '上月']];
+  const presets = [['today', '今天'], ['yesterday', '昨天'], ['last-7-days', '近 7 日'], ['last-15-days', '近 15 日'], ['this-week', '本周'], ['last-week', '上周'], ['this-month', '本月'], ['last-month', '上月']];
   return `<section class="operations-toolbar"><div class="toolbar-row controls ${state.customScopeOpen ? 'with-custom-scope' : ''}"><div class="date-presets">${presets.map(([id, label]) => `<button class="${state.datePreset === id ? 'active' : ''}" data-date-preset="${id}">${label}</button>`).join('')}<button class="${state.datePreset === 'custom' ? 'active' : ''}" data-date-preset="custom">自定义</button></div>${state.customScopeOpen ? `<div class="scope-controls"><label><span>开始</span><input id="filter-start" type="date" value="${escape(state.filters.start)}" /></label><label><span>结束</span><input id="filter-end" type="date" value="${escape(state.filters.end)}" /></label><button class="btn primary small" id="apply-custom-scope">确定</button></div>` : ''}<span class="scope-hint">${model?.core?.reports?.length || 0} 份报表已参与当前计算</span></div></section>`;
 }
 function operationTabs() { return `<nav class="data-tabs"><button class="${state.activePanel === 'overview' ? 'active' : ''}" data-panel="overview"><small>01</small>整店总览</button><button class="${state.activePanel === 'category' ? 'active' : ''}" data-panel="category"><small>02</small>品类 360</button><button class="${state.activePanel === 'product' ? 'active' : ''}" data-panel="product"><small>03</small>商品排行</button><button class="${state.activePanel === 'warehouse' ? 'active' : ''}" data-panel="warehouse"><small>04</small>数据仓库</button></nav>`; }
 function trendView(trend = []) {
-  const definitions = { revenue: { label: '净 GSV', color: '#0d9488', value: (row) => row.revenue, format: money }, spend: { label: '推广花费', color: '#2563eb', value: (row) => row.spend, format: money }, roi: { label: '经营 ROI', color: '#d97706', value: (row) => row.roi, format: (value) => fmtNumber(value) }, feeRate: { label: '推广费率', color: '#c026d3', value: (row) => row.feeRate, format: percent } };
-  const points = trend.slice(-31); const selectedMetrics = state.trendMetrics.length ? state.trendMetrics : ['revenue'];
+  const colors = ['#0f766e', '#2563eb', '#d97706', '#e11d48', '#7c3aed', '#0891b2', '#4f46e5', '#be123c', '#15803d', '#b45309', '#0e7490', '#1d4ed8', '#6d28d9', '#047857', '#9f1239', '#0369a1', '#a16207', '#4338ca', '#c2410c', '#1e40af', '#0f766e'];
+  const definitions = Object.fromEntries(CUSTOM_METRICS.map((metric, index) => [metric.id, {
+    label: metric.label,
+    color: colors[index % colors.length],
+    value: (row) => metric.id === 'managementRoi' ? row.roi : metric.id === 'roi' ? (Number(row.spend) > 0 ? Number(row.promotionRevenue) / Number(row.spend) : null) : row[metric.id],
+    format: (value) => formatCustomMetric(metric.id, value),
+  }]));
+  const selectedMetrics = (state.trendMetrics.length ? state.trendMetrics : ['revenue']).filter((id) => definitions[id]);
+  const legendMetrics = [...new Set(['revenue', 'spend', 'managementRoi', 'feeRate', ...loadCustomCards('store').map((card) => card.metricId), ...selectedMetrics])].filter((id) => definitions[id]);
+  const points = trend.slice(-31);
   const width = 760; const height = 230; const padding = { left: 34, right: 20, top: 18, bottom: 32 };
   const chartWidth = width - padding.left - padding.right; const chartHeight = height - padding.top - padding.bottom;
   const series = selectedMetrics.map((metricName) => {
-    const definition = definitions[metricName]; const values = points.map((item) => Number(definition.value(item))).filter(Number.isFinite); const max = Math.max(...values, 1);
-    const pointAt = (item, index) => { const value = Number(definition.value(item)); if (!Number.isFinite(value)) return null; const x = padding.left + (points.length <= 1 ? chartWidth / 2 : (index / (points.length - 1)) * chartWidth); const y = padding.top + chartHeight - Math.max(0, value / max) * chartHeight; return { value, x, y }; };
+    const definition = definitions[metricName]; const values = points.map((item) => definition.value(item)).filter(hasNumber).map(Number); const max = Math.max(...values.map(Math.abs), 1);
+    const pointAt = (item, index) => { const rawValue = definition.value(item); if (!hasNumber(rawValue)) return null; const value = Number(rawValue); const x = padding.left + (points.length <= 1 ? chartWidth / 2 : (index / (points.length - 1)) * chartWidth); const y = padding.top + chartHeight - Math.max(0, value / max) * chartHeight; return { value, x, y }; };
     const path = points.map((item, index) => { const point = pointAt(item, index); if (!point) return ''; const previous = index ? pointAt(points[index - 1], index - 1) : null; return `${previous ? 'L' : 'M'}${point.x.toFixed(1)},${point.y.toFixed(1)}`; }).join(' ');
     const labelStep = Math.max(1, Math.ceil(points.length / 8));
     const markers = points.map((item, index) => { const point = pointAt(item, index); if (!point) return ''; const label = points.length <= 12 || index === 0 || index === points.length - 1 || index % labelStep === 0; return `<circle class="trend-point" cx="${point.x.toFixed(1)}" cy="${point.y.toFixed(1)}" r="3.5" fill="${definition.color}"><title>${escape(definition.label)}：${escape(definition.format(point.value))}</title></circle>${label ? `<text class="trend-point-label" x="${point.x.toFixed(1)}" y="${Math.max(12, point.y - 9).toFixed(1)}" text-anchor="middle" fill="${definition.color}">${escape(definition.format(point.value))}</text>` : ''}`; }).join('');
     return `<g class="trend-series"><path d="${path}" fill="none" stroke="${definition.color}" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" />${markers}</g>`;
   }).join('');
-  return `<article class="card trend-card"><header class="section-head"><div><h3>经营趋势</h3><p>点击上方指标切换或叠加趋势。净 GSV = 支付金额 - 成功退款金额。</p></div><div class="trend-legend">${Object.entries(definitions).map(([id, item]) => `<button class="${selectedMetrics.includes(id) ? 'active' : ''}" data-trend-toggle="${id}" style="--metric-color:${item.color}"><i></i>${item.label}</button>`).join('')}</div></header>${points.length ? `<div class="trend-chart"><svg viewBox="0 0 ${width} ${height}" role="img" aria-label="经营趋势图"><line x1="${padding.left}" y1="${padding.top + chartHeight}" x2="${width - padding.right}" y2="${padding.top + chartHeight}" stroke="#dbe6ef" />${[.25, .5, .75].map((ratio) => `<line x1="${padding.left}" y1="${padding.top + chartHeight * ratio}" x2="${width - padding.right}" y2="${padding.top + chartHeight * ratio}" stroke="#eef3f7" />`).join('')}${series}${points.map((point, index) => `<text x="${padding.left + (points.length <= 1 ? chartWidth / 2 : (index / (points.length - 1)) * chartWidth)}" y="${height - 10}" text-anchor="middle" fill="#789" font-size="10">${escape(day(point.date).slice(5))}</text>`).join('')}</svg></div><div class="trend-data-strip">${points.map((point) => `<div><span>${escape(day(point.date))}</span>${selectedMetrics.map((id) => `<b style="color:${definitions[id].color}">${definitions[id].label} ${definitions[id].format(definitions[id].value(point))}</b>`).join('')}</div>`).join('')}</div>` : '<div class="empty-cell">当前筛选范围没有可绘制的日度数据。</div>'}</article>`;
+  return `<article class="card trend-card"><header class="section-head"><div><h3>经营趋势</h3><p>点击指标卡片或右侧标签切换、叠加趋势。每项指标独立缩放，避免不同量级互相压扁。</p></div><div class="trend-legend">${legendMetrics.map((id) => { const item = definitions[id]; return `<button class="${selectedMetrics.includes(id) ? 'active' : ''}" data-trend-toggle="${id}" aria-pressed="${selectedMetrics.includes(id)}" style="--metric-color:${item.color}"><i></i>${item.label}</button>`; }).join('')}</div></header>${points.length ? `<div class="trend-chart"><svg viewBox="0 0 ${width} ${height}" role="img" aria-label="经营趋势图"><line x1="${padding.left}" y1="${padding.top + chartHeight}" x2="${width - padding.right}" y2="${padding.top + chartHeight}" stroke="#dbe6ef" />${[.25, .5, .75].map((ratio) => `<line x1="${padding.left}" y1="${padding.top + chartHeight * ratio}" x2="${width - padding.right}" y2="${padding.top + chartHeight * ratio}" stroke="#eef3f7" />`).join('')}${series}${points.map((point, index) => `<text x="${padding.left + (points.length <= 1 ? chartWidth / 2 : (index / (points.length - 1)) * chartWidth)}" y="${height - 10}" text-anchor="middle" fill="#789" font-size="10">${escape(day(point.date).slice(5))}</text>`).join('')}</svg></div><div class="trend-data-strip">${points.map((point) => `<div><span>${escape(day(point.date))}</span>${selectedMetrics.map((id) => `<b style="color:${definitions[id].color}">${definitions[id].label} ${definitions[id].format(definitions[id].value(point))}</b>`).join('')}</div>`).join('')}</div>` : '<div class="empty-cell">当前筛选范围没有可绘制的日度数据。</div>'}</article>`;
 }
 function overviewPanel(workspace) {
   const core = workspace.core || workspace.workspace || workspace; const dashboard = core.dashboard; const store = dashboard.store; const verified = calculatedPromotion(store); const canManage = Boolean(workspace.canManage);
-  return `<section class="workspace-content"><div class="metrics-grid dashboard-metrics">${metric('整店净 GSV', money(store.revenue), store.refundDataAvailable ? `支付 ${money(store.grossRevenue)} · 退款 ${money(store.refundAmount)}${store.salesDeduction ? ` · 扣除 ${money(store.salesDeduction)}` : ''}` : '当前销售报表缺退款字段', 'mint')}${metric('推广花费', money(store.spend), dashboard.sourceCoverage?.storePromotionComplete ? '单品付费周期已完整对齐' : '仅展示已导入消耗，不计算完整费率', 'blue')}${metric('整店经营 ROI', fmtNumber(verified.roi), dashboard.sourceCoverage?.storePromotionComplete ? '推广成交 ÷ 推广花费' : '需同周期单品付费报表', 'orange')}${metric('推广费率', percent(verified.feeRate), dashboard.sourceCoverage?.storePromotionComplete ? '推广花费 ÷ 净 GSV' : '需同周期单品付费报表', 'purple')}</div>${dashboard.sourceWarnings?.storePromotion ? `<div class="data-warning">${escape(dashboard.sourceWarnings.storePromotion)}</div>` : ''}${trendView(dashboard.trend)}${categoryContributionPanel(dashboard.categories)}<div class="split-grid"><article class="card"><header class="section-head"><div><h3>店铺经营</h3><p>销售和推广只在同名店铺内关联；表内口径与上方一致。</p></div>${canManage ? `<button class="btn secondary small" data-open-deductions>销售扣除</button>` : ''}</header>${storeTable(dashboard.stores)}</article><article class="card"><header class="section-head"><div><h3>数据口径</h3><p>本页严格使用共享 GSV、推广费率和 ROI 公式。</p></div></header><div class="source-list"><div><span>销售来源</span><strong>${escape(dashboard.sources?.storeSales?.type ? TYPE_LABELS[dashboard.sources.storeSales.type] : '未导入')}</strong></div><div><span>推广来源</span><strong>${escape(dashboard.sources?.storePromotion?.type ? TYPE_LABELS[dashboard.sources.storePromotion.type] : '未导入')}</strong></div><div><span>当前统计日期</span><strong>${escape(core.currentDate || '--')}</strong></div><div><span>商品资料库</span><strong>${core.productCatalog?.length || 0} 条版本记录</strong></div></div></article></div></section>`;
+  const cards = [
+    { id: 'store-revenue', metricId: 'revenue', label: '整店净 GSV', value: money(store.revenue), detail: store.refundDataAvailable ? `支付 ${money(store.grossRevenue)} · 退款 ${money(store.refundAmount)}${store.salesDeduction ? ` · 扣除 ${money(store.salesDeduction)}` : ''}` : '当前销售报表缺退款字段', tone: 'mint' },
+    { id: 'store-spend', metricId: 'spend', label: '推广花费', value: money(store.spend), detail: dashboard.sourceCoverage?.storePromotionComplete ? '单品付费周期已完整对齐' : '仅展示已导入消耗，不计算完整费率', tone: 'blue' },
+    { id: 'store-roi', metricId: 'roi', label: '整店经营 ROI', value: fmtNumber(verified.roi), detail: dashboard.sourceCoverage?.storePromotionComplete ? '推广成交 ÷ 推广花费' : '需同周期单品付费报表', tone: 'orange' },
+    { id: 'store-fee-rate', metricId: 'feeRate', label: '推广费率', value: percent(verified.feeRate), detail: dashboard.sourceCoverage?.storePromotionComplete ? '推广花费 ÷ 净 GSV' : '需同周期单品付费报表', tone: 'purple' },
+  ];
+  return `<section class="workspace-content">${managedMetricGrid('store', cards, [store])}${dashboard.sourceWarnings?.storePromotion ? `<div class="data-warning">${escape(dashboard.sourceWarnings.storePromotion)}</div>` : ''}${trendView(dashboard.trend)}${categoryContributionPanel(dashboard.categories)}<div class="split-grid"><article class="card"><header class="section-head"><div><h3>店铺经营</h3><p>销售和推广只在同名店铺内关联；表内口径与上方一致。</p></div>${canManage ? `<button class="btn secondary small" data-open-deductions>销售扣除</button>` : ''}</header>${storeTable(dashboard.stores)}</article><article class="card"><header class="section-head"><div><h3>数据口径</h3><p>本页严格使用共享 GSV、推广费率和 ROI 公式。</p></div></header><div class="source-list"><div><span>销售来源</span><strong>${escape(dashboard.sources?.storeSales?.type ? TYPE_LABELS[dashboard.sources.storeSales.type] : '未导入')}</strong></div><div><span>推广来源</span><strong>${escape(dashboard.sources?.storePromotion?.type ? TYPE_LABELS[dashboard.sources.storePromotion.type] : '未导入')}</strong></div><div><span>当前统计日期</span><strong>${escape(core.currentDate || '--')}</strong></div><div><span>商品资料库</span><strong>${core.productCatalog?.length || 0} 条版本记录</strong></div></div></article></div></section>`;
 }
 function storeTable(rows) {
   return `<div class="table-wrap"><table><thead><tr><th>店铺</th><th>支付 / 退款</th><th>净 GSV</th><th>推广花费</th><th>ROI</th><th>费率</th></tr></thead><tbody>${rows?.length ? rows.map((row) => { const verified = calculatedPromotion(row); return `<tr><td><strong>${escape(row.name || '--')}</strong></td><td>${money(row.grossRevenue)}<small class="negative">-${money(row.refundAmount)}</small></td><td><strong>${money(row.revenue)}</strong></td><td>${money(row.spend)}</td><td>${fmtNumber(verified.roi)}</td><td>${percent(verified.feeRate)}</td></tr>`; }).join('') : '<tr><td colspan="6" class="empty-cell">导入商品排行和单品付费报表后显示店铺经营。</td></tr>'}</tbody></table></div>`;
@@ -615,29 +727,44 @@ function warehousePanel(workspace) {
   const model = workspace.core ? workspace : operationsModel(); const core = model.core; const canManage = model.canManage; const panel = state.warehousePanel;
   const tabs = [['upload', '报表管理', '上传、核对与归档'], ['catalog', '商品资料', '店铺 + 商品 ID 映射'], ['deductions', '销售扣除', '大单剔除与重算']];
   const reports = model.warehouse || []; const filteredReports = reports.filter((report) => (state.archiveUi.type === 'all' || report.type === state.archiveUi.type) && (!state.archiveUi.storeName || report.storeName === state.archiveUi.storeName));
-  const groups = groupedWarehouseReports(filteredReports); const selectedIds = new Set(state.archiveUi.selectedIds); const activeCatalog = latestCatalog(core.productCatalog || []);
+  const groups = groupedWarehouseReports(filteredReports); if (groups.length && (state.archiveUi.expandedStore === null || (state.archiveUi.expandedStore && !groups.some((group) => group.key === state.archiveUi.expandedStore)))) { state.archiveUi.expandedStore = groups[0].key; state.archiveUi.expandedDate = ''; } const selectedIds = new Set(state.archiveUi.selectedIds); const activeCatalog = latestCatalog(core.productCatalog || []);
   const body = panel === 'upload' || panel === 'archive' ? `${uploadWarehouseCard(model)}${archiveWarehouseCard(model, groups, selectedIds, false)}` : panel === 'catalog' ? catalogWarehouseCard(model, activeCatalog) : deductionsWarehouseCard(model);
   return `<section class="workspace-content"><nav class="warehouse-nav">${tabs.map(([id, label, hint]) => `<button class="${panel === id ? 'active' : ''}" data-warehouse-panel="${id}"><strong>${label}</strong><small>${hint}</small></button>`).join('')}</nav>${body}</section>`;
 }
 function catalogKey(entry) { return `${String(entry?.storeName || '').trim().toLocaleLowerCase('zh-CN')}\u0000${String(entry?.productId || '').trim()}`; }
-function latestCatalog(entries) { const latest = new Map(); for (const entry of entries || []) latest.set(catalogKey(entry), entry); return [...latest.values()].sort((a, b) => `${a.storeName}|${a.category}|${a.productId}`.localeCompare(`${b.storeName}|${b.category}|${b.productId}`, 'zh-CN')); }
+function latestCatalog(entries) { const latest = new Map(); const replacedIds = new Set((entries || []).map((entry) => entry.replacesId).filter(Boolean)); for (const entry of entries || []) { if (replacedIds.has(entry.id)) continue; const key = catalogKey(entry); if (!latest.has(key)) latest.set(key, entry); } return [...latest.values()].sort((a, b) => `${a.storeName}|${a.category}|${a.productId}`.localeCompare(`${b.storeName}|${b.category}|${b.productId}`, 'zh-CN')); }
 function uploadWarehouseCard(model) {
   const stores = model.stores || []; return `<article class="card warehouse-callout"><header class="section-head"><div><h3>${model.mode === 'cloud' ? '上传团队云报表' : '导入浏览器本地报表'}</h3><p>先预检报表类型和统计日期。下载日期不会被当作经营统计日期。</p></div><button class="btn primary" data-open-upload="${model.mode}">选择报表</button></header><div class="warehouse-guide"><div><b>商品排行</b><span>生意参谋 > 商品 > 商品排行</span></div><div><b>品类 360</b><span>生意参谋 > 品类 > 标准类目</span></div><div><b>单品付费</b><span>万相台/直通车商品推广报表</span></div></div>${model.mode === 'cloud' && !stores.length ? `<div class="data-warning">请先在团队管理中新增店铺，再上传团队报表。</div>` : ''}</article>`;
 }
 function archiveWarehouseCard(model, groups, selectedIds, showImportButton = true) {
-  const stores = model.stores || []; const selected = [...selectedIds]; const all = groups.flatMap((group) => group.reports).filter((report) => report.status === 'active');
-  return `<article class="card warehouse-card"><header class="section-head"><div><h3>${model.mode === 'cloud' ? '团队数据归档' : '本地数据归档'}</h3><p>按报表真实统计周期折叠。可整组选择，也可展开后单独选择一份。</p></div>${showImportButton ? `<button class="btn primary small" data-open-upload="${model.mode}">导入报表</button>` : ''}</header><div class="archive-controls"><label>数据表<select id="archive-type"><option value="all">全部数据表</option><option value="category" ${state.archiveUi.type === 'category' ? 'selected' : ''}>品类 360</option><option value="product" ${state.archiveUi.type === 'product' ? 'selected' : ''}>商品排行</option><option value="campaign" ${state.archiveUi.type === 'campaign' ? 'selected' : ''}>单品付费</option></select></label><label>店铺<select id="archive-store"><option value="">全部店铺</option>${stores.map((store) => `<option value="${escape(store.name)}" ${state.archiveUi.storeName === store.name ? 'selected' : ''}>${escape(store.name)}</option>`).join('')}</select></label><span>${selected.length ? `已选 ${selected.length} 份` : `${all.length} 份当前报表`}</span>${selected.length ? `<button class="btn text tiny" data-clear-archive-selection>取消选择</button><button class="btn danger tiny" data-delete-selected-reports>删除已选</button>${model.mode === 'cloud' && model.canManage ? `<select id="bulk-store-id"><option value="">批量改归属店铺</option>${stores.map((store) => `<option value="${escape(store.id)}">${escape(store.name)}</option>`).join('')}</select><button class="btn secondary tiny" id="bulk-assign-store">确认归属</button>` : ''}` : ''}</div><div class="archive-groups">${groups.length ? groups.map((group) => { const expanded = state.archiveUi.expandedDate === group.key; const groupCurrent = group.reports.filter((report) => report.status === 'active'); const checked = groupCurrent.length > 0 && groupCurrent.every((report) => selectedIds.has(report.id)); return `<section class="archive-group"><header><label><input type="checkbox" data-select-report-group="${escape(group.key)}" ${checked ? 'checked' : ''} ${groupCurrent.length ? '' : 'disabled'} /></label><button data-toggle-report-group="${escape(group.key)}"><b>${PERIOD_LABELS[group.periodKind] || group.periodKind} · ${escape(group.start)}${group.end && group.end !== group.start ? ` 至 ${escape(group.end)}` : ''}</b><span>${group.reports.length} 份 · ${group.reports.reduce((sum, report) => sum + (Number(report.rowCount) || report.rows?.length || 0), 0)} 行 ${expanded ? '收起' : '展开'}</span></button></header>${expanded ? `<div class="archive-report-list">${group.reports.map((report) => archiveReportRow(model, report, selectedIds)).join('')}</div>` : ''}</section>`; }).join('') : '<div class="empty-cell">暂无符合条件的报表。</div>'}</div></article>`;
+  const stores = model.stores || []; const selected = [...selectedIds]; const all = groups.flatMap((store) => store.dateGroups.flatMap((group) => group.reports)).filter((report) => report.status === 'active');
+  const storeSections = groups.map((store) => {
+    const storeExpanded = state.archiveUi.expandedStore === store.key; const storeCurrent = store.reports.filter((report) => report.status === 'active'); const storeChecked = storeCurrent.length > 0 && storeCurrent.every((report) => selectedIds.has(report.id));
+    const dateSections = store.dateGroups.map((group) => { const expanded = state.archiveUi.expandedDate === group.key; const groupCurrent = group.reports.filter((report) => report.status === 'active'); const checked = groupCurrent.length > 0 && groupCurrent.every((report) => selectedIds.has(report.id)); return `<section class="archive-group"><header><label><input type="checkbox" data-select-report-group="${escape(group.key)}" ${checked ? 'checked' : ''} ${groupCurrent.length ? '' : 'disabled'} /></label><button data-toggle-report-group="${escape(group.key)}"><b>${PERIOD_LABELS[group.periodKind] || group.periodKind} · ${escape(group.start || '未设置日期')}${group.end && group.end !== group.start ? ` 至 ${escape(group.end)}` : ''}</b><span>${group.reports.length} 份 · ${group.reports.reduce((sum, report) => sum + (Number(report.rowCount) || report.rows?.length || 0), 0)} 行 ${expanded ? '收起' : '展开'}</span></button></header>${expanded ? `<div class="archive-report-list">${group.reports.map((report) => archiveReportRow(model, report, selectedIds)).join('')}</div>` : ''}</section>`; }).join('');
+    return `<section class="archive-store-group"><header class="archive-store-header"><label><input type="checkbox" data-select-store-group="${escape(store.key)}" ${storeChecked ? 'checked' : ''} ${storeCurrent.length ? '' : 'disabled'} /></label><button data-toggle-store-group="${escape(store.key)}"><b>店铺 · ${escape(store.storeName)}</b><span>${store.dateGroups.length} 个日期 · ${store.reports.length} 份报表 · ${store.reports.reduce((sum, report) => sum + (Number(report.rowCount) || report.rows?.length || 0), 0)} 行 ${storeExpanded ? '收起' : '展开'}</span></button></header>${storeExpanded ? `<div class="archive-period-groups">${dateSections}</div>` : ''}</section>`;
+  }).join('');
+  return `<article class="card warehouse-card"><header class="section-head"><div><h3>${model.mode === 'cloud' ? '团队数据归档' : '本地数据归档'}</h3><p>先按店铺归档，再按统计日期或周期从新到旧排列；支持整店、整期和单份报表选择。</p></div>${showImportButton ? `<button class="btn primary small" data-open-upload="${model.mode}">导入报表</button>` : ''}</header><div class="archive-controls"><label>数据表<select id="archive-type"><option value="all">全部数据表</option><option value="category" ${state.archiveUi.type === 'category' ? 'selected' : ''}>品类 360</option><option value="product" ${state.archiveUi.type === 'product' ? 'selected' : ''}>商品排行</option><option value="campaign" ${state.archiveUi.type === 'campaign' ? 'selected' : ''}>单品付费</option></select></label><label>店铺<select id="archive-store"><option value="">全部店铺</option>${stores.map((store) => `<option value="${escape(store.name)}" ${state.archiveUi.storeName === store.name ? 'selected' : ''}>${escape(store.name)}</option>`).join('')}</select></label><span>${selected.length ? `已选 ${selected.length} 份` : `${all.length} 份当前报表`}</span>${selected.length ? `<button class="btn text tiny" data-clear-archive-selection>取消选择</button><button class="btn danger tiny" data-delete-selected-reports>删除已选</button>${model.mode === 'cloud' && model.canManage ? `<select id="bulk-store-id"><option value="">批量改归属店铺</option>${stores.map((store) => `<option value="${escape(store.id)}">${escape(store.name)}</option>`).join('')}</select><button class="btn secondary tiny" id="bulk-assign-store">确认归属</button>` : ''}` : ''}</div><div class="archive-groups">${groups.length ? storeSections : '<div class="empty-cell">暂无符合条件的报表。</div>'}</div></article>`;
 }
 function archiveReportRow(model, report, selectedIds) { const editing = state.archiveUi.renameId === report.id; const canDelete = Boolean(report.canDelete); return `<div class="archive-report ${report.status || 'active'}"><input type="checkbox" data-select-report="${escape(report.id)}" ${selectedIds.has(report.id) ? 'checked' : ''} ${report.status === 'active' ? '' : 'disabled'} /> <div class="archive-file">${editing ? `<input data-rename-report-input="${escape(report.id)}" value="${escape(state.archiveUi.renameValue)}" /><button class="btn primary tiny" data-save-report-name="${escape(report.id)}">保存</button><button class="btn text tiny" data-cancel-report-name>取消</button>` : `<button class="archive-name" data-start-report-name="${escape(report.id)}" ${canDelete ? '' : 'disabled'}>${escape(report.fileName || '--')}</button>`}<small>${TYPE_LABELS[report.type] || report.type} · ${escape(report.storeName || '未归属店铺')} · ${report.rowCount || report.rows?.length || 0} 行${report.createdByUsername ? ` · ${escape(report.createdByUsername)}` : ''}</small></div><span class="status ${report.status || 'active'}">${report.status === 'superseded' ? '已替换' : '当前'}</span>${canDelete ? `<button class="btn danger tiny" data-delete-report="${escape(report.id)}">永久删除</button>` : ''}</div>`; }
 function catalogWarehouseCard(model, entries) {
   const canManage = model.canManage; const pageSize = 50; const page = Math.max(0, Math.min(state.catalogUi.page, Math.ceil(entries.length / pageSize) - 1)); const visible = entries.slice(page * pageSize, page * pageSize + pageSize);
+  const activeIds = new Set(entries.map((entry) => entry.id)); const selectedIds = new Set(state.catalogUi.selectedIds.filter((id) => activeIds.has(id))); const selectedEntries = entries.filter((entry) => selectedIds.has(entry.id)); const allVisibleSelected = visible.length > 0 && visible.every((entry) => selectedIds.has(entry.id));
   const exportCurrent = model.mode === 'cloud' ? `<a class="btn secondary small" href="/api/teams/${encodeURIComponent(state.workspace.team.id)}/product-catalog/export">导出当前表</a>` : `<button class="btn secondary small" data-export-local-catalog>导出当前表</button>`;
   const clearCatalog = canManage ? `<button class="btn danger small" data-clear-catalog ${entries.length ? '' : 'disabled'}>清空资料</button>` : '';
   const headerActions = canManage ? `<div class="catalog-head-actions"><button class="btn primary small" data-toggle-catalog-create>${state.catalogUi.showCreate ? '收起新增' : '新增商品'}</button><a class="btn secondary small" href="/api/templates/product-catalog.xlsx">下载导入模板</a>${exportCurrent}${clearCatalog}</div>` : exportCurrent;
   const createPanel = canManage && state.catalogUi.showCreate ? `<form id="catalog-manual" class="catalog-create-panel"><header><div><span>新增商品资料</span><strong>店铺 + 商品 ID 不可重复</strong></div><button type="button" class="btn text tiny" data-cancel-catalog-create>取消</button></header><div class="catalog-create-grid"><label><span><i>1</i>店铺</span><input name="storeName" list="catalog-stores" required placeholder="选择或输入店铺" autocomplete="off" /></label><datalist id="catalog-stores">${model.stores.map((store) => `<option value="${escape(store.name)}"></option>`).join('')}</datalist><label><span><i>2</i>商品 ID</span><input name="productId" required placeholder="输入商品 ID" inputmode="numeric" autocomplete="off" /></label><label><span><i>3</i>品类</span><input name="category" required placeholder="输入品类" autocomplete="off" /></label><label><span><i>4</i>型号</span><input name="model" required placeholder="输入型号" autocomplete="off" /></label></div><footer><button type="reset" class="btn secondary small">清空</button><button class="btn primary small">保存商品</button></footer></form>` : '';
-  return `<article class="card catalog-card"><header class="section-head"><div><h3>商品 ID、型号与品类资料库</h3><p>按店铺 + 商品 ID 唯一维护，商品排行和品类 360 使用当前资料。</p></div>${headerActions}</header>${createPanel}${canManage ? `<div class="catalog-actions"><label class="file-button">选择 ID 型号表<input id="catalog-file" type="file" accept=".xls,.xlsx,.xlsm,.xlsb,.ods,.csv,.tsv,.txt" /></label><button class="btn primary small" id="catalog-import" ${state.catalogUi.file ? '' : 'disabled'}>更新资料库</button><span>${state.catalogUi.file ? escape(state.catalogUi.file.name) : '表头：店铺名、商品ID、品类名、型号'}</span></div>` : '<div class="data-warning">商品资料由团队管理员维护；当前资料已参与商品和品类计算。</div>'}<div class="table-wrap"><table><thead><tr><th>店铺</th><th>商品 ID</th><th>品类</th><th>型号</th><th>来源</th><th>更新时间</th></tr></thead><tbody>${visible.length ? visible.map((entry) => `<tr><td>${escape(entry.storeName)}</td><td class="mono">${escape(entry.productId)}</td><td>${escape(entry.category || '--')}</td><td>${escape(entry.model || '--')}</td><td>${escape(entry.sourceName || '--')}</td><td>${escape(fmtDate(entry.createdAt))}</td></tr>`).join('') : '<tr><td colspan="6" class="empty-cell">还没有商品资料。可以新增商品或导入 ID 型号表。</td></tr>'}</tbody></table></div>${entries.length > pageSize ? `<footer class="pager"><button class="btn secondary tiny" data-catalog-page="prev" ${page ? '' : 'disabled'}>上一页</button><span>${page + 1} / ${Math.ceil(entries.length / pageSize)} · ${entries.length} 条</span><button class="btn secondary tiny" data-catalog-page="next" ${page < Math.ceil(entries.length / pageSize) - 1 ? '' : 'disabled'}>下一页</button></footer>` : ''}</article>`;
+  const bulkEditor = canManage && selectedEntries.length ? `<form id="catalog-bulk-edit" class="catalog-bulk-editor"><div class="catalog-bulk-count"><span>已选</span><strong>${selectedEntries.length}</strong><small>条商品</small></div><div class="catalog-bulk-fields"><label><span>店铺</span><input list="catalog-bulk-stores" data-catalog-bulk-field="bulkStoreName" value="${escape(state.catalogUi.bulkStoreName)}" placeholder="留空不修改" autocomplete="off" /></label><datalist id="catalog-bulk-stores">${model.stores.map((store) => `<option value="${escape(store.name)}"></option>`).join('')}</datalist><label><span>品类</span><input data-catalog-bulk-field="bulkCategory" value="${escape(state.catalogUi.bulkCategory)}" placeholder="留空不修改" autocomplete="off" /></label><label><span>型号</span><input data-catalog-bulk-field="bulkModel" value="${escape(state.catalogUi.bulkModel)}" placeholder="留空不修改" autocomplete="off" /></label></div><div class="catalog-bulk-actions"><button type="button" class="btn text tiny" data-clear-catalog-selection>取消选择</button><button class="btn primary small">应用修改</button></div></form>` : '';
+  const selectHead = canManage ? `<th class="catalog-check"><input type="checkbox" data-select-catalog-page aria-label="全选当前页" ${allVisibleSelected ? 'checked' : ''} ${visible.length ? '' : 'disabled'} /></th>` : '';
+  const body = visible.length ? visible.map((entry) => `<tr class="${selectedIds.has(entry.id) ? 'catalog-row-selected' : ''}">${canManage ? `<td class="catalog-check"><input type="checkbox" data-select-catalog="${escape(entry.id)}" aria-label="选择商品 ${escape(entry.productId)}" ${selectedIds.has(entry.id) ? 'checked' : ''} /></td>` : ''}<td>${escape(entry.storeName)}</td><td class="mono">${escape(entry.productId)}</td><td>${escape(entry.category || '--')}</td><td>${escape(entry.model || '--')}</td><td>${escape(entry.sourceName || '--')}</td><td>${escape(fmtDate(entry.createdAt))}</td></tr>`).join('') : `<tr><td colspan="${canManage ? 7 : 6}" class="empty-cell">还没有商品资料。可以新增商品或导入 ID 型号表。</td></tr>`;
+  return `<article class="card catalog-card"><header class="section-head"><div><h3>商品 ID、型号与品类资料库</h3><p>按店铺 + 商品 ID 唯一维护，勾选后可批量修改店铺、品类或型号。</p></div>${headerActions}</header>${createPanel}${canManage ? `<div class="catalog-actions"><label class="file-button">选择 ID 型号表<input id="catalog-file" type="file" accept=".xls,.xlsx,.xlsm,.xlsb,.ods,.csv,.tsv,.txt" /></label><button class="btn primary small" id="catalog-import" ${state.catalogUi.file ? '' : 'disabled'}>更新资料库</button><span>${state.catalogUi.file ? escape(state.catalogUi.file.name) : '表头：店铺名、商品ID、品类名、型号'}</span></div>` : '<div class="data-warning">商品资料由团队管理员维护；当前资料已参与商品和品类计算。</div>'}${bulkEditor}<div class="table-wrap"><table><thead><tr>${selectHead}<th>店铺</th><th>商品 ID</th><th>品类</th><th>型号</th><th>来源</th><th>更新时间</th></tr></thead><tbody>${body}</tbody></table></div>${entries.length > pageSize ? `<footer class="pager"><button class="btn secondary tiny" data-catalog-page="prev" ${page ? '' : 'disabled'}>上一页</button><span>${page + 1} / ${Math.ceil(entries.length / pageSize)} · ${entries.length} 条${selectedEntries.length ? ` · 已选 ${selectedEntries.length} 条` : ''}</span><button class="btn secondary tiny" data-catalog-page="next" ${page < Math.ceil(entries.length / pageSize) - 1 ? '' : 'disabled'}>下一页</button></footer>` : ''}</article>`;
 }
-function deductionsWarehouseCard(model) { const deductions = model.core.salesDeductions || []; return `<article class="card"><header class="section-head"><div><h3>销售扣除</h3><p>扣除只作用于整店净 GSV、经营 ROI 和推广费率，不会伪造分摊到单品或品类。</p></div></header>${model.canManage ? `<form id="sales-deduction-form" class="deduction-form"><select name="storeName" required><option value="">选择店铺</option>${model.stores.map((store) => `<option value="${escape(store.name)}">${escape(store.name)}</option>`).join('')}</select><input type="date" name="reportDate" value="${escape(model.core.currentDate || utcDate())}" required /><input type="number" name="amount" min="0.01" step="0.01" placeholder="扣除金额" required /><input name="note" placeholder="备注（可选）" /><button class="btn primary small">保存并重算</button></form>` : '<div class="data-warning">销售扣除由团队管理员维护，成员可查看已生效的经营口径。</div>'}<div class="table-wrap"><table><thead><tr><th>店铺</th><th>统计日期</th><th>扣除金额</th><th>备注</th><th>操作</th></tr></thead><tbody>${deductions.length ? deductions.map((item) => `<tr><td>${escape(item.storeName)}</td><td>${escape(item.reportDate)}</td><td class="negative">-${money(item.amount)}</td><td>${escape(item.note || '--')}</td><td>${model.canManage ? `<button class="btn danger tiny" data-delete-deduction="${escape(item.id)}">删除</button>` : '--'}</td></tr>`).join('') : '<tr><td colspan="5" class="empty-cell">当前范围没有销售扣除。</td></tr>'}</tbody></table></div></article>`; }
+function deductionsWarehouseCard(model) {
+  const currentDeductions = model.core.salesDeductions || [];
+  const deductions = model.core.salesDeductionHistory || currentDeductions;
+  const currentIds = new Set(currentDeductions.map((item) => item.id));
+  const total = deductions.reduce((sum, item) => sum + (Number(item.amount) || 0), 0);
+  return `<article class="card"><header class="section-head"><div><h3>销售扣除</h3><p>历史记录始终保留；标记“当前口径”的记录才参与当前日期范围计算。</p></div><div class="deduction-summary"><span>历史 ${deductions.length} 笔</span><strong>-${money(total)}</strong></div></header>${model.canManage ? `<form id="sales-deduction-form" class="deduction-form"><select name="storeName" required><option value="">选择店铺</option>${model.stores.map((store) => `<option value="${escape(store.name)}">${escape(store.name)}</option>`).join('')}</select><input type="date" name="reportDate" value="${escape(model.core.currentDate || utcDate())}" required /><input type="number" name="amount" min="0.01" step="0.01" placeholder="扣除金额" required /><input name="note" placeholder="备注（可选）" /><button class="btn primary small">保存并重算</button></form>` : '<div class="data-warning">销售扣除由团队管理员维护，成员可查看已生效的经营口径。</div>'}<div class="table-wrap"><table><thead><tr><th>店铺</th><th>统计日期</th><th>扣除金额</th><th>当前状态</th><th>备注</th><th>操作</th></tr></thead><tbody>${deductions.length ? deductions.map((item) => `<tr><td>${escape(item.storeName)}</td><td>${escape(item.reportDate)}</td><td class="negative">-${money(item.amount)}</td><td><span class="deduction-scope ${currentIds.has(item.id) ? 'active' : ''}">${currentIds.has(item.id) ? '当前口径' : '历史记录'}</span></td><td>${escape(item.note || '--')}</td><td>${model.canManage ? `<button class="btn danger tiny" data-delete-deduction="${escape(item.id)}">删除</button>` : '--'}</td></tr>`).join('') : '<tr><td colspan="6" class="empty-cell">还没有销售扣除记录。</td></tr>'}</tbody></table></div></article>`;
+}
 function cloudOperationsView() {
   if (state.bootstrapError && !state.workspace) return `<section class="load-failure" role="alert"><div><span>数据加载未完成</span><h1>运营数据暂时没有加载出来</h1><p>${escape(state.bootstrapError)}</p></div><button class="btn primary" id="retry-bootstrap">重新加载</button></section>`;
   if (!state.workspace?.hasTeam) return emptyTeamView();
@@ -648,20 +775,69 @@ function localOperationsView() {
   const model = operationsModel();
   return operationsView(model, `<section class="page-header"><div><div class="eyebrow">此浏览器 · 私有数据空间</div><h1>运营数据</h1><p>报表、商品资料和销售扣除只保存在当前浏览器；不会上传到团队云端。</p></div><div class="actions"><button class="btn secondary small" id="export-local">导出备份</button><button class="btn danger small" id="clear-local">清空本地数据</button></div></section>`);
 }
-function operationsView(model, header) { const dashboard = model.core.dashboard; const panel = state.activePanel === 'overview' ? overviewPanel(model) : state.activePanel === 'category' ? `<section class="workspace-content"><div class="matrix-kpis"><div><span>已关联品类</span><b>${dashboard.coverage?.categories?.linked || 0}</b></div><div><span>待补推广</span><b>${dashboard.coverage?.categories?.salesOnly || 0}</b></div><div><span>待补品类 360</span><b>${dashboard.coverage?.categories?.promotionOnly || 0}</b></div><div><span>品类净 GSV</span><b>${money(dashboard.categories.reduce((sum, item) => sum + (Number(item.revenue) || 0), 0))}</b></div></div>${entityTable(dashboard.categories, 'category')}</section>` : state.activePanel === 'product' ? `<section class="workspace-content"><div class="matrix-kpis"><div><span>已关联单品</span><b>${dashboard.coverage?.products?.linked || 0}</b></div><div><span>待补推广</span><b>${dashboard.coverage?.products?.salesOnly || 0}</b></div><div><span>待补经营</span><b>${dashboard.coverage?.products?.promotionOnly || 0}</b></div><div><span>单品推广花费</span><b>${money(dashboard.products.reduce((sum, item) => sum + (Number(item.spend) || 0), 0))}</b></div></div>${entityTable(dashboard.products, 'product')}</section>` : warehousePanel(model); return `${header}${operationsNav()}${modeToolbar()}${panel}`; }
+function operationsView(model, header) {
+  const dashboard = model.core.dashboard;
+  let panel;
+  if (state.activePanel === 'overview') panel = overviewPanel(model);
+  else if (state.activePanel === 'category') {
+    const rows = entityRows('category', dashboard.categories);
+    const cards = [
+      { id: 'category-linked', metricId: 'linkedCount', label: '已关联品类', value: fmtNumber(cardMetricValue(rows, 'linkedCount'), 0), detail: '当前筛选范围内销售与单品付费已关联', tone: 'mint' },
+      { id: 'category-sales-only', metricId: 'salesOnlyCount', label: '待补单品付费', value: fmtNumber(cardMetricValue(rows, 'salesOnlyCount'), 0), detail: '当前筛选范围内仅有品类 360 销售数据', tone: 'orange' },
+      { id: 'category-promotion-only', metricId: 'promotionOnlyCount', label: '待补品类 360', value: fmtNumber(cardMetricValue(rows, 'promotionOnlyCount'), 0), detail: '当前筛选范围内仅有单品付费数据', tone: 'blue' },
+      { id: 'category-revenue', metricId: 'revenue', label: '品类净 GSV', value: money(cardMetricValue(rows, 'revenue')), detail: '当前筛选范围', tone: '' },
+    ];
+    panel = `<section class="workspace-content">${managedMetricGrid('category', cards, rows)}${entityTable(dashboard.categories, 'category')}</section>`;
+  } else if (state.activePanel === 'product') {
+    const rows = entityRows('product', dashboard.products);
+    const cards = [
+      { id: 'product-linked', metricId: 'linkedCount', label: '已关联单品', value: fmtNumber(cardMetricValue(rows, 'linkedCount'), 0), detail: '当前筛选范围内经营与推广已关联', tone: 'mint' },
+      { id: 'product-sales-only', metricId: 'salesOnlyCount', label: '待补推广数据', value: fmtNumber(cardMetricValue(rows, 'salesOnlyCount'), 0), detail: '当前筛选范围内仅有商品经营', tone: 'orange' },
+      { id: 'product-promotion-only', metricId: 'promotionOnlyCount', label: '待补经营数据', value: fmtNumber(cardMetricValue(rows, 'promotionOnlyCount'), 0), detail: '当前筛选范围内仅有单品推广', tone: 'blue' },
+      { id: 'product-spend', metricId: 'spend', label: '单品推广花费', value: money(cardMetricValue(rows, 'spend')), detail: '当前筛选范围', tone: 'purple' },
+    ];
+    panel = `<section class="workspace-content">${managedMetricGrid('product', cards, rows)}${entityTable(dashboard.products, 'product')}</section>`;
+  } else panel = warehousePanel(model);
+  return `${header}${operationsNav()}${modeToolbar()}${panel}`;
+}
 function uploadSelectMenu(id, value, options, placeholder) {
   const selectedOption = options.find((option) => option.value === value);
   const open = state.upload.openMenu === id;
   return `<div class="upload-select"><button class="upload-select-trigger ${selectedOption ? 'has-value' : ''}" type="button" data-upload-menu="${id}" aria-expanded="${open}" aria-haspopup="listbox"><span>${escape(selectedOption?.label || placeholder)}</span></button>${open ? `<div class="upload-select-options" role="listbox">${options.map((option) => `<button type="button" role="option" aria-selected="${option.value === value}" class="${option.value === value ? 'selected' : ''}" data-upload-select="${id}" data-upload-value="${escape(option.value)}">${escape(option.label)}</button>`).join('')}</div>` : ''}</div>`;
 }
+function activeUploadItem() {
+  return state.upload.files.find((item) => item.id === state.upload.activeId) || state.upload.files[0] || null;
+}
+function updateUploadItem(id, changes) {
+  state.upload.files = state.upload.files.map((item) => item.id === id ? { ...item, ...changes } : item);
+}
+function uploadItemReady(item) {
+  return Boolean(item?.file && item?.preview && item?.type && item?.periodKind && item?.periodStart && item?.periodEnd && item.periodStart <= item.periodEnd && !['recognizing', 'preview-error', 'uploading', 'success'].includes(item.status));
+}
+function uploadItemStatus(item) {
+  if (item.status === 'success') return ['已入库', 'success'];
+  if (item.status === 'uploading') return ['正在入库', 'working'];
+  if (item.status === 'recognizing') return ['正在识别', 'working'];
+  if (item.status === 'preview-error' || item.status === 'upload-error') return ['处理失败', 'error'];
+  if (uploadItemReady(item)) return ['可以入库', 'ready'];
+  return ['待补充', 'pending'];
+}
+function defaultUploadStoreName(mode) {
+  const stores = operationsModel()?.stores || [];
+  const filteredStore = stores.find((store) => store.name === state.filters.storeName);
+  if (filteredStore) return filteredStore.name;
+  if (mode === 'cloud' && stores.length === 1) return stores[0].name;
+  return mode === 'local' ? state.filters.storeName || '' : '';
+}
 function uploadCalendarMonth(value) {
   const base = /^\d{4}-\d{2}$/.test(value || '') ? `${value}-01` : `${utcDate()}-01`;
   return new Date(`${base}T12:00:00`);
 }
-function uploadDateRangePicker() {
+function uploadDateRangePicker(item = activeUploadItem()) {
+  if (!item) return '';
   const upload = state.upload;
   const open = upload.openMenu === 'dateRange';
-  const month = uploadCalendarMonth(upload.calendarMonth || upload.periodStart?.slice(0, 7) || upload.periodEnd?.slice(0, 7));
+  const month = uploadCalendarMonth(upload.calendarMonth || item.periodStart?.slice(0, 7) || item.periodEnd?.slice(0, 7));
   const year = month.getFullYear(); const monthIndex = month.getMonth();
   const firstWeekday = (new Date(year, monthIndex, 1).getDay() + 6) % 7;
   const lastDay = new Date(year, monthIndex + 1, 0).getDate();
@@ -669,26 +845,32 @@ function uploadDateRangePicker() {
   const blanks = Array.from({ length: firstWeekday }, () => '<i aria-hidden="true"></i>').join('');
   const days = Array.from({ length: lastDay }, (_, index) => {
     const value = toIso(index + 1);
-    const selected = value === upload.periodStart || value === upload.periodEnd;
-    const between = upload.periodStart && upload.periodEnd && value > upload.periodStart && value < upload.periodEnd;
+    const selected = value === item.periodStart || value === item.periodEnd;
+    const between = item.periodStart && item.periodEnd && value > item.periodStart && value < item.periodEnd;
     const today = value === utcDate();
     return `<button type="button" class="${selected ? 'selected' : ''} ${between ? 'between' : ''} ${today ? 'today' : ''}" data-upload-date="${value}" aria-pressed="${selected}">${index + 1}</button>`;
   }).join('');
-  const label = upload.periodStart && upload.periodEnd ? `${upload.periodStart} 至 ${upload.periodEnd}` : upload.periodStart ? `开始：${upload.periodStart}` : '选择开始与结束日期';
-  return `<div class="upload-date-range"><button type="button" class="upload-select-trigger ${upload.periodStart && upload.periodEnd ? 'has-value' : ''}" data-upload-date-menu aria-expanded="${open}" aria-haspopup="dialog"><span>${escape(label)}</span></button>${open ? `<section class="upload-date-panel" role="dialog" aria-label="选择统计日期"><div class="date-range-summary"><button type="button" class="${upload.dateSelecting === 'start' ? 'active' : ''}" data-upload-date-target="start"><small>开始日期</small><strong>${escape(upload.periodStart || '请选择')}</strong></button><span>至</span><button type="button" class="${upload.dateSelecting === 'end' ? 'active' : ''}" data-upload-date-target="end"><small>结束日期</small><strong>${escape(upload.periodEnd || '请选择')}</strong></button></div><div class="upload-calendar-head"><button type="button" data-upload-date-month="-1" aria-label="上个月">&#8249;</button><strong>${year} 年 ${monthIndex + 1} 月</strong><button type="button" data-upload-date-month="1" aria-label="下个月">&#8250;</button></div><div class="upload-calendar-week"><span>一</span><span>二</span><span>三</span><span>四</span><span>五</span><span>六</span><span>日</span></div><div class="upload-calendar-days">${blanks}${days}</div><footer><button type="button" class="btn text tiny" data-upload-date-today>今天</button><button type="button" class="btn primary tiny" data-upload-date-apply>确认日期</button></footer></section>` : ''}</div>`;
+  const label = item.periodStart && item.periodEnd ? `${item.periodStart} 至 ${item.periodEnd}` : item.periodStart ? `开始：${item.periodStart}` : '选择开始与结束日期';
+  return `<div class="upload-date-range"><button type="button" class="upload-select-trigger ${item.periodStart && item.periodEnd ? 'has-value' : ''}" data-upload-date-menu aria-expanded="${open}" aria-haspopup="dialog"><span>${escape(label)}</span></button>${open ? `<section class="upload-date-panel" role="dialog" aria-label="选择统计日期"><div class="date-range-summary"><button type="button" class="${upload.dateSelecting === 'start' ? 'active' : ''}" data-upload-date-target="start"><small>开始日期</small><strong>${escape(item.periodStart || '请选择')}</strong></button><span>至</span><button type="button" class="${upload.dateSelecting === 'end' ? 'active' : ''}" data-upload-date-target="end"><small>结束日期</small><strong>${escape(item.periodEnd || '请选择')}</strong></button></div><div class="upload-calendar-head"><button type="button" data-upload-date-month="-1" aria-label="上个月">&#8249;</button><strong>${year} 年 ${monthIndex + 1} 月</strong><button type="button" data-upload-date-month="1" aria-label="下个月">&#8250;</button></div><div class="upload-calendar-week"><span>一</span><span>二</span><span>三</span><span>四</span><span>五</span><span>六</span><span>日</span></div><div class="upload-calendar-days">${blanks}${days}</div><footer><button type="button" class="btn text tiny" data-upload-date-today>今天</button><button type="button" class="btn primary tiny" data-upload-date-apply>确认日期</button></footer></section>` : ''}</div>`;
 }
 function uploadModal(mode) {
-  const model = operationsModel(); const upload = state.upload; const stores = model?.stores || [];
-  const ready = upload.file && upload.type && upload.storeName && upload.periodStart && upload.periodEnd;
+  const model = operationsModel(); const upload = state.upload; const stores = model?.stores || []; const active = activeUploadItem(); const busy = ['recognizing', 'uploading'].includes(upload.status);
+  const pendingItems = upload.files.filter((item) => item.status !== 'success'); const ready = pendingItems.length > 0 && pendingItems.every(uploadItemReady) && upload.storeName;
   const storeField = mode === 'cloud'
     ? uploadSelectMenu('storeName', upload.storeName, stores.map((store) => ({ value: store.name, label: store.name })), '选择店铺')
     : `<input id="upload-store" required list="upload-stores" value="${escape(upload.storeName)}" placeholder="输入或选择店铺" /><datalist id="upload-stores">${stores.map((store) => `<option value="${escape(store.name)}"></option>`).join('')}</datalist>`;
-  const typeField = uploadSelectMenu('type', upload.type, [{ value: 'category', label: '品类 360' }, { value: 'product', label: '商品排行' }, { value: 'campaign', label: '单品付费' }], '请选择');
-  const periodField = uploadSelectMenu('periodKind', upload.periodKind, [{ value: 'day', label: '日报' }, { value: 'week', label: '周报' }, { value: 'month', label: '月报' }, { value: 'custom', label: '自定义周期' }], '选择统计口径');
-  const fileHint = upload.preview
-    ? `已识别 ${upload.preview.rowCount || 0} 行${upload.preview.detectedType ? ` · 建议类型：${TYPE_LABELS[upload.preview.detectedType] || upload.preview.detectedType}` : ''}${upload.preview.period ? ` · 统计 ${escape(upload.preview.period.start)} 至 ${escape(upload.preview.period.end)}` : ''}`
-    : '上传前不会写入任何数据';
-  return `<div class="modal"><section class="modal-card upload-modal"><header class="modal-head"><div><h3>${mode === 'cloud' ? '上传团队云报表' : '导入本地浏览器报表'}</h3><p>选择文件后先识别报表类型、行数和真实统计周期；可人工修改后再写入数据仓。</p></div><button class="btn text" data-close-modal>关闭</button></header><form id="report-upload" class="modal-body" data-mode="${mode}"><label class="drop-field"><span>报表文件</span><input id="report-file" type="file" accept=".xls,.xlsx,.xlsm,.xlsb,.ods,.csv,.tsv,.txt,.json" /> <b>${upload.file ? escape(upload.file.name) : '选择 Excel / CSV / TSV / JSON 文件'}</b><small>${fileHint}</small></label><div class="form-grid two"><div class="field"><span>归属店铺</span>${storeField}</div><div class="field"><span>数据表</span>${typeField}</div><div class="field"><span>统计口径</span>${periodField}</div><label class="field"><span>来源备注</span><input id="upload-source-name" value="${escape(upload.sourceName || (mode === 'cloud' ? '网页运营工作台' : '浏览器本地导入'))}" /></label><div class="field date-range-field"><span>统计日期</span>${uploadDateRangePicker()}</div></div>${mode === 'cloud' && !stores.length ? '<div class="data-warning">云端团队还没有店铺。请先到团队管理新增店铺。</div>' : ''}<div class="modal-actions"><button id="submit-report-upload" class="btn primary" type="submit" ${ready ? '' : 'disabled'}>${mode === 'cloud' ? '上传并入库' : '仅保存到本地浏览器'}</button><button class="btn secondary" type="button" data-close-modal>取消</button></div></form></section></div>`;
+  const fileHint = upload.status === 'recognizing' ? `正在逐份识别报表，已完成 ${upload.files.filter((item) => item.status !== 'recognizing').length} / ${upload.files.length} 份`
+    : upload.status === 'uploading' ? `正在逐份写入数据仓，已完成 ${upload.files.filter((item) => item.status === 'success').length} / ${upload.files.length} 份`
+    : upload.status === 'partial' || upload.status === 'error' ? upload.error || '部分文件处理失败，请检查标红项目。'
+    : upload.files.length ? `已选择 ${upload.files.length} 份报表，可继续添加文件` : '可一次选择多份 Excel / CSV / TSV / JSON 文件';
+  const progress = ['recognizing', 'uploading'].includes(upload.status) ? `<div class="upload-progress" role="status" aria-live="polite"><div><span>${escape(fileHint)}</span><b>${Math.round(upload.progress || 0)}%</b></div><i><b style="width:${Math.max(4, Math.min(100, upload.progress || 0))}%"></b></i></div>` : '';
+  const fileRows = upload.files.map((item) => {
+    const [statusLabel, statusClass] = uploadItemStatus(item); const selected = active?.id === item.id; const type = TYPE_LABELS[item.type] || item.type || '待选数据表'; const period = item.periodStart && item.periodEnd ? `${item.periodStart}${item.periodStart === item.periodEnd ? '' : ` 至 ${item.periodEnd}`}` : '待补统计日期';
+    return `<div class="upload-batch-row ${selected ? 'active' : ''} ${statusClass}"><button type="button" class="upload-batch-main" data-select-upload-item="${escape(item.id)}"><span class="upload-file-index">${upload.files.indexOf(item) + 1}</span><div><strong>${escape(item.file.name)}</strong><small>${escape(type)} · ${escape(PERIOD_LABELS[item.periodKind] || item.periodKind || '待选口径')} · ${escape(period)}${item.preview?.rowCount ? ` · ${item.preview.rowCount} 行` : ''}</small>${item.error ? `<em>${escape(item.error)}</em>` : ''}</div><b class="upload-file-status ${statusClass}">${statusLabel}</b></button>${item.status === 'success' || busy ? '' : `<button type="button" class="upload-file-remove" data-remove-upload-item="${escape(item.id)}" aria-label="移除 ${escape(item.file.name)}">×</button>`}</div>`;
+  }).join('');
+  const activeEditor = active?.status === 'success' ? `<section class="upload-item-editor upload-item-complete"><header><div><span>已完成</span><strong>${escape(active.file.name)}</strong></div><small>这份报表已经入库，不会在重试时重复上传。</small></header></section>` : active ? `<section class="upload-item-editor"><header><div><span>当前报表</span><strong>${escape(active.file.name)}</strong></div><small>类型、统计口径和日期仅应用于这一份文件</small></header><div class="form-grid two"><div class="field"><span>数据表</span>${uploadSelectMenu('type', active.type, [{ value: 'category', label: '品类 360' }, { value: 'product', label: '商品排行' }, { value: 'campaign', label: '单品付费' }], '请选择')}</div><div class="field"><span>统计口径</span>${uploadSelectMenu('periodKind', active.periodKind, [{ value: 'day', label: '日报' }, { value: 'week', label: '周报' }, { value: 'month', label: '月报' }, { value: 'custom', label: '自定义周期' }], '选择统计口径')}</div><div class="field date-range-field"><span>统计日期</span>${uploadDateRangePicker(active)}</div></div></section>` : '<div class="upload-batch-empty">选择多份报表后，会在这里逐份显示识别结果。</div>';
+  const uploadLabel = upload.status === 'uploading' ? `正在入库 ${Math.max(1, upload.files.findIndex((item) => item.status === 'uploading') + 1)} / ${upload.files.length}` : pendingItems.some((item) => item.status === 'upload-error') ? `重试 ${pendingItems.length} 份失败报表` : mode === 'cloud' ? `批量上传 ${pendingItems.length} 份并入库` : `批量保存 ${pendingItems.length} 份到本地`;
+  return `<div class="modal"><section class="modal-card upload-modal batch-upload-modal"><header class="modal-head"><div><h3>${mode === 'cloud' ? '批量上传团队云报表' : '批量导入本地浏览器报表'}</h3><p>统一选择店铺，系统逐份识别数据表和统计日期；点击文件可单独修正后一次入库。</p></div><button class="btn text" data-close-modal ${busy ? 'disabled' : ''}>关闭</button></header><form id="report-upload" class="modal-body" data-mode="${mode}"><label class="drop-field ${upload.status === 'partial' || upload.status === 'error' ? 'error' : ''}"><span>批量选择报表</span><input id="report-file" type="file" multiple accept=".xls,.xlsx,.xlsm,.xlsb,.ods,.csv,.tsv,.txt,.json" ${busy ? 'disabled' : ''} /> <b>${upload.files.length ? `继续添加报表（当前 ${upload.files.length} 份）` : '一次选择多份报表'}</b><small>${fileHint}</small></label>${progress}<div class="upload-shared-fields"><div class="field"><span>统一归属店铺</span>${storeField}${mode === 'cloud' && upload.storeName ? '<small class="upload-field-hint">已识别当前团队店铺，可手动修改</small>' : ''}</div><label class="field"><span>统一来源备注</span><input id="upload-source-name" value="${escape(upload.sourceName || (mode === 'cloud' ? '网页运营工作台' : '浏览器本地导入'))}" /></label></div>${upload.files.length ? `<div class="upload-batch-summary"><span>文件清单</span><b>${upload.files.filter((item) => item.status === 'success').length} 已入库 · ${upload.files.filter(uploadItemReady).length} 待入库 · ${upload.files.filter((item) => ['preview-error', 'upload-error'].includes(item.status)).length} 异常</b></div><div class="upload-batch-list">${fileRows}</div>` : ''}${activeEditor}${mode === 'cloud' && !stores.length ? '<div class="data-warning">云端团队还没有店铺。请先到团队管理新增店铺。</div>' : ''}<div class="modal-actions"><button id="submit-report-upload" class="btn primary" type="submit" ${ready && !busy ? '' : 'disabled'}>${uploadLabel}</button><button class="btn secondary" type="button" data-close-modal ${busy ? 'disabled' : ''}>${upload.files.some((item) => item.status === 'success') ? '完成' : '取消'}</button></div></form></section></div>`;
 }
 function platformTeamModal() {
   return `<div class="modal"><section class="modal-card"><header class="modal-head"><div><h3>创建店铺团队</h3><p>一个店铺对应一个独立团队；成员权限、数据和报表互相隔离。</p></div><button class="btn text" data-close-modal>关闭</button></header><form id="platform-team-form" class="modal-body"><div class="form-grid two"><label class="field"><span>店铺团队名称</span><input required name="name" placeholder="例如：华东运营店" /></label><label class="field"><span>授权方案</span><select name="plan"><option value="team">团队</option><option value="personal">个人</option></select></label><label class="field"><span>团队人数上限</span><input required name="memberLimit" type="number" min="2" max="500" value="6" /></label></div><div class="modal-actions"><button class="btn primary" type="submit">创建团队</button><button class="btn secondary" type="button" data-close-modal>取消</button></div></form></section></div>`;
@@ -879,7 +1061,7 @@ function prepareDesktopSyncPanel() {
 function shell() {
   let view = state.page === 'team' ? enhancedTeamView() : state.page === 'platform' ? platformAdminView() : (state.mode === 'cloud' ? cloudOperationsView() : localOperationsView());
   const activity = state.activity ? `<div class="activity-dock ${state.activity.phase}" role="status" aria-live="polite"><i></i><div><strong>${state.activity.phase === 'running' ? '正在处理' : state.activity.phase === 'success' ? '已完成' : '处理失败'}</strong><span>${escape(activityText(state.activity))}</span></div></div>` : '';
-  app.innerHTML = `<div class="app-shell">${topNav()}<main class="app-main">${view}</main>${activity}${state.toast ? `<div class="toast ${state.toast.error ? 'error' : ''}"><span>${escape(state.toast.message)}</span><button id="dismiss-toast">关闭</button></div>` : ''}${state.modal === 'upload' ? uploadModal(state.upload.mode) : state.modal === 'platform-team' ? platformTeamModal() : ''}</div>`;
+  app.innerHTML = `<div class="app-shell">${topNav()}<main class="app-main">${view}</main>${activity}${state.toast ? `<div class="toast ${state.toast.error ? 'error' : ''}"><span>${escape(state.toast.message)}</span><button id="dismiss-toast">关闭</button></div>` : ''}${state.modal === 'upload' ? uploadModal(state.upload.mode) : state.modal === 'platform-team' ? platformTeamModal() : ''}${customCardSettingsModal()}</div>`;
   prepareDesktopSyncPanel();
   bindShell();
   restoreEntityScroll();
@@ -901,8 +1083,8 @@ function localDetectedType(rows, fileName = '') {
   return '';
 }
 function periodKindForRange(start, end) { if (!start || !end || start > end) return 'custom'; if (start === end) return 'day'; const first = new Date(`${start}T12:00:00`); const last = new Date(`${end}T12:00:00`); const days = Math.round((last - first) / 86_400_000) + 1; if (((first.getDay() + 6) % 7) === 0 && days === 7) return 'week'; if (first.getDate() === 1 && first.getMonth() === last.getMonth() && first.getFullYear() === last.getFullYear() && last.getDate() === new Date(last.getFullYear(), last.getMonth() + 1, 0).getDate()) return 'month'; return 'custom'; }
-async function importLocalUpload() {
-  const upload = state.upload; const file = upload.file; if (!(file instanceof File)) throw new Error('请选择报表文件。');
+async function importLocalUpload(item, upload = state.upload) {
+  const file = item?.file; if (!(file instanceof File)) throw new Error('请选择报表文件。');
   if (/\.json$/i.test(file.name)) {
     try {
       const backup = JSON.parse(await file.text());
@@ -921,8 +1103,8 @@ async function importLocalUpload() {
     }
   }
   const rows = spreadsheetRows(await file.arrayBuffer()); if (!rows.length) throw new Error('没有读取到可计算的数据行，请确认选择的是原始导出报表。');
-  const periodStart = String(upload.periodStart); const periodEnd = String(upload.periodEnd);
-  const report = { id: `local_${crypto.randomUUID()}`, type: String(upload.type), storeName: String(upload.storeName).trim(), periodKind: String(upload.periodKind), periodStart, periodEnd, periodLabel: periodStart === periodEnd ? periodStart : `${periodStart} 至 ${periodEnd}`, fileName: file.name, sourceName: String(upload.sourceName || ''), importedAt: new Date().toISOString(), rows: rows.map((row) => normalRow(row, upload.storeName)), rawFile: file };
+  const periodStart = String(item.periodStart); const periodEnd = String(item.periodEnd);
+  const report = { id: `local_${crypto.randomUUID()}`, type: String(item.type), storeName: String(upload.storeName).trim(), periodKind: String(item.periodKind), periodStart, periodEnd, periodLabel: periodStart === periodEnd ? periodStart : `${periodStart} 至 ${periodEnd}`, fileName: file.name, sourceName: String(upload.sourceName || ''), importedAt: new Date().toISOString(), rows: rows.map((row) => normalRow(row, upload.storeName)), rawFile: file };
   if (!report.storeName) throw new Error('请填写归属店铺。');
   await localPut(report); state.localReports = await localReadAll();
 }
@@ -943,23 +1125,16 @@ function exportCatalogWorkbook(rows, fileName) {
 function syncUploadDraftFromForm() {
   if (!document.querySelector('#report-upload')) return;
   const store = document.querySelector('#upload-store');
-  const type = document.querySelector('#upload-type');
-  const periodKind = document.querySelector('#upload-period-kind');
-  const periodStart = document.querySelector('#upload-period-start');
-  const periodEnd = document.querySelector('#upload-period-end');
   const sourceName = document.querySelector('#upload-source-name');
   if (store) state.upload.storeName = store.value.trim();
-  if (type) state.upload.type = type.value;
-  if (periodKind) state.upload.periodKind = periodKind.value || 'day';
-  if (periodStart) state.upload.periodStart = periodStart.value;
-  if (periodEnd) state.upload.periodEnd = periodEnd.value;
   if (sourceName) state.upload.sourceName = sourceName.value.trim();
 }
 function refreshUploadSubmitState() {
   const submit = document.querySelector('#submit-report-upload');
   if (!submit) return;
   const upload = state.upload;
-  submit.disabled = !(upload.file && upload.type && upload.storeName && upload.periodStart && upload.periodEnd && upload.periodStart <= upload.periodEnd);
+  const pending = upload.files.filter((item) => item.status !== 'success');
+  submit.disabled = !(upload.storeName && pending.length > 0 && pending.every(uploadItemReady) && !['recognizing', 'uploading'].includes(upload.status));
 }
 async function bootstrap() {
   state.bootstrapError = '';
@@ -999,39 +1174,79 @@ function bindShell() {
   document.querySelectorAll('[data-date-preset]').forEach((button) => button.addEventListener('click', async () => { const preset = button.dataset.datePreset; state.datePreset = preset; if (preset === 'custom') { state.customScopeOpen = true; render(); return; } state.customScopeOpen = false; await applyScope(dateRangeForPreset(preset)).catch((error) => setToast(error.message, true)); render(); }));
   document.querySelector('#apply-custom-scope')?.addEventListener('click', async () => { const start = document.querySelector('#filter-start')?.value || ''; const end = document.querySelector('#filter-end')?.value || ''; if (!start || !end || start > end) return setToast('请选择有效的自定义统计日期。', true); state.datePreset = 'custom'; state.customScopeOpen = false; await applyScope({ start, end }).catch((error) => setToast(error.message, true)); render(); });
   document.querySelector('#apply-filters')?.addEventListener('click', async () => { const period = document.querySelector('#filter-period-kind')?.value || 'auto'; const storeName = document.querySelector('#filter-store')?.value || ''; await applyScope({ sourcePeriodKind: period, storeName }).catch((error) => setToast(error.message, true)); render(); });
-  document.querySelectorAll('[data-open-upload]').forEach((button) => button.addEventListener('click', () => { const mode = button.dataset.openUpload; state.upload = { mode, file: null, preview: null, type: '', storeName: state.filters.storeName || '', periodKind: 'day', periodStart: state.filters.start || '', periodEnd: state.filters.end || '', sourceName: mode === 'cloud' ? '网页运营工作台' : '浏览器本地导入', openMenu: '', dateSelecting: 'start', calendarMonth: (state.filters.start || state.filters.end || utcDate()).slice(0, 7) }; state.modal = 'upload'; render(); }));
+  document.querySelectorAll('[data-open-upload]').forEach((button) => button.addEventListener('click', () => { const mode = button.dataset.openUpload; state.upload = { mode, files: [], activeId: '', storeName: defaultUploadStoreName(mode), sourceName: mode === 'cloud' ? '网页运营工作台' : '浏览器本地导入', openMenu: '', dateSelecting: 'start', calendarMonth: (state.filters.start || state.filters.end || utcDate()).slice(0, 7), status: 'idle', progress: 0, error: '' }; state.modal = 'upload'; render(); }));
   document.querySelectorAll('[data-close-modal]').forEach((button) => button.addEventListener('click', () => { state.modal = ''; render(); }));
   document.querySelector('.modal-card')?.addEventListener('pointerdown', (event) => event.stopPropagation());
   document.querySelector('.modal-card')?.addEventListener('click', (event) => event.stopPropagation());
   document.querySelectorAll('[data-upload-menu]').forEach((button) => button.addEventListener('click', (event) => { event.preventDefault(); const id = event.currentTarget.dataset.uploadMenu; state.upload.openMenu = state.upload.openMenu === id ? '' : id; render(); }));
-  document.querySelector('[data-upload-date-menu]')?.addEventListener('click', (event) => { event.preventDefault(); if (!state.upload.calendarMonth) state.upload.calendarMonth = (state.upload.periodStart || state.upload.periodEnd || utcDate()).slice(0, 7); state.upload.openMenu = state.upload.openMenu === 'dateRange' ? '' : 'dateRange'; render(); });
+  document.querySelector('[data-upload-date-menu]')?.addEventListener('click', (event) => { event.preventDefault(); const item = activeUploadItem(); if (!item) return; if (!state.upload.calendarMonth) state.upload.calendarMonth = (item.periodStart || item.periodEnd || utcDate()).slice(0, 7); state.upload.openMenu = state.upload.openMenu === 'dateRange' ? '' : 'dateRange'; render(); });
   document.querySelectorAll('[data-upload-date-target]').forEach((button) => button.addEventListener('click', (event) => { state.upload.dateSelecting = event.currentTarget.dataset.uploadDateTarget; render(); }));
   document.querySelectorAll('[data-upload-date-month]').forEach((button) => button.addEventListener('click', (event) => { const month = uploadCalendarMonth(state.upload.calendarMonth); month.setMonth(month.getMonth() + Number(event.currentTarget.dataset.uploadDateMonth)); state.upload.calendarMonth = utcDate(month).slice(0, 7); render(); }));
-  document.querySelector('[data-upload-date-today]')?.addEventListener('click', () => { const today = utcDate(); state.upload.periodStart = today; state.upload.periodEnd = today; state.upload.dateSelecting = 'start'; state.upload.calendarMonth = today.slice(0, 7); refreshUploadSubmitState(); render(); });
-  document.querySelectorAll('[data-upload-date]').forEach((button) => button.addEventListener('click', (event) => { const value = event.currentTarget.dataset.uploadDate; if (state.upload.dateSelecting === 'end' && state.upload.periodStart) { if (value < state.upload.periodStart) { state.upload.periodEnd = state.upload.periodStart; state.upload.periodStart = value; } else { state.upload.periodEnd = value; } state.upload.dateSelecting = 'start'; } else { state.upload.periodStart = value; state.upload.periodEnd = ''; state.upload.dateSelecting = 'end'; } refreshUploadSubmitState(); render(); }));
-  document.querySelector('[data-upload-date-apply]')?.addEventListener('click', () => { if (!state.upload.periodStart || !state.upload.periodEnd) return setToast('请在日历中选择开始和结束日期。', true); state.upload.openMenu = ''; refreshUploadSubmitState(); render(); });
-  document.querySelectorAll('[data-upload-select]').forEach((button) => button.addEventListener('click', (event) => { event.preventDefault(); const field = event.currentTarget.dataset.uploadSelect; if (!['storeName', 'type', 'periodKind'].includes(field)) return; state.upload[field] = event.currentTarget.dataset.uploadValue || ''; state.upload.openMenu = ''; render(); }));
+  document.querySelector('[data-upload-date-today]')?.addEventListener('click', () => { const item = activeUploadItem(); if (!item) return; const today = utcDate(); updateUploadItem(item.id, { periodStart: today, periodEnd: today, periodKind: 'day' }); state.upload.dateSelecting = 'start'; state.upload.calendarMonth = today.slice(0, 7); refreshUploadSubmitState(); render(); });
+  document.querySelectorAll('[data-upload-date]').forEach((button) => button.addEventListener('click', (event) => { const item = activeUploadItem(); if (!item) return; const value = event.currentTarget.dataset.uploadDate; let periodStart = item.periodStart; let periodEnd = item.periodEnd; if (state.upload.dateSelecting === 'end' && periodStart) { if (value < periodStart) { periodEnd = periodStart; periodStart = value; } else periodEnd = value; state.upload.dateSelecting = 'start'; } else { periodStart = value; periodEnd = ''; state.upload.dateSelecting = 'end'; } updateUploadItem(item.id, { periodStart, periodEnd, periodKind: periodEnd ? periodKindForRange(periodStart, periodEnd) : item.periodKind }); refreshUploadSubmitState(); render(); }));
+  document.querySelector('[data-upload-date-apply]')?.addEventListener('click', () => { const item = activeUploadItem(); if (!item?.periodStart || !item?.periodEnd) return setToast('请在日历中选择开始和结束日期。', true); state.upload.openMenu = ''; refreshUploadSubmitState(); render(); });
+  document.querySelectorAll('[data-upload-select]').forEach((button) => button.addEventListener('click', (event) => { event.preventDefault(); const field = event.currentTarget.dataset.uploadSelect; const value = event.currentTarget.dataset.uploadValue || ''; if (field === 'storeName') state.upload.storeName = value; else if (['type', 'periodKind'].includes(field)) { const item = activeUploadItem(); if (item) updateUploadItem(item.id, { [field]: value }); } else return; state.upload.openMenu = ''; render(); }));
   document.querySelector('#report-upload')?.addEventListener('input', () => { syncUploadDraftFromForm(); refreshUploadSubmitState(); });
   document.querySelector('#report-upload')?.addEventListener('change', () => { syncUploadDraftFromForm(); refreshUploadSubmitState(); });
-  document.querySelector('#report-file')?.addEventListener('change', async (event) => { const file = event.currentTarget.files?.[0]; if (!file) return; try { state.upload.file = file; if (state.upload.mode === 'cloud') { const form = new FormData(); form.append('file', file, file.name); state.upload.preview = await api(`/api/teams/${state.workspace.team.id}/reports/preview`, { method: 'POST', body: form }); } else { const rows = spreadsheetRows(await file.arrayBuffer()); state.upload.preview = { rowCount: rows.length, detectedType: localDetectedType(rows, file.name), period: null }; } const preview = state.upload.preview; if (preview.detectedType) state.upload.type = preview.detectedType; if (preview.period) { state.upload.periodStart = preview.period.start; state.upload.periodEnd = preview.period.end; state.upload.periodKind = periodKindForRange(preview.period.start, preview.period.end); state.upload.calendarMonth = preview.period.start.slice(0, 7); } state.upload.openMenu = ''; render(); } catch (error) { state.upload.file = null; state.upload.preview = null; setToast(error.message, true); } });
+  document.querySelectorAll('[data-select-upload-item]').forEach((button) => button.addEventListener('click', () => { const item = state.upload.files.find((candidate) => candidate.id === button.dataset.selectUploadItem); if (!item) return; state.upload.activeId = item.id; state.upload.openMenu = ''; state.upload.dateSelecting = 'start'; state.upload.calendarMonth = (item.periodStart || item.periodEnd || utcDate()).slice(0, 7); render(); }));
+  document.querySelectorAll('[data-remove-upload-item]').forEach((button) => button.addEventListener('click', () => { const id = button.dataset.removeUploadItem; state.upload.files = state.upload.files.filter((item) => item.id !== id); if (state.upload.activeId === id) state.upload.activeId = state.upload.files[0]?.id || ''; const failed = state.upload.files.filter((item) => item.status === 'preview-error').length; state.upload.status = failed ? 'error' : state.upload.files.length ? 'ready' : 'idle'; state.upload.error = failed ? `${failed} 份文件识别失败，请查看文件清单。` : ''; state.upload.progress = state.upload.files.length ? 100 : 0; render(); }));
+  document.querySelector('#report-file')?.addEventListener('change', async (event) => {
+    const selectedFiles = [...(event.currentTarget.files || [])]; if (!selectedFiles.length) return;
+    const known = new Set(state.upload.files.map((item) => `${item.file.name}\u0000${item.file.size}\u0000${item.file.lastModified}`));
+    const defaults = { periodKind: state.filters.start && state.filters.end ? periodKindForRange(state.filters.start, state.filters.end) : 'day', periodStart: state.filters.start || '', periodEnd: state.filters.end || '' };
+    const additions = selectedFiles.filter((file) => !known.has(`${file.name}\u0000${file.size}\u0000${file.lastModified}`)).map((file) => ({ id: `upload_${crypto.randomUUID()}`, file, preview: null, type: '', ...defaults, status: 'recognizing', error: '' }));
+    if (!additions.length) return setToast('这些文件已经在批量清单中。', true);
+    state.upload.files = [...state.upload.files, ...additions]; if (!state.upload.activeId) state.upload.activeId = additions[0].id; state.upload.status = 'recognizing'; state.upload.progress = 4; state.upload.error = ''; render();
+    for (let index = 0; index < additions.length; index += 1) {
+      const item = additions[index];
+      try {
+        let preview;
+        if (state.upload.mode === 'cloud') { const form = new FormData(); form.append('file', item.file, item.file.name); preview = await api(`/api/teams/${state.workspace.team.id}/reports/preview`, { method: 'POST', body: form }); }
+        else { const rows = spreadsheetRows(await item.file.arrayBuffer()); if (!rows.length) throw new Error('没有读取到可计算的数据行。'); preview = { rowCount: rows.length, detectedType: localDetectedType(rows, item.file.name), period: null }; }
+        const dates = preview.period ? { periodStart: preview.period.start, periodEnd: preview.period.end, periodKind: periodKindForRange(preview.period.start, preview.period.end) } : {};
+        updateUploadItem(item.id, { preview, type: preview.detectedType || '', ...dates, status: 'ready', error: '' });
+      } catch (error) { updateUploadItem(item.id, { status: 'preview-error', error: error.message || '文件识别失败，请移除后重新选择。' }); }
+      state.upload.progress = Math.round(((index + 1) / additions.length) * 100); render();
+    }
+    const firstNeedsReview = state.upload.files.find((item) => !uploadItemReady(item) && item.status !== 'success'); if (firstNeedsReview) state.upload.activeId = firstNeedsReview.id;
+    const failed = state.upload.files.filter((item) => item.status === 'preview-error').length; state.upload.status = failed ? 'error' : 'ready'; state.upload.error = failed ? `${failed} 份文件识别失败，请查看文件清单。` : ''; state.upload.progress = 100; render();
+  });
   document.querySelector('#report-upload')?.addEventListener('submit', async (event) => {
-    event.preventDefault(); const mode = event.currentTarget.dataset.mode; syncUploadDraftFromForm(); const upload = { ...state.upload };
+    event.preventDefault(); const mode = event.currentTarget.dataset.mode; syncUploadDraftFromForm(); const upload = { ...state.upload }; const items = upload.files.filter((item) => item.status !== 'success');
     try {
-      if (!upload.file || !upload.type || !upload.storeName || !upload.periodStart || !upload.periodEnd || upload.periodStart > upload.periodEnd) throw new Error('请完成文件预检、店铺、数据表和有效统计日期。');
-      const response = await runActivity(mode === 'cloud' ? '正在上传并计算团队报表' : '正在导入并计算本地报表', async () => {
-        if (mode === 'local') { await importLocalUpload(); return { message: '本地报表已入库并完成公式计算。' }; }
-        const store = state.workspace.stores.find((item) => item.name === upload.storeName); if (!store) throw new Error('云端报表请先在团队管理中新增或选择归属店铺。');
-        const form = new FormData(); form.append('file', upload.file, upload.file.name); form.append('storeId', store.id); form.append('type', upload.type); form.append('periodKind', upload.periodKind); form.append('periodStart', upload.periodStart); form.append('periodEnd', upload.periodEnd); form.append('reportDate', upload.periodEnd); form.append('sourceName', upload.sourceName);
-        const result = await api(`/api/teams/${state.workspace.team.id}/reports`, { method: 'POST', body: form }); await loadCloudWorkspace(); return result;
+      if (!upload.storeName || !items.length || !items.every(uploadItemReady)) throw new Error('请完成店铺选择，并补齐每份报表的数据表、统计口径和有效日期。');
+      const store = mode === 'cloud' ? state.workspace.stores.find((candidate) => candidate.name === upload.storeName) : null; if (mode === 'cloud' && !store) throw new Error('云端报表请先在团队管理中新增或选择归属店铺。');
+      state.upload.status = 'uploading'; state.upload.progress = 0; state.upload.error = ''; render();
+      await runActivity(mode === 'cloud' ? `正在批量上传 ${items.length} 份团队报表` : `正在批量导入 ${items.length} 份本地报表`, async () => {
+        for (let index = 0; index < items.length; index += 1) {
+          const item = items[index]; updateUploadItem(item.id, { status: 'uploading', error: '' }); state.upload.activeId = item.id; state.upload.progress = Math.round((index / items.length) * 100); render();
+          try {
+            if (mode === 'local') await importLocalUpload(item, upload);
+            else {
+              const form = new FormData(); form.append('file', item.file, item.file.name); form.append('storeId', store.id); form.append('type', item.type); form.append('periodKind', item.periodKind); form.append('periodStart', item.periodStart); form.append('periodEnd', item.periodEnd); form.append('reportDate', item.periodEnd); form.append('sourceName', upload.sourceName);
+              await api(`/api/teams/${state.workspace.team.id}/reports`, { method: 'POST', body: form });
+            }
+            updateUploadItem(item.id, { status: 'success', error: '' });
+          } catch (error) { updateUploadItem(item.id, { status: 'upload-error', error: error.message || '上传入库失败，请重试。' }); }
+          state.upload.progress = Math.round(((index + 1) / items.length) * 100); render();
+        }
+        if (mode === 'cloud') await loadCloudWorkspace(); else state.localReports = await localReadAll();
       });
-      state.modal = ''; setToast(response.message || '报表已上传并参与团队计算。'); render();
-    } catch (error) { setToast(error.message, true); }
+      const failed = state.upload.files.filter((item) => item.status === 'upload-error'); const successCount = state.upload.files.filter((item) => item.status === 'success').length;
+      if (failed.length) { state.upload.status = 'partial'; state.upload.activeId = failed[0].id; state.upload.error = `${successCount} 份已入库，${failed.length} 份失败。修正后可直接重试失败项。`; setToast(state.upload.error, true); render(); }
+      else { state.modal = ''; setToast(`${successCount} 份报表已批量入库并参与团队计算。`); render(); }
+    } catch (error) { state.upload.status = 'error'; state.upload.progress = 0; state.upload.error = error.message || '批量上传失败。'; render(); }
   });
   document.querySelectorAll('[data-delete-report]').forEach((button) => button.addEventListener('click', async () => { if (!window.confirm('确认删除这份报表？')) return; try { await runActivity('正在删除报表并重新计算', async () => { if (state.mode === 'cloud') { await api(`/api/teams/${state.workspace.team.id}/reports/${button.dataset.deleteReport}`, { method: 'DELETE' }); await loadCloudWorkspace(); } else { await localDelete(button.dataset.deleteReport); state.localReports = await localReadAll(); } }); state.archiveUi.selectedIds = state.archiveUi.selectedIds.filter((id) => id !== button.dataset.deleteReport); setToast('报表已删除。'); render(); } catch (error) { setToast(error.message, true); } }));
   document.querySelectorAll('[data-delete-local]').forEach((button) => button.addEventListener('click', async () => { if (!window.confirm('仅删除此浏览器中的本地副本，确定继续？')) return; await localDelete(button.dataset.deleteLocal); state.localReports = await localReadAll(); render(); }));
   document.querySelector('#export-local')?.addEventListener('click', () => downloadJson(`运营数据本地备份_${new Date().toISOString().slice(0, 10)}.json`, { reports: state.localReports.map(({ rawFile, ...report }) => report), metadata: state.localMeta }));
   document.querySelector('#clear-local')?.addEventListener('click', async () => { if (!window.confirm('将清空当前浏览器的全部本地报表、商品资料和销售扣除。确定继续？')) return; await localClear(); state.localReports = []; state.localMeta = { productCatalog: [], productCatalogSource: { fileName: '', updatedAt: null }, salesDeductions: [] }; await localPutMeta(state.localMeta); render(); });
   document.querySelectorAll('[data-trend-toggle]').forEach((button) => button.addEventListener('click', () => { const metricName = button.dataset.trendToggle; state.trendMetrics = state.trendMetrics.includes(metricName) ? (state.trendMetrics.length > 1 ? state.trendMetrics.filter((item) => item !== metricName) : state.trendMetrics) : [...state.trendMetrics, metricName]; render(); }));
+  document.querySelectorAll('[data-card-settings]').forEach((button) => button.addEventListener('click', () => { state.cardUi.openPanel = button.dataset.cardSettings; render(); }));
+  document.querySelectorAll('[data-close-card-settings]').forEach((button) => button.addEventListener('click', () => { state.cardUi.openPanel = ''; render(); }));
+  document.querySelector('[data-add-custom-card]')?.addEventListener('click', () => { const panel = state.cardUi.openPanel; const cards = loadCustomCards(panel); const used = new Set(cards.map((card) => card.metricId)); const metric = CUSTOM_METRICS.find((item) => !used.has(item.id)); if (!metric || cards.length >= 6) return; saveCustomCards(panel, [...cards, { id: `${panel}_${crypto.randomUUID()}`, metricId: metric.id }]); render(); });
+  document.querySelectorAll('[data-card-delete]').forEach((button) => button.addEventListener('click', () => { const panel = state.cardUi.openPanel; saveCustomCards(panel, loadCustomCards(panel).filter((card) => card.id !== button.dataset.cardDelete)); render(); }));
+  document.querySelectorAll('[data-card-metric]').forEach((select) => select.addEventListener('change', () => { const panel = state.cardUi.openPanel; saveCustomCards(panel, loadCustomCards(panel).map((card) => card.id === select.dataset.cardMetric ? { ...card, metricId: select.value } : card)); render(); }));
   document.querySelectorAll('[data-entity-keyword]').forEach((input) => input.addEventListener('input', (event) => { state.entityUi[event.currentTarget.dataset.entityKeyword].keyword = event.currentTarget.value; render(); }));
   document.querySelectorAll('[data-entity-filter-toggle]').forEach((button) => button.addEventListener('click', () => { const { kind, key: field } = parseEntityTarget(button.dataset.entityFilterToggle); const ui = state.entityUi[kind]; if (!ui || !['category', 'model'].includes(field)) return; ui.filterMenu = ui.filterMenu === field ? '' : field; render(); }));
   document.querySelectorAll('[data-entity-filter-query]').forEach((input) => input.addEventListener('input', (event) => { const { kind, key: field } = parseEntityTarget(event.currentTarget.dataset.entityFilterQuery); const ui = state.entityUi[kind]; if (!ui || !['category', 'model'].includes(field)) return; const config = entityFilterConfig(field); ui[config.query] = event.currentTarget.value; ui.filterMenu = field; renderWithEntityFilterFocus(kind, field, event.currentTarget.selectionStart ?? event.currentTarget.value.length); }));
@@ -1045,8 +1260,10 @@ function bindShell() {
   document.querySelectorAll('[data-warehouse-panel]').forEach((button) => button.addEventListener('click', () => { state.warehousePanel = button.dataset.warehousePanel; render(); }));
   document.querySelector('#archive-type')?.addEventListener('change', (event) => { state.archiveUi.type = event.currentTarget.value; state.archiveUi.selectedIds = []; render(); });
   document.querySelector('#archive-store')?.addEventListener('change', (event) => { state.archiveUi.storeName = event.currentTarget.value; state.archiveUi.selectedIds = []; render(); });
+  document.querySelectorAll('[data-toggle-store-group]').forEach((button) => button.addEventListener('click', () => { state.archiveUi.expandedStore = state.archiveUi.expandedStore === button.dataset.toggleStoreGroup ? '' : button.dataset.toggleStoreGroup; state.archiveUi.expandedDate = ''; render(); }));
   document.querySelectorAll('[data-toggle-report-group]').forEach((button) => button.addEventListener('click', () => { state.archiveUi.expandedDate = state.archiveUi.expandedDate === button.dataset.toggleReportGroup ? '' : button.dataset.toggleReportGroup; render(); }));
-  document.querySelectorAll('[data-select-report-group]').forEach((input) => input.addEventListener('change', (event) => { const model = operationsModel(); const ids = groupedWarehouseReports((model.warehouse || []).filter((report) => (state.archiveUi.type === 'all' || report.type === state.archiveUi.type) && (!state.archiveUi.storeName || report.storeName === state.archiveUi.storeName))).find((group) => group.key === event.currentTarget.dataset.selectReportGroup)?.reports.filter((report) => report.status === 'active').map((report) => report.id) || []; const selected = new Set(state.archiveUi.selectedIds); for (const id of ids) { if (event.currentTarget.checked) selected.add(id); else selected.delete(id); } state.archiveUi.selectedIds = [...selected]; render(); }));
+  document.querySelectorAll('[data-select-store-group]').forEach((input) => input.addEventListener('change', (event) => { const model = operationsModel(); const groups = groupedWarehouseReports((model.warehouse || []).filter((report) => (state.archiveUi.type === 'all' || report.type === state.archiveUi.type) && (!state.archiveUi.storeName || report.storeName === state.archiveUi.storeName))); const ids = groups.find((group) => group.key === event.currentTarget.dataset.selectStoreGroup)?.reports.filter((report) => report.status === 'active').map((report) => report.id) || []; const selected = new Set(state.archiveUi.selectedIds); for (const id of ids) { if (event.currentTarget.checked) selected.add(id); else selected.delete(id); } state.archiveUi.selectedIds = [...selected]; render(); }));
+  document.querySelectorAll('[data-select-report-group]').forEach((input) => input.addEventListener('change', (event) => { const model = operationsModel(); const groups = groupedWarehouseReports((model.warehouse || []).filter((report) => (state.archiveUi.type === 'all' || report.type === state.archiveUi.type) && (!state.archiveUi.storeName || report.storeName === state.archiveUi.storeName))); const ids = groups.flatMap((store) => store.dateGroups).find((group) => group.key === event.currentTarget.dataset.selectReportGroup)?.reports.filter((report) => report.status === 'active').map((report) => report.id) || []; const selected = new Set(state.archiveUi.selectedIds); for (const id of ids) { if (event.currentTarget.checked) selected.add(id); else selected.delete(id); } state.archiveUi.selectedIds = [...selected]; render(); }));
   document.querySelectorAll('[data-select-report]').forEach((input) => input.addEventListener('change', (event) => { const selected = new Set(state.archiveUi.selectedIds); if (event.currentTarget.checked) selected.add(event.currentTarget.dataset.selectReport); else selected.delete(event.currentTarget.dataset.selectReport); state.archiveUi.selectedIds = [...selected]; render(); }));
   document.querySelector('[data-clear-archive-selection]')?.addEventListener('click', () => { state.archiveUi.selectedIds = []; render(); });
   document.querySelector('[data-delete-selected-reports]')?.addEventListener('click', async () => { const ids = [...state.archiveUi.selectedIds]; if (!ids.length || !window.confirm(`确认删除已选 ${ids.length} 份报表？`)) return; try { await runActivity(`正在删除 ${ids.length} 份报表并重新计算`, async () => { if (state.mode === 'cloud') { for (const id of ids) await api(`/api/teams/${state.workspace.team.id}/reports/${id}`, { method: 'DELETE' }); await loadCloudWorkspace(); } else { for (const id of ids) await localDelete(id); state.localReports = await localReadAll(); } }); state.archiveUi.selectedIds = []; setToast('已删除选中的报表。'); render(); } catch (error) { setToast(error.message, true); } });
@@ -1056,6 +1273,35 @@ function bindShell() {
   document.querySelector('#bulk-assign-store')?.addEventListener('click', async () => { const storeId = document.querySelector('#bulk-store-id')?.value; if (!storeId) return setToast('请选择要归属的店铺。', true); try { await runActivity('正在调整报表归属并重新计算', async () => { await api(`/api/teams/${state.workspace.team.id}/reports/bulk-store`, { method: 'PATCH', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ ids: state.archiveUi.selectedIds, storeId }) }); await loadCloudWorkspace(); }); state.archiveUi.selectedIds = []; setToast('报表归属已批量调整并立即重算。'); render(); } catch (error) { setToast(error.message, true); } });
   document.querySelector('[data-toggle-catalog-create]')?.addEventListener('click', () => { state.catalogUi.showCreate = !state.catalogUi.showCreate; render(); });
   document.querySelector('[data-cancel-catalog-create]')?.addEventListener('click', () => { state.catalogUi.showCreate = false; render(); });
+  document.querySelector('[data-select-catalog-page]')?.addEventListener('change', (event) => {
+    const entries = latestCatalog(operationsModel().core.productCatalog || []); const pageSize = 50; const start = state.catalogUi.page * pageSize; const visibleIds = entries.slice(start, start + pageSize).map((entry) => entry.id); const selected = new Set(state.catalogUi.selectedIds);
+    for (const id of visibleIds) { if (event.currentTarget.checked) selected.add(id); else selected.delete(id); }
+    state.catalogUi.selectedIds = [...selected]; render();
+  });
+  document.querySelectorAll('[data-select-catalog]').forEach((input) => input.addEventListener('change', (event) => { const selected = new Set(state.catalogUi.selectedIds); const id = event.currentTarget.dataset.selectCatalog; if (event.currentTarget.checked) selected.add(id); else selected.delete(id); state.catalogUi.selectedIds = [...selected]; render(); }));
+  document.querySelectorAll('[data-catalog-bulk-field]').forEach((input) => input.addEventListener('input', (event) => { state.catalogUi[event.currentTarget.dataset.catalogBulkField] = event.currentTarget.value; }));
+  document.querySelector('[data-clear-catalog-selection]')?.addEventListener('click', () => { state.catalogUi.selectedIds = []; state.catalogUi.bulkStoreName = ''; state.catalogUi.bulkCategory = ''; state.catalogUi.bulkModel = ''; render(); });
+  document.querySelector('#catalog-bulk-edit')?.addEventListener('submit', async (event) => {
+    event.preventDefault();
+    const ids = [...state.catalogUi.selectedIds]; const changes = Object.fromEntries([['storeName', state.catalogUi.bulkStoreName.trim()], ['category', state.catalogUi.bulkCategory.trim()], ['model', state.catalogUi.bulkModel.trim()]].filter(([, value]) => value));
+    if (!ids.length) return setToast('请先勾选要修改的商品。', true);
+    if (!Object.keys(changes).length) return setToast('请至少填写一项要修改的内容，留空字段不会改变。', true);
+    try {
+      await runActivity(`正在批量更新 ${ids.length} 条商品资料`, async () => {
+        if (state.mode === 'cloud') {
+          await api(`/api/teams/${state.workspace.team.id}/product-catalog/bulk`, { method: 'PATCH', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ ids, changes }) });
+          await loadCloudWorkspace();
+        } else {
+          const currentEntries = latestCatalog(operationsModel().core.productCatalog || []); const currentById = new Map(currentEntries.map((entry) => [entry.id, entry])); const selected = ids.map((id) => currentById.get(id));
+          if (selected.some((entry) => !entry)) throw new Error('部分商品资料已更新，请刷新后重新选择。');
+          const createdAt = new Date().toISOString(); const updated = selected.map((entry) => ({ ...entry, ...changes, id: `catalog_${crypto.randomUUID()}`, replacesId: entry.id, sourceName: '网页批量维护', createdAt })); const selectedIds = new Set(ids); const proposed = [...currentEntries.filter((entry) => !selectedIds.has(entry.id)), ...updated]; const keys = new Set();
+          for (const entry of proposed) { const key = catalogKey(entry); if (keys.has(key)) throw new Error(`批量修改后“${entry.storeName} + ${entry.productId}”将重复，未保存任何修改。`); keys.add(key); }
+          state.localMeta = { ...state.localMeta, productCatalog: [...(state.localMeta.productCatalog || []), ...updated], productCatalogSource: { fileName: '网页批量维护', updatedAt: createdAt } }; await localPutMeta(state.localMeta);
+        }
+      });
+      const count = ids.length; state.catalogUi.selectedIds = []; state.catalogUi.bulkStoreName = ''; state.catalogUi.bulkCategory = ''; state.catalogUi.bulkModel = ''; setToast(`已批量更新 ${count} 条商品资料，商品排行和品类 360 已重新计算。`); render();
+    } catch (error) { setToast(error.message, true); }
+  });
   document.querySelector('[data-export-local-catalog]')?.addEventListener('click', async () => { try { await runActivity('正在导出当前商品资料', async () => exportCatalogWorkbook(latestCatalog(state.localMeta.productCatalog || []), `商品资料_${utcDate()}.xlsx`)); setToast('当前商品资料已导出。'); } catch (error) { setToast(error.message, true); } });
   document.querySelector('[data-clear-catalog]')?.addEventListener('click', async () => {
     const model = operationsModel(); const count = latestCatalog(model.core.productCatalog || []).length;
@@ -1065,7 +1311,7 @@ function bindShell() {
         if (state.mode === 'cloud') { await api(`/api/teams/${state.workspace.team.id}/product-catalog`, { method: 'DELETE' }); await loadCloudWorkspace(); }
         else { state.localMeta = { ...state.localMeta, productCatalog: [], productCatalogSource: { fileName: '', updatedAt: null } }; await localPutMeta(state.localMeta); }
       });
-      state.catalogUi.page = 0; setToast('商品资料已清空，商品排行和品类 360 已重新计算。'); render();
+      state.catalogUi.page = 0; state.catalogUi.selectedIds = []; setToast('商品资料已清空，商品排行和品类 360 已重新计算。'); render();
     } catch (error) { setToast(error.message, true); }
   });
   document.querySelector('#catalog-file')?.addEventListener('change', (event) => { state.catalogUi.file = event.currentTarget.files?.[0] || null; render(); });

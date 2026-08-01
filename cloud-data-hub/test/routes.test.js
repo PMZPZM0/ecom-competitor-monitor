@@ -5,6 +5,8 @@ import path from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 import * as XLSX from "xlsx";
+import { parseOperationsFile } from "../public/operationsCore.js";
+import { parseOperationsFile as parseBackendOperationsFile } from "../../server/services/operationsAssistantService.js";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const source = await fs.readFile(path.join(root, "server.js"), "utf8");
@@ -12,10 +14,23 @@ const appSource = await fs.readFile(path.join(root, "public", "app.js"), "utf8")
 const operationsCoreSource = await fs.readFile(path.join(root, "public", "operationsCore.js"), "utf8");
 const stylesSource = await fs.readFile(path.join(root, "public", "styles.css"), "utf8");
 const htmlSource = await fs.readFile(path.join(root, "public", "index.html"), "utf8");
+const localOperationsSource = await fs.readFile(path.join(root, "..", "src", "features", "operations", "OperationsAssistant.tsx"), "utf8");
+
+function latestProductCatalogEntriesForTest(entries = []) {
+  const replacedIds = new Set(entries.map((entry) => entry.replacesId).filter(Boolean));
+  const latest = new Map();
+  for (const entry of entries) {
+    if (replacedIds.has(entry.id)) continue;
+    const key = `${String(entry.storeName || "").trim().toLowerCase()}\u0000${String(entry.productId || "").trim()}`;
+    latest.set(key, entry);
+  }
+  return [...latest.values()];
+}
 
 test("the product brand and team cards expose a clear operating identity", () => {
   assert.match(htmlSource, /<title>经营罗盘 · 团队经营决策<\/title>/);
-  assert.match(htmlSource, /operations-web-30/);
+  assert.match(htmlSource, /auto-comparison-35/);
+  assert.match(appSource, /operationsCore\.js\?v=20260801-auto-comparison-8/);
   assert.match(appSource, /function brandLockup\(subtitle, compact = false\)/);
   assert.match(appSource, /<strong>经营罗盘<\/strong>/);
   assert.match(appSource, /function teamMemberCount\(team\)/);
@@ -46,6 +61,90 @@ test("upload dialog uses application-managed menus instead of browser-native sel
   assert.match(appSource, /document\.querySelector\('\.modal-card'\)\?\.addEventListener\('pointerdown', \(event\) => event\.stopPropagation\(\)\)/);
 });
 
+test("cloud report upload defaults to the current team's store and keeps manual selection", () => {
+  assert.match(appSource, /function defaultUploadStoreName\(mode\)/);
+  assert.match(appSource, /if \(mode === 'cloud' && stores\.length === 1\) return stores\[0\]\.name;/);
+  assert.match(appSource, /storeName: defaultUploadStoreName\(mode\)/);
+  assert.match(appSource, /uploadSelectMenu\('storeName', upload\.storeName/);
+  assert.match(appSource, /已识别当前团队店铺，可手动修改/);
+});
+
+test("report upload exposes batch recognition, per-file status, and retry feedback", () => {
+  assert.match(appSource, /type="file" multiple accept=/);
+  assert.match(appSource, /function activeUploadItem\(\)/);
+  assert.match(appSource, /function uploadItemReady\(item\)/);
+  assert.match(appSource, /data-select-upload-item=/);
+  assert.match(appSource, /data-remove-upload-item=/);
+  assert.match(appSource, /for \(let index = 0; index < additions\.length; index \+= 1\)/);
+  assert.match(appSource, /state\.upload\.status = 'recognizing'/);
+  assert.match(appSource, /state\.upload\.status = 'uploading'/);
+  assert.match(appSource, /status: 'upload-error'/);
+  assert.match(appSource, /status = 'partial'/);
+  assert.match(appSource, /修正后可直接重试失败项/);
+  assert.match(appSource, /class="upload-progress" role="status" aria-live="polite"/);
+  assert.match(stylesSource, /\.upload-progress \{ display: grid;/);
+  assert.match(stylesSource, /\.upload-batch-list \{ display: grid;/);
+  assert.match(stylesSource, /\.upload-item-editor \{ padding:/);
+});
+
+test("short UTF-8 promotion CSV keeps Chinese headers and is auto-detected", async () => {
+  const content = [
+    "统计日期,商品ID,推广类型,计划名称,花费,成交金额",
+    "2026-07-30,900001,全站推广,批量验收计划A,120,600",
+  ].join("\n");
+  const parsed = await parseOperationsFile({
+    buffer: Buffer.from(content, "utf8"),
+    originalname: "单品付费.csv",
+  });
+  assert.deepEqual(parsed.columns, ["统计日期", "商品ID", "推广类型", "计划名称", "花费", "成交金额"]);
+  assert.equal(parsed.detectedType, "campaign");
+  assert.deepEqual(parsed.period, { start: "2026-07-30", end: "2026-07-30", label: "2026-07-30" });
+  assert.equal(parsed.rows[0].productId, "900001");
+  assert.equal(parsed.rows[0].channel, "全站推广");
+
+  const backendParsed = await parseBackendOperationsFile({
+    buffer: Buffer.from(content, "utf8"),
+    originalname: "单品付费.csv",
+  });
+  assert.deepEqual(backendParsed.columns, parsed.columns);
+  assert.equal(backendParsed.detectedType, "campaign");
+  assert.deepEqual(backendParsed.period, parsed.period);
+});
+
+test("operations toolbar exposes a rolling seven-day daily aggregation shortcut", () => {
+  assert.match(appSource, /preset === 'last-7-days'/);
+  assert.match(appSource, /\['last-7-days', '近 7 日'\]/);
+  assert.match(appSource, /preset === 'last-15-days'/);
+  assert.match(appSource, /\['last-15-days', '近 15 日'\]/);
+});
+
+test("operations cards show inline comparisons and merge custom metrics into the existing grid", () => {
+  assert.match(appSource, /function managedMetricGrid\(panel, coreCards, visibleRows\)/);
+  assert.match(appSource, /function customCardSettingsModal\(\)/);
+  assert.match(appSource, /operations-custom-cards-v1:/);
+  assert.doesNotMatch(appSource, /operations-core-card-comparisons-v1:/);
+  assert.match(appSource, /metric-value-row/);
+  assert.match(appSource, /comparison-up/);
+  assert.match(appSource, /comparison-down/);
+  assert.doesNotMatch(appSource, /function customCardsBand\(/);
+  assert.match(appSource, /\['day', '日环比'\]/);
+  assert.match(appSource, /\['last15', '近 15 天'\]/);
+  assert.match(appSource, /function automaticComparisonId\(preset\)/);
+  assert.match(appSource, /comparisonBadges\(panel, card\.metricId, \[comparisonId\]/);
+  assert.doesNotMatch(appSource, /data-apply-global-comparisons/);
+  assert.match(appSource, /panel === 'store' \? card\.metricId : ''/);
+  assert.match(appSource, /trend-toggle-card/);
+  assert.match(operationsCoreSource, /function buildDashboardComparisons\(normalized, filters, fallbackEnd\)/);
+  assert.match(operationsCoreSource, /dashboard\.comparisons = buildDashboardComparisons/);
+});
+
+test("sales deduction warehouse keeps history separate from the active calculation scope", () => {
+  assert.match(operationsCoreSource, /salesDeductionHistory: state\.salesDeductions\.slice\(\)\.sort/);
+  assert.match(appSource, /model\.core\.salesDeductionHistory \|\| currentDeductions/);
+  assert.match(appSource, /当前口径/);
+  assert.match(appSource, /历史记录/);
+});
+
 test("normal login, invitation acceptance, and self-service team creation open operations data", () => {
   assert.match(appSource, /function openOperationsHome\(\) \{[\s\S]*state\.page = 'operations';[\s\S]*state\.activePanel = 'overview';/);
   assert.match(appSource, /if \(register\) \{ const result = await api\('\/api\/auth\/register'/);
@@ -55,7 +154,7 @@ test("normal login, invitation acceptance, and self-service team creation open o
 });
 
 test("upload dialog keeps the date range inside an application-managed calendar", () => {
-  assert.match(appSource, /function uploadDateRangePicker\(\)/);
+  assert.match(appSource, /function uploadDateRangePicker\(item = activeUploadItem\(\)\)/);
   assert.match(appSource, /data-upload-date-menu/);
   assert.match(appSource, /data-upload-date-apply/);
   assert.match(appSource, /data-upload-date-month/);
@@ -172,6 +271,8 @@ test("store overview ranks category sales and exposes sales and spend shares", (
   assert.match(appSource, /<small>花费占比<\/small>/);
   assert.match(appSource, /categoryContributionPanel\(dashboard\.categories\)/);
   assert.match(appSource, /const revenueShare = share\(row\.revenue, totalRevenue\); const spendShare = share\(row\.spend, totalSpend\)/);
+  assert.match(appSource, /scale\(row\.revenue, maxRevenue\)/);
+  assert.match(appSource, /scale\(row\.spend, maxSpend\)/);
   assert.match(stylesSource, /\.contribution-metric\.revenue > i b \{ background: #0f9f83; \}/);
   assert.match(stylesSource, /\.contribution-metric\.spend > i b \{ background: #3478d4; \}/);
 });
@@ -269,6 +370,19 @@ test("report upload and archive share one warehouse panel", () => {
   assert.doesNotMatch(appSource, /\['archive', '数据归档'/);
 });
 
+test("local and cloud archives group reports by store before newest statistics period", () => {
+  assert.match(localOperationsSource, /function groupReportsByStoreAndStatisticsDate\(/);
+  assert.match(localOperationsSource, /dateGroups: groupReportsByStatisticsDate\(storeReports\)/);
+  assert.match(localOperationsSource, /return right\.sortDate\.localeCompare\(left\.sortDate\)/);
+  assert.match(localOperationsSource, /店铺 · \{store\.label\}/);
+  assert.match(appSource, /dateGroups: \[\.\.\.store\.periods\.values\(\)\]/);
+  assert.match(appSource, /`\$\{b\.end\}\|\$\{b\.start\}`\.localeCompare\(`/);
+  assert.match(appSource, /data-toggle-store-group=/);
+  assert.match(appSource, /data-select-store-group=/);
+  assert.match(stylesSource, /\.archive-store-group \{/);
+  assert.match(stylesSource, /\.archive-period-groups \{/);
+});
+
 test("product catalog supports ordered manual creation, duplicate rejection, and xlsx templates", () => {
   assert.match(appSource, /data-toggle-catalog-create/);
   assert.match(appSource, /<i>1<\/i>店铺[\s\S]*<i>2<\/i>商品 ID[\s\S]*<i>3<\/i>品类[\s\S]*<i>4<\/i>型号/);
@@ -279,6 +393,21 @@ test("product catalog supports ordered manual creation, duplicate rejection, and
   assert.match(appSource, /该店铺下的商品 ID 已存在，请勿重复新增/);
   assert.match(source, /code: "PRODUCT_CATALOG_DUPLICATE"/);
   assert.match(stylesSource, /\.catalog-create-grid\{display:grid;grid-template-columns:repeat\(4,minmax\(0,1fr\)\)/);
+});
+
+test("product catalog supports transactional bulk maintenance from the current page", () => {
+  assert.match(source, /app\.patch\("\/api\/teams\/:teamId\/product-catalog\/bulk", requireUser, requireTeamManager/);
+  assert.match(source, /ids: z\.array\(z\.string\(\)\.trim\(\)\.min\(1\)\.max\(80\)\)\.min\(1\)\.max\(500\)/);
+  assert.match(source, /code: "PRODUCT_CATALOG_STALE_SELECTION"/);
+  assert.match(source, /code: "PRODUCT_CATALOG_DUPLICATE"/);
+  assert.match(source, /action: "catalog\.bulk-update"/);
+  assert.match(appSource, /data-select-catalog-page/);
+  assert.match(appSource, /data-select-catalog=/);
+  assert.match(appSource, /id="catalog-bulk-edit"/);
+  assert.match(appSource, /留空字段不会改变/);
+  assert.match(appSource, /product-catalog\/bulk/);
+  assert.match(stylesSource, /\.catalog-bulk-editor\{display:grid;/);
+  assert.match(operationsCoreSource, /if \(replacedIds\.has\(entry\.id\)\) continue;/);
 });
 
 test("product catalog can be cleared without touching reports or deductions", () => {
@@ -472,12 +601,27 @@ test("multi-team memberships, invite registration, device activation, and catalo
   const templateRows = XLSX.utils.sheet_to_json(templateBook.Sheets["商品资料"], { header: 1, raw: false });
   assert.deepEqual(templateRows.slice(0, 2), [["店铺名", "商品ID", "品类名", "型号"], ["示例店铺", "1234567890", "电饭煲", "示例型号-01"]]);
   const product = { storeName: store.name, productId: "1234567890", category: "电饭煲", model: "CFXB-TEST" };
-  assert.equal((await request(`/api/teams/${teamA.id}/product-catalog`, { method: "POST", cookie: adminCookie, body: product })).status, 201);
+  const firstCatalogEntry = await json(await request(`/api/teams/${teamA.id}/product-catalog`, { method: "POST", cookie: adminCookie, body: product }), 201);
   const duplicate = await request(`/api/teams/${teamA.id}/product-catalog`, { method: "POST", cookie: adminCookie, body: product });
   assert.equal(duplicate.status, 409);
   assert.equal((await duplicate.json()).code, "PRODUCT_CATALOG_DUPLICATE");
+  const secondProduct = { storeName: store.name, productId: "2234567890", category: "电压力锅", model: "SY-TEST" };
+  const secondCatalogEntry = await json(await request(`/api/teams/${teamA.id}/product-catalog`, { method: "POST", cookie: adminCookie, body: secondProduct }), 201);
+  const bulkCatalog = await json(await request(`/api/teams/${teamA.id}/product-catalog/bulk`, {
+    method: "PATCH",
+    cookie: adminCookie,
+    body: { ids: [firstCatalogEntry.entry.id, secondCatalogEntry.entry.id], changes: { category: "炊具", model: "批量型号" } },
+  }), 200);
+  assert.equal(bulkCatalog.updatedCount, 2);
+  assert.equal(bulkCatalog.workspace.productCatalog.length, 4, "append-only versions remain available for audit");
+  const currentCatalog = latestProductCatalogEntriesForTest(bulkCatalog.workspace.productCatalog);
+  assert.equal(currentCatalog.length, 2);
+  assert.deepEqual(currentCatalog.map((entry) => [entry.category, entry.model]), [["炊具", "批量型号"], ["炊具", "批量型号"]]);
+  const staleBulkCatalog = await request(`/api/teams/${teamA.id}/product-catalog/bulk`, { method: "PATCH", cookie: adminCookie, body: { ids: [firstCatalogEntry.entry.id], changes: { model: "过期资料" } } });
+  assert.equal(staleBulkCatalog.status, 409);
+  assert.equal((await staleBulkCatalog.json()).code, "PRODUCT_CATALOG_STALE_SELECTION");
   const clearCatalog = await json(await request(`/api/teams/${teamA.id}/product-catalog`, { method: "DELETE", cookie: adminCookie }), 200);
-  assert.equal(clearCatalog.removedCount, 1);
+  assert.equal(clearCatalog.removedCount, 2);
   const clearedWorkspace = await json(await request(`/api/web/workspace?teamId=${teamA.id}`, { cookie: adminCookie }), 200);
   assert.equal(clearedWorkspace.workspace.productCatalog.length, 0);
 

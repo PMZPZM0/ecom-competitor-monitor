@@ -21,6 +21,20 @@
   box-sizing: border-box;
 }
 
+@keyframes category-contribution-grow {
+  from { transform: scaleX(0); }
+  to { transform: scaleX(1); }
+}
+
+.category-contribution-bar {
+  transform-origin: left center;
+  animation: category-contribution-grow 520ms cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .category-contribution-bar { animation: none; }
+}
+
 body {
   margin: 0;
   min-width: 0;

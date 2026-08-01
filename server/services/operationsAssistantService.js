@@ -443,6 +443,15 @@ function repairLegacyPromotionChannels(reports) {
 }
 
 function decodeCsv(buffer) {
+  // A valid UTF-8 stream is unambiguous and must win before heuristic
+  // scoring. Short Chinese exports can otherwise look more "printable" when
+  // the same bytes are incorrectly decoded as GB18030, producing mojibake.
+  try {
+    const utf8 = new TextDecoder("utf-8", { fatal: true }).decode(buffer).replace(/^\uFEFF/, "");
+    return utf8;
+  } catch {
+    // Fall through to legacy Chinese encodings used by older export tools.
+  }
   const candidates = ["utf-8", "gb18030", "gbk"].flatMap((encoding) => {
     try {
       return [{ encoding, value: new TextDecoder(encoding, { fatal: false }).decode(buffer).replace(/^\uFEFF/, "") }];
@@ -656,12 +665,14 @@ function normalizeProductCatalogEntries(entries) {
     const productId = text(entry?.productId, 80).replace(/\s+/g, "");
     const category = text(entry?.category, 80);
     const model = text(entry?.model, 80);
+    const replacesId = text(entry?.replacesId, 80);
     if (!productId || (!category && !model)) continue;
     normalized.push({
       // Legacy catalog records had no identity or timestamp. Preserve their
       // original array order as version order so migrating local data never
       // replaces a newer mapping with an older one.
       id: text(entry?.id, 80) || `catalog_legacy_${crypto.createHash("sha256").update(`${storeName}\n${productId}\n${category}\n${model}\n${index}`).digest("hex").slice(0, 20)}`,
+      ...(replacesId ? { replacesId } : {}),
       storeName,
       productId,
       category,

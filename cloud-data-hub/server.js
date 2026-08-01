@@ -410,7 +410,9 @@ function workspaceForTeam(db, teamId, filters = {}) {
 
 function latestProductCatalogEntries(entries = []) {
   const latest = new Map();
+  const replacedIds = new Set(entries.map((entry) => entry.replacesId).filter(Boolean));
   for (const entry of entries) {
+    if (replacedIds.has(entry.id)) continue;
     const key = `${String(entry.storeName || "").trim().toLocaleLowerCase("zh-CN")}\u0000${String(entry.productId || "").trim()}`;
     latest.set(key, entry);
   }
@@ -1590,6 +1592,53 @@ app.post("/api/teams/:teamId/product-catalog", requireUser, requireTeamManager, 
     return next;
   });
   res.status(201).json({ entry, workspace: workspaceForTeam(db, req.params.teamId) });
+});
+
+app.patch("/api/teams/:teamId/product-catalog/bulk", requireUser, requireTeamManager, async (req, res) => {
+  const input = z.object({
+    ids: z.array(z.string().trim().min(1).max(80)).min(1).max(500),
+    changes: z.object({
+      storeName: z.string().trim().min(1).max(80).optional(),
+      category: z.string().trim().min(1).max(80).optional(),
+      model: z.string().trim().min(1).max(80).optional(),
+    }).strict(),
+  }).strict().refine((value) => Object.keys(value.changes).length > 0, { message: "请至少填写一项要修改的内容。", path: ["changes"] }).parse(req.body || {});
+  const requestedIds = [...new Set(input.ids)];
+  let updatedEntries = [];
+  const db = await updateDb((next) => {
+    const team = teamById(next, req.params.teamId);
+    if (!team) throw Object.assign(new Error("团队不存在或已被封禁。"), { status: 404 });
+    if (input.changes.storeName && !findActiveStoreByName(next, team.id, input.changes.storeName)) {
+      throw Object.assign(new Error("目标店铺不属于当前团队，请刷新后重新选择。"), { status: 400, code: "PRODUCT_CATALOG_STORE_INVALID" });
+    }
+    const operations = teamOperationsFor(next, team.id, { create: true });
+    const currentEntries = latestProductCatalogEntries(operations.productCatalog);
+    const currentById = new Map(currentEntries.map((entry) => [entry.id, entry]));
+    const selected = requestedIds.map((entryId) => currentById.get(entryId));
+    if (selected.some((entry) => !entry)) {
+      throw Object.assign(new Error("部分商品资料已更新，请刷新页面后重新选择。"), { status: 409, code: "PRODUCT_CATALOG_STALE_SELECTION" });
+    }
+    updatedEntries = createProductCatalogEntries(selected.map((entry) => ({
+      ...entry,
+      ...input.changes,
+      replacesId: entry.id,
+    })), { sourceName: "网页批量维护" });
+    const selectedIds = new Set(requestedIds);
+    const proposed = [...currentEntries.filter((entry) => !selectedIds.has(entry.id)), ...updatedEntries];
+    const uniqueKeys = new Map();
+    for (const entry of proposed) {
+      const key = `${String(entry.storeName || "").trim().toLocaleLowerCase("zh-CN")}\u0000${String(entry.productId || "").trim()}`;
+      if (uniqueKeys.has(key)) {
+        throw Object.assign(new Error(`批量修改后“${entry.storeName} + ${entry.productId}”将重复，未保存任何修改。`), { status: 409, code: "PRODUCT_CATALOG_DUPLICATE" });
+      }
+      uniqueKeys.set(key, entry.id);
+    }
+    operations.productCatalog = [...operations.productCatalog, ...updatedEntries].slice(-20_000);
+    operations.productCatalogSource = { fileName: "网页批量维护", updatedAt: updatedEntries[0]?.createdAt || now() };
+    logAudit(next, { actor: req.hub.user.username, action: "catalog.bulk-update", teamId: team.id, summary: `批量维护商品资料 ${updatedEntries.length} 条` });
+    return next;
+  });
+  res.json({ updatedCount: updatedEntries.length, entries: updatedEntries, workspace: workspaceForTeam(db, req.params.teamId) });
 });
 
 app.delete("/api/teams/:teamId/product-catalog", requireUser, requireTeamManager, async (req, res) => {

@@ -496,6 +496,7 @@ export type OperationsCloudSync = {
 
 export type OperationsProductCatalogEntry = {
   id: string
+  replacesId?: string
   storeName: string
   productId: string
   category: string
@@ -695,9 +696,80 @@ export type OperationsDashboardTrendPoint = {
   salesDeduction: number
   spend: number
   promotionRevenue: number
+  visitors: number
+  paidBuyers: number
+  conversionRate: number | null
+  clicks: number
+  impressions: number
+  orders: number
+  pageViews: number
+  favorites: number
+  cartUsers: number
+  cartItems: number
+  paidItems: number
+  cpc: number | null
+  costPerCollectCart: number | null
   promotionCoverageComplete: boolean
   roi: number | null
   feeRate: number | null
+}
+
+export type OperationsComparisonId = 'day' | 'week' | 'last7' | 'last15' | 'month' | 'custom'
+
+export type OperationsComparisonEntity = {
+  key: string
+  name: string
+  productId: string
+  storeName: string
+  model: string
+  category: string
+  available: boolean
+  salesCount: number
+  promotionCount: number
+  refundDataAvailable: boolean
+  promotionCoverageComplete: boolean
+  grossRevenue: number
+  refundAmount: number
+  revenue: number
+  spend: number
+  promotionRevenue: number
+  managementRoi: number | null
+  roi: number | null
+  feeRate: number | null
+  visitors: number
+  paidBuyers: number
+  conversionRate: number | null
+  clicks: number
+  impressions: number
+  orders: number
+  pageViews: number
+  favorites: number
+  cartUsers: number
+  cartItems: number
+  paidItems: number
+  cpc: number | null
+  costPerCollectCart: number | null
+}
+
+export type OperationsComparison = {
+  id: OperationsComparisonId
+  label: string
+  currentStart: string
+  currentEnd: string
+  previousStart: string
+  previousEnd: string
+  currentAvailable: boolean
+  previousAvailable: boolean
+  current: {
+    store: OperationsComparisonEntity | null
+    products: OperationsComparisonEntity[]
+    categories: OperationsComparisonEntity[]
+  }
+  previous: {
+    store: OperationsComparisonEntity | null
+    products: OperationsComparisonEntity[]
+    categories: OperationsComparisonEntity[]
+  }
 }
 
 export type OperationsDashboard = {
@@ -726,6 +798,7 @@ export type OperationsDashboard = {
     storePromotionComplete: boolean
     categoryPromotionComplete: boolean
   }
+  comparisons?: Record<OperationsComparisonId, OperationsComparison>
 }
 
 export type OperationsAnalysis = {
@@ -773,6 +846,8 @@ export type OperationsWorkspace = {
   freshness: { latestAt: string | null, fresh: boolean }
   totals: OperationsMetric
   salesDeductions: OperationsSalesDeduction[]
+  /** Full deduction ledger; salesDeductions contains only the active filter scope. */
+  salesDeductionHistory: OperationsSalesDeduction[]
   datasets: OperationsDataset[]
   dashboard: OperationsDashboard
   storeOverview: OperationsStoreOverview

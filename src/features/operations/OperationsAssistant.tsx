@@ -1,4 +1,4 @@
-import { Fragment, memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { Fragment, memo, useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import {
   ArrowDownUp,
   BarChart3,
@@ -15,8 +15,10 @@ import {
   Layers3,
   LoaderCircle,
   PenLine,
+  Plus,
   Search,
   Send,
+  Settings2,
   Sparkles,
   Target,
   Trash2,
@@ -44,9 +46,13 @@ import {
   CardHeader,
   CardTitle,
 } from "../../components/ui/card";
+import { categoryContributionTotals } from "./categoryContribution";
 import type {
   OperationsAnalysis,
   OperationsBusinessEntity,
+  OperationsComparison,
+  OperationsComparisonEntity,
+  OperationsComparisonId,
   OperationsPeriodKind,
   OperationsReport,
   OperationsReportInputType,
@@ -145,19 +151,214 @@ const disconnectedCloudSync: OperationsWorkspace["cloudSync"] = {
 
 type View = "store" | "category" | "product" | "warehouse";
 type WarehousePanel = "import" | "archive" | "catalog" | "cloud";
-type DashboardDatePreset = "today" | "yesterday" | "this-week" | "last-week" | "this-month" | "last-month" | "custom";
-type StoreTrendMetric = "revenue" | "spend" | "roi" | "feeRate";
+type DashboardDatePreset = "today" | "yesterday" | "last-7-days" | "last-15-days" | "this-week" | "last-week" | "this-month" | "last-month" | "custom";
 
-const STORE_TREND_METRICS: Record<StoreTrendMetric, {
+type ReportPreview = {
+  fileName: string;
+  kind: "xls" | "xlsx" | "csv" | "json" | "screenshot";
+  columns: string[];
+  rowCount: number;
+  exactRowCount: boolean;
+  period?: { start: string; end: string; label: string } | null;
+  detectedType?: OperationsReportType | null;
+};
+
+type ReportBatchStatus = "previewing" | "ready" | "preview-error" | "uploading" | "success" | "upload-error";
+
+type ReportBatchItem = {
+  id: string;
+  file: File;
+  preview: ReportPreview | null;
+  reportType: OperationsReportType | "";
+  periodKind: OperationsPeriodKind;
+  periodStart: string;
+  periodEnd: string;
+  status: ReportBatchStatus;
+  error: string;
+  reportId?: string;
+  importedRowCount?: number;
+};
+
+type CustomMetricId = "grossRevenue" | "refundAmount" | "revenue" | "spend" | "promotionRevenue"
+  | "managementRoi" | "roi" | "feeRate" | "visitors" | "paidBuyers" | "conversionRate"
+  | "clicks" | "impressions" | "orders" | "pageViews" | "favorites" | "cartUsers"
+  | "cartItems" | "paidItems" | "cpc" | "costPerCollectCart";
+type StoreTrendMetric = CustomMetricId;
+type CardMetricId = CustomMetricId | "linkedCount" | "salesOnlyCount" | "promotionOnlyCount";
+type CustomCardPanel = "store" | "category" | "product";
+type CustomCardConfig = { id: string; metricId: CustomMetricId; comparisonIds?: OperationsComparisonId[] };
+type CoreMetricCard = {
+  id: string;
+  metricId: CardMetricId;
+  label: string;
+  value: string;
+  detail: string;
+  tone: "slate" | "emerald" | "blue" | "amber" | "rose";
+  emphasis?: boolean;
+  selected?: boolean;
+  onClick?: () => void;
+};
+type ComparableMetricRecord = Pick<OperationsComparisonEntity,
+  "grossRevenue" | "refundAmount" | "revenue" | "spend" | "promotionRevenue" | "visitors"
+  | "paidBuyers" | "clicks" | "impressions" | "orders" | "pageViews" | "favorites"
+  | "cartUsers" | "cartItems" | "paidItems" | "salesCount" | "promotionCount"
+  | "refundDataAvailable" | "promotionCoverageComplete">;
+
+const COMPARISON_OPTIONS: Array<{ id: OperationsComparisonId; label: string }> = [
+  { id: "day", label: "日环比" },
+  { id: "week", label: "周环比" },
+  { id: "last7", label: "近 7 天" },
+  { id: "last15", label: "近 15 天" },
+  { id: "month", label: "月环比" },
+  { id: "custom", label: "区间环比" },
+];
+
+const CUSTOM_METRICS: Array<{
+  id: CustomMetricId;
+  label: string;
+  kind: "money" | "number" | "ratio" | "percent";
+  tone: "slate" | "emerald" | "blue" | "amber" | "rose";
+  description: string;
+}> = [
+  { id: "grossRevenue", label: "支付金额", kind: "money", tone: "slate", description: "退款前支付金额" },
+  { id: "refundAmount", label: "成功退款金额", kind: "money", tone: "rose", description: "售中售后成功退款" },
+  { id: "revenue", label: "净 GSV", kind: "money", tone: "emerald", description: "支付金额 - 成功退款" },
+  { id: "spend", label: "推广花费", kind: "money", tone: "blue", description: "当前口径推广消耗" },
+  { id: "promotionRevenue", label: "推广成交", kind: "money", tone: "blue", description: "推广平台归因成交" },
+  { id: "managementRoi", label: "经营 ROI", kind: "ratio", tone: "amber", description: "净 GSV ÷ 推广花费" },
+  { id: "roi", label: "推广 ROI", kind: "ratio", tone: "amber", description: "推广成交 ÷ 推广花费" },
+  { id: "feeRate", label: "推广费率", kind: "percent", tone: "rose", description: "推广花费 ÷ 净 GSV" },
+  { id: "visitors", label: "访客数", kind: "number", tone: "slate", description: "经营报表访客" },
+  { id: "paidBuyers", label: "支付买家数", kind: "number", tone: "emerald", description: "完成支付的买家" },
+  { id: "conversionRate", label: "支付转化率", kind: "percent", tone: "emerald", description: "支付买家数 ÷ 访客数" },
+  { id: "clicks", label: "点击量", kind: "number", tone: "blue", description: "推广点击量" },
+  { id: "impressions", label: "展现量", kind: "number", tone: "slate", description: "推广展现量" },
+  { id: "orders", label: "推广订单", kind: "number", tone: "emerald", description: "推广归因订单" },
+  { id: "pageViews", label: "浏览量", kind: "number", tone: "slate", description: "经营报表浏览量" },
+  { id: "favorites", label: "收藏人数", kind: "number", tone: "slate", description: "收藏商品人数" },
+  { id: "cartUsers", label: "加购人数", kind: "number", tone: "amber", description: "加入购物车人数" },
+  { id: "cartItems", label: "加购件数", kind: "number", tone: "amber", description: "加入购物车商品件数" },
+  { id: "paidItems", label: "支付件数", kind: "number", tone: "emerald", description: "支付商品件数" },
+  { id: "cpc", label: "平均点击花费", kind: "money", tone: "blue", description: "推广花费 ÷ 点击量" },
+  { id: "costPerCollectCart", label: "收藏加购成本", kind: "money", tone: "amber", description: "推广花费 ÷ 加购人数" },
+];
+
+const CUSTOM_CARD_STORAGE_KEY = "operations-custom-cards-v1";
+
+function loadCustomCards(panel: CustomCardPanel) {
+  try {
+    const parsed = JSON.parse(window.localStorage.getItem(CUSTOM_CARD_STORAGE_KEY) || "{}");
+    return Array.isArray(parsed?.[panel]) ? parsed[panel].slice(0, 6) as CustomCardConfig[] : [];
+  } catch {
+    return [];
+  }
+}
+
+function saveCustomCards(panel: CustomCardPanel, cards: CustomCardConfig[]) {
+  try {
+    const parsed = JSON.parse(window.localStorage.getItem(CUSTOM_CARD_STORAGE_KEY) || "{}");
+    window.localStorage.setItem(CUSTOM_CARD_STORAGE_KEY, JSON.stringify({ ...parsed, [panel]: cards.slice(0, 6) }));
+  } catch {
+    // A disabled localStorage must not block the operations dashboard.
+  }
+}
+
+function metricRecordFromBusiness(entity: OperationsBusinessEntity): ComparableMetricRecord {
+  return {
+    grossRevenue: entity.grossRevenue,
+    refundAmount: entity.refundAmount,
+    revenue: entity.revenue,
+    spend: entity.spend,
+    promotionRevenue: entity.promotionRevenue,
+    visitors: entity.visitors,
+    paidBuyers: entity.paidBuyers,
+    clicks: entity.clicks,
+    impressions: entity.impressions,
+    orders: entity.orders,
+    pageViews: entity.sales.pageViews,
+    favorites: entity.sales.favorites,
+    cartUsers: entity.sales.cartUsers,
+    cartItems: entity.sales.cartItems,
+    paidItems: entity.sales.paidItems,
+    salesCount: entity.salesCount,
+    promotionCount: entity.promotionCount,
+    refundDataAvailable: entity.refundDataAvailable,
+    promotionCoverageComplete: entity.promotionCoverageComplete,
+  };
+}
+
+function aggregateComparableMetrics(records: ComparableMetricRecord[]) {
+  const rateAvailable = records.length > 0 && records.every((item) => (
+    item.salesCount > 0 && item.promotionCount > 0
+    && item.refundDataAvailable && item.promotionCoverageComplete
+  ));
+  const totals = records.reduce((result, item) => {
+    for (const key of Object.keys(result) as Array<keyof typeof result>) {
+      result[key] += Number(item[key]) || 0;
+    }
+    return result;
+  }, {
+    grossRevenue: 0, refundAmount: 0, revenue: 0, spend: 0, promotionRevenue: 0,
+    visitors: 0, paidBuyers: 0, clicks: 0, impressions: 0, orders: 0, pageViews: 0,
+    favorites: 0, cartUsers: 0, cartItems: 0, paidItems: 0,
+  });
+  return {
+    ...totals,
+    managementRoi: rateAvailable && totals.spend > 0 ? totals.revenue / totals.spend : null,
+    roi: totals.spend > 0 ? totals.promotionRevenue / totals.spend : null,
+    feeRate: rateAvailable && totals.revenue > 0 ? totals.spend / totals.revenue : null,
+    conversionRate: totals.visitors > 0 ? totals.paidBuyers / totals.visitors : null,
+    cpc: totals.clicks > 0 ? totals.spend / totals.clicks : null,
+    costPerCollectCart: totals.cartUsers > 0 ? totals.spend / totals.cartUsers : null,
+  };
+}
+
+function customMetricValue(records: ComparableMetricRecord[], metricId: CustomMetricId) {
+  return aggregateComparableMetrics(records)[metricId];
+}
+
+function cardMetricValue(records: ComparableMetricRecord[], metricId: CardMetricId) {
+  if (metricId === "linkedCount") return records.filter((item) => item.salesCount > 0 && item.promotionCount > 0).length;
+  if (metricId === "salesOnlyCount") return records.filter((item) => item.salesCount > 0 && item.promotionCount <= 0).length;
+  if (metricId === "promotionOnlyCount") return records.filter((item) => item.salesCount <= 0 && item.promotionCount > 0).length;
+  return customMetricValue(records, metricId);
+}
+
+function formatCustomMetric(metricId: CustomMetricId, value: number | null) {
+  const metric = CUSTOM_METRICS.find((item) => item.id === metricId);
+  if (value === null || !Number.isFinite(value)) return "--";
+  if (metric?.kind === "money") return money(value);
+  if (metric?.kind === "percent") return percent(value);
+  if (metric?.kind === "ratio") return fixed(value);
+  return count(value);
+}
+
+const TREND_COLORS = [
+  "#0f766e", "#2563eb", "#d97706", "#e11d48", "#7c3aed", "#0891b2", "#4f46e5",
+  "#be123c", "#15803d", "#b45309", "#0e7490", "#1d4ed8", "#6d28d9", "#047857",
+  "#9f1239", "#0369a1", "#a16207", "#4338ca", "#0f766e", "#c2410c", "#1e40af",
+];
+
+const STORE_TREND_METRICS = Object.fromEntries(CUSTOM_METRICS.map((metric, index) => [metric.id, {
+  label: metric.label,
+  color: TREND_COLORS[index % TREND_COLORS.length],
+  dataKey: metric.id,
+  kind: metric.kind,
+}])) as Record<StoreTrendMetric, {
   label: string;
   color: string;
-  dataKey: "revenue" | "spend" | "roi" | "feeRatePercent";
-}> = {
-  revenue: { label: "净 GSV", color: "#0f766e", dataKey: "revenue" },
-  spend: { label: "推广花费", color: "#2563eb", dataKey: "spend" },
-  roi: { label: "经营 ROI", color: "#d97706", dataKey: "roi" },
-  feeRate: { label: "推广费率", color: "#e11d48", dataKey: "feeRatePercent" },
-};
+  dataKey: StoreTrendMetric;
+  kind: "money" | "number" | "ratio" | "percent";
+}>;
+
+function automaticComparisonId(preset: DashboardDatePreset): OperationsComparisonId {
+  if (preset === "last-7-days") return "last7";
+  if (preset === "last-15-days") return "last15";
+  if (preset === "this-week" || preset === "last-week") return "week";
+  if (preset === "this-month" || preset === "last-month") return "month";
+  if (preset === "custom") return "custom";
+  return "day";
+}
 
 const WAREHOUSE_PANEL_OPTIONS: Array<{
   id: WarehousePanel;
@@ -359,6 +560,14 @@ function dashboardDateRange(preset: Exclude<DashboardDatePreset, "custom">, now 
     const yesterday = shiftCalendarDate(today, -1);
     return { start: localDate(yesterday), end: localDate(yesterday) };
   }
+  if (preset === "last-7-days") {
+    const end = shiftCalendarDate(today, -1);
+    return { start: localDate(shiftCalendarDate(end, -6)), end: localDate(end) };
+  }
+  if (preset === "last-15-days") {
+    const end = shiftCalendarDate(today, -1);
+    return { start: localDate(shiftCalendarDate(end, -14)), end: localDate(end) };
+  }
   if (preset === "this-week") {
     const mondayOffset = (today.getDay() + 6) % 7;
     const monday = shiftCalendarDate(today, -mondayOffset);
@@ -406,6 +615,18 @@ type ReportDateGroup = {
   totalRows: number;
 };
 
+type ReportStoreGroup = {
+  key: string;
+  label: string;
+  reports: OperationsDataReport[];
+  dateGroups: ReportDateGroup[];
+  totalRows: number;
+};
+
+function reportStoreName(report: OperationsDataReport) {
+  return report.storeName?.trim() || "未归属店铺";
+}
+
 function reportPeriodGroup(report: OperationsDataReport) {
   const start = report.periodStart || report.reportDate || "";
   const end = report.periodEnd || report.reportDate || "";
@@ -452,13 +673,40 @@ function groupReportsByStatisticsDate(
       label: group.label,
       scopeLabel: group.scopeLabel,
       sortDate: group.sortDate,
-      reports: group.reports,
+      reports: group.reports.slice().sort((left, right) =>
+        String(right.importedAt || "").localeCompare(String(left.importedAt || "")),
+      ),
       totalRows: group.reports.reduce((sum, report) => sum + reportRowCount(report), 0),
     }))
     .sort((left, right) => {
       if (!left.sortDate) return 1;
       if (!right.sortDate) return -1;
       return right.sortDate.localeCompare(left.sortDate) || right.label.localeCompare(left.label);
+    });
+}
+
+function groupReportsByStoreAndStatisticsDate(
+  reports: OperationsDataReport[],
+): ReportStoreGroup[] {
+  const stores = new Map<string, OperationsDataReport[]>();
+  for (const report of reports) {
+    const storeName = reportStoreName(report);
+    const current = stores.get(storeName);
+    if (current) current.push(report);
+    else stores.set(storeName, [report]);
+  }
+  return [...stores.entries()]
+    .map(([storeName, storeReports]) => ({
+      key: storeName,
+      label: storeName,
+      reports: storeReports,
+      dateGroups: groupReportsByStatisticsDate(storeReports),
+      totalRows: storeReports.reduce((sum, report) => sum + reportRowCount(report), 0),
+    }))
+    .sort((left, right) => {
+      if (left.label === "未归属店铺") return 1;
+      if (right.label === "未归属店铺") return -1;
+      return left.label.localeCompare(right.label, "zh-CN");
     });
 }
 
@@ -530,6 +778,7 @@ function MetricTile({
   label,
   value,
   detail,
+  comparison,
   tone = "slate",
   emphasis = false,
   selected = false,
@@ -539,6 +788,7 @@ function MetricTile({
   label: string;
   value: string;
   detail: string;
+  comparison?: ReactNode;
   tone?: "slate" | "emerald" | "blue" | "amber" | "rose";
   emphasis?: boolean;
   selected?: boolean;
@@ -556,10 +806,13 @@ function MetricTile({
   const content = (
     <>
       <div className={`text-xs font-semibold text-slate-500 ${selected ? "pr-12" : ""}`}>{label}</div>
-      <div
-        className={`mt-2 whitespace-nowrap font-semibold tracking-normal text-slate-950 ${emphasis && !compactValue ? "text-3xl" : emphasis ? "text-xl" : "text-2xl"}`}
-      >
-        {value}
+      <div className="mt-2 flex min-w-0 flex-wrap items-baseline gap-x-2 gap-y-1.5">
+        <div
+          className={`whitespace-nowrap font-semibold tracking-normal text-slate-950 ${emphasis && !compactValue ? "text-3xl" : emphasis ? "text-xl" : "text-2xl"}`}
+        >
+          {value}
+        </div>
+        {comparison && <div className="flex min-w-0 flex-wrap items-center gap-1">{comparison}</div>}
       </div>
       <div className="mt-2 truncate text-xs leading-5 text-slate-500">{detail}</div>
       {selected && (
@@ -587,6 +840,104 @@ function MetricTile({
   return (
     <div className={className}>
       {content}
+    </div>
+  );
+}
+
+function comparisonTone(change: number) {
+  if (!Number.isFinite(change) || change === 0) return "border-slate-200 bg-slate-50 text-slate-500";
+  return change > 0
+    ? "border-red-200 bg-red-50 text-red-700"
+    : "border-emerald-200 bg-emerald-50 text-emerald-700";
+}
+
+function comparisonRowsForPanel(panel: CustomCardPanel, comparison: OperationsComparison | undefined, side: "current" | "previous", currentEntities: OperationsBusinessEntity[]) {
+  const snapshot = comparison?.[side];
+  if (!snapshot) return [];
+  if (panel === "store") return snapshot.store ? [snapshot.store] : [];
+  const source = panel === "category" ? snapshot.categories : snapshot.products;
+  const identities = new Set(currentEntities.flatMap((item) => [item.key, item.productId || "", item.name, `${item.category || ""}\u0000${item.model || ""}`].filter(Boolean)));
+  return source.filter((item) => panel === "category"
+    ? identities.has(item.key) || identities.has(item.name)
+    : identities.has(item.key) || identities.has(item.productId) || identities.has(`${item.category || ""}\u0000${item.model || ""}`));
+}
+
+function CardComparisonBadges({ panel, metricId, comparisonIds, comparisons, currentEntities }: {
+  panel: CustomCardPanel;
+  metricId: CardMetricId;
+  comparisonIds: OperationsComparisonId[];
+  comparisons: OperationsWorkspace["dashboard"]["comparisons"];
+  currentEntities: OperationsBusinessEntity[];
+}) {
+  if (!comparisonIds.length) return null;
+  if (!comparisons) {
+    return <span className="inline-flex border border-amber-200 bg-amber-50 px-1.5 py-0.5 text-[10px] font-semibold text-amber-700" title="本地前端已更新，但后端仍是旧进程">请重启应用</span>;
+  }
+  const metric = CUSTOM_METRICS.find((item) => item.id === metricId);
+  return comparisonIds.map((comparisonId) => {
+    const comparison = comparisons?.[comparisonId];
+    const currentRows = comparisonRowsForPanel(panel, comparison, "current", currentEntities);
+    const previousRows = comparisonRowsForPanel(panel, comparison, "previous", currentEntities);
+    const available = Boolean(comparison?.currentAvailable && comparison?.previousAvailable && currentRows.length && previousRows.length);
+    const currentValue = available ? cardMetricValue(currentRows, metricId) : null;
+    const previousValue = available ? cardMetricValue(previousRows, metricId) : null;
+    const delta = currentValue !== null && previousValue !== null && Number.isFinite(currentValue) && Number.isFinite(previousValue) ? currentValue - previousValue : null;
+    const relative = delta !== null && previousValue !== null && previousValue !== 0 ? delta / Math.abs(previousValue) : null;
+    const label = comparison?.label || COMPARISON_OPTIONS.find((item) => item.id === comparisonId)?.label || comparisonId;
+    if (delta === null) return <span key={comparisonId} className="inline-flex border border-slate-200 bg-slate-50 px-1.5 py-0.5 text-[10px] font-semibold text-slate-400" title="当前或同期报表不完整">{label} 暂无</span>;
+    const display = relative === null
+      ? (delta === 0 ? "持平" : "新增")
+      : metric?.kind === "percent"
+        ? `${delta >= 0 ? "+" : ""}${(delta * 100).toFixed(1)}pp · ${relative >= 0 ? "+" : ""}${(relative * 100).toFixed(1)}%`
+        : `${relative >= 0 ? "+" : ""}${(relative * 100).toFixed(1)}%`;
+    return <span key={comparisonId} className={`inline-flex border px-1.5 py-0.5 text-[10px] font-semibold tabular-nums ${comparisonTone(delta)}`} title={`${comparison?.currentStart} 至 ${comparison?.currentEnd} 对比 ${comparison?.previousStart} 至 ${comparison?.previousEnd}`}>{label} {display}</span>;
+  });
+}
+
+function MetricCardGrid({ panel, coreCards, currentEntities, comparisons, comparisonId, trendMetrics = [], onToggleTrendMetric }: {
+  panel: CustomCardPanel;
+  coreCards: CoreMetricCard[];
+  currentEntities: OperationsBusinessEntity[];
+  comparisons: OperationsWorkspace["dashboard"]["comparisons"];
+  comparisonId: OperationsComparisonId;
+  trendMetrics?: StoreTrendMetric[];
+  onToggleTrendMetric?: (metric: StoreTrendMetric) => void;
+}) {
+  const [cards, setCards] = useState<CustomCardConfig[]>(() => loadCustomCards(panel));
+  const [settingsOpen, setSettingsOpen] = useState(false);
+  useEffect(() => saveCustomCards(panel, cards), [cards, panel]);
+  const currentRecords = useMemo(() => currentEntities.map(metricRecordFromBusiness), [currentEntities]);
+  const usedMetrics = new Set(cards.map((card) => card.metricId));
+  const updateCard = (id: string, changes: Partial<CustomCardConfig>) => setCards((current) => current.map((card) => card.id === id ? { ...card, ...changes } : card));
+  const addCard = () => {
+    const metric = CUSTOM_METRICS.find((item) => !usedMetrics.has(item.id));
+    if (!metric || cards.length >= 6) return;
+    setCards((current) => [...current, { id: `${panel}-${Date.now()}`, metricId: metric.id }]);
+  };
+  const panelLabel = panel === "store" ? "整店总览" : panel === "category" ? "品类 360" : "商品排行";
+  return (
+    <div className="relative">
+      <Button type="button" size="sm" variant="secondary" title="设置指标卡片" aria-label="设置指标卡片" className="absolute right-2 top-2 z-20 h-7 w-7 p-0" onClick={() => setSettingsOpen(true)}><Settings2 className="h-4 w-4" /></Button>
+      <section className="grid gap-px overflow-hidden border border-slate-200 bg-slate-200 sm:grid-cols-2 xl:grid-cols-4">
+        {coreCards.map((card) => <MetricTile key={card.id} {...card} comparison={<CardComparisonBadges panel={panel} metricId={card.metricId} comparisonIds={[comparisonId]} comparisons={comparisons} currentEntities={currentEntities} />} />)}
+        {cards.map((card) => {
+          const metric = CUSTOM_METRICS.find((item) => item.id === card.metricId) || CUSTOM_METRICS[0];
+          const trendEnabled = panel === "store" && Boolean(onToggleTrendMetric);
+          return <MetricTile key={card.id} label={metric.label} value={formatCustomMetric(card.metricId, customMetricValue(currentRecords, card.metricId))} detail={metric.description} tone={metric.tone} selected={trendEnabled && trendMetrics.includes(card.metricId)} onClick={trendEnabled ? () => onToggleTrendMetric?.(card.metricId) : undefined} comparison={<CardComparisonBadges panel={panel} metricId={card.metricId} comparisonIds={[comparisonId]} comparisons={comparisons} currentEntities={currentEntities} />} />;
+        })}
+      </section>
+      {settingsOpen && (
+        <div className="fixed inset-0 z-[80] flex items-center justify-center bg-slate-950/35 p-4" role="dialog" aria-modal="true" aria-label={`${panelLabel}指标卡片设置`}>
+          <section className="max-h-[88vh] w-full max-w-4xl overflow-y-auto border border-slate-200 bg-white shadow-2xl">
+            <header className="sticky top-0 z-10 flex items-start justify-between gap-4 border-b border-slate-200 bg-white px-5 py-4"><div><h3 className="text-base font-semibold text-slate-950">{panelLabel}指标卡片</h3><p className="mt-1 text-xs text-slate-500">环比跟随当前统计范围自动计算；自定义卡片从数据表可计算字段中新增。</p></div><Button type="button" size="sm" variant="ghost" title="关闭" className="h-8 w-8 p-0" onClick={() => setSettingsOpen(false)}><X className="h-4 w-4" /></Button></header>
+            <div className="space-y-5 p-5">
+              <section className="border border-blue-200 bg-blue-50/55 p-4"><div className="text-sm font-semibold text-blue-950">环比已自动匹配：{COMPARISON_OPTIONS.find((option) => option.id === comparisonId)?.label}</div><div className="mt-1 text-xs leading-5 text-blue-700">无需逐卡设置。切换今天、周、月、近 7 日、近 15 日或自定义区间后，全部卡片会立即使用对应公式重算。</div></section>
+              <section><div className="mb-2"><h4 className="text-sm font-semibold text-slate-900">自定义数据卡片</h4><p className="mt-1 text-xs text-slate-500">从经营表和推广表的全部可计算指标中选择，最多新增 6 张且不可重复。店铺页可直接点击卡片加入趋势。</p></div><div className="space-y-3">{cards.map((card, index) => <div key={card.id} className="border border-slate-200 p-3"><div className="flex flex-wrap items-center gap-3"><span className="text-xs font-semibold text-slate-400">卡片 {index + 1}</span><select value={card.metricId} onChange={(event) => updateCard(card.id, { metricId: event.target.value as CustomMetricId })} className="h-9 min-w-48 flex-1 border border-slate-200 bg-white px-2 text-sm text-slate-800">{CUSTOM_METRICS.map((metric) => <option key={metric.id} value={metric.id} disabled={metric.id !== card.metricId && usedMetrics.has(metric.id)}>{metric.label} · {metric.description}</option>)}</select><Button type="button" size="sm" variant="ghost" title="删除卡片" className="h-8 w-8 p-0 text-rose-600" onClick={() => setCards((current) => current.filter((item) => item.id !== card.id))}><Trash2 className="h-4 w-4" /></Button></div></div>)}</div><Button type="button" variant="secondary" className="mt-3 w-full" onClick={addCard} disabled={cards.length >= 6 || usedMetrics.size >= CUSTOM_METRICS.length}><Plus className="h-4 w-4" />{cards.length >= 6 ? "已达到 6 张上限" : "从数据表新增指标卡片"}</Button></section>
+            </div>
+            <footer className="sticky bottom-0 flex justify-end border-t border-slate-200 bg-white px-5 py-3"><Button type="button" onClick={() => setSettingsOpen(false)}>完成</Button></footer>
+          </section>
+        </div>
+      )}
     </div>
   );
 }
@@ -689,21 +1040,12 @@ function CategoryContributionPanel({
         .slice(0, 10),
     [activeCategories],
   );
-  const totals = useMemo(() => {
-    const revenue = activeCategories.reduce(
-      (sum, item) => sum + item.revenue,
-      0,
-    );
-    const spend = activeCategories.reduce((sum, item) => sum + item.spend, 0);
-    const feeRateAvailable =
-      activeCategories.length > 0 &&
-      activeCategories.every((item) => item.feeRate !== null);
-    return {
-      revenue,
-      spend,
-      feeRate: feeRateAvailable && revenue > 0 ? spend / revenue : null,
-    };
-  }, [activeCategories]);
+  const totals = useMemo(
+    () => categoryContributionTotals(activeCategories),
+    [activeCategories],
+  );
+  const maxRevenue = Math.max(1, ...rankedCategories.map((item) => Number(item.revenue) || 0));
+  const maxSpend = Math.max(1, ...rankedCategories.map((item) => Number(item.spend) || 0));
   const share = (value: number, total: number) =>
     total > 0 ? Math.max(0, Math.min(1, value / total)) : 0;
   const rateClassName = (value: number | null) => {
@@ -745,6 +1087,9 @@ function CategoryContributionPanel({
             <dd className="mt-1">
               <span className={`inline-flex border px-2 py-1 text-xs font-semibold ${rateClassName(totals.feeRate)}`}>
                 {percent(totals.feeRate)}
+              </span>
+              <span className="ml-2 text-[10px] font-medium text-slate-500">
+                {totals.feeRateCategoryCount} / {activeCategories.length} 个类目参与计算
               </span>
             </dd>
           </div>
@@ -797,6 +1142,7 @@ function CategoryContributionPanel({
                   value: money(item.revenue),
                   shareLabel: "销售占比",
                   shareValue: revenueShare,
+                  scaleValue: Math.max(0, Math.min(1, item.revenue / maxRevenue)),
                   barClassName: "bg-emerald-600",
                 },
                 {
@@ -804,6 +1150,7 @@ function CategoryContributionPanel({
                   value: money(item.spend),
                   shareLabel: "花费占比",
                   shareValue: spendShare,
+                  scaleValue: Math.max(0, Math.min(1, item.spend / maxSpend)),
                   barClassName: "bg-blue-600",
                 },
               ].map((metric) => (
@@ -819,8 +1166,8 @@ function CategoryContributionPanel({
                   </div>
                   <div className="h-1.5 overflow-hidden bg-slate-100">
                     <div
-                      className={`h-full ${metric.barClassName}`}
-                      style={{ width: `${(metric.shareValue * 100).toFixed(2)}%` }}
+                      className={`category-contribution-bar h-full ${metric.barClassName}`}
+                      style={{ width: `${(metric.scaleValue * 100).toFixed(2)}%` }}
                     />
                   </div>
                 </div>
@@ -860,26 +1207,20 @@ function DashboardLineChart({
     );
   const chartData = data.map((item) => ({
     ...item,
-    feeRatePercent: item.feeRate === null ? null : item.feeRate * 100,
+    managementRoi: item.roi,
+    roi: item.spend > 0 ? item.promotionRevenue / item.spend : null,
   }));
-  const selected = new Set(selectedMetrics);
-  const hasRevenueMetric = selected.has("revenue");
-  const hasSpendMetric = selected.has("spend");
-  const hasEfficiencyMetric = selected.has("roi") || selected.has("feeRate");
   const selectedLabel = selectedMetrics.map((metric) => STORE_TREND_METRICS[metric].label).join("、");
   const latest = chartData.at(-1);
   const trendValue = (metric: StoreTrendMetric) => {
     if (!latest) return "--";
-    if (metric === "revenue") return money(latest.revenue);
-    if (metric === "spend") return money(latest.spend);
-    if (metric === "roi") return fixed(latest.roi);
-    return percent(latest.feeRate);
+    const value = latest[metric as keyof typeof latest];
+    return formatCustomMetric(metric, typeof value === "number" ? value : null);
   };
   const formatTooltip = (value: number, name: string) => {
-    if (name === "revenue") return [money(value), "净 GSV"];
-    if (name === "spend") return [money(value), "推广花费"];
-    if (name === "roi") return [fixed(value), "经营 ROI"];
-    return [percent(value / 100), "推广费率"];
+    const metric = name as StoreTrendMetric;
+    const definition = STORE_TREND_METRICS[metric];
+    return [formatCustomMetric(metric, value), definition?.label || name];
   };
   return (
     <div className="flex h-[286px] min-h-0 flex-col">
@@ -907,7 +1248,7 @@ function DashboardLineChart({
         <ResponsiveContainer width="100%" height="100%">
           <LineChart
           data={chartData}
-          margin={{ top: 0, right: hasSpendMetric ? 8 : 10, left: -14, bottom: 0 }}
+          margin={{ top: 4, right: 10, left: 10, bottom: 0 }}
         >
           <CartesianGrid
             vertical={false}
@@ -920,32 +1261,7 @@ function DashboardLineChart({
             axisLine={false}
             tick={{ fill: "#64748b", fontSize: 10 }}
           />
-          <YAxis
-            yAxisId="revenue"
-            hide={!hasRevenueMetric}
-            tickLine={false}
-            axisLine={false}
-            tick={{ fill: "#94a3b8", fontSize: 10 }}
-            width={42}
-            tickFormatter={(value) =>
-              value >= 10000 ? `${(value / 10000).toFixed(0)}万` : String(value)
-            }
-          />
-          <YAxis
-            yAxisId="spend"
-            orientation="right"
-            hide={!hasSpendMetric}
-            tickLine={false}
-            axisLine={false}
-            tick={{ fill: "#94a3b8", fontSize: 10 }}
-            width={48}
-            tickFormatter={(value) => value >= 10000 ? `${(value / 10000).toFixed(1)}万` : String(value)}
-          />
-          <YAxis
-            yAxisId="efficiency"
-            hide={!hasEfficiencyMetric}
-            width={0}
-          />
+          {selectedMetrics.map((metric) => <YAxis key={metric} yAxisId={metric} hide domain={["auto", "auto"]} />)}
           <Tooltip
             formatter={(value, name) => formatTooltip(Number(value), String(name))}
             contentStyle={{
@@ -956,11 +1272,10 @@ function DashboardLineChart({
           />
           {selectedMetrics.map((metric) => {
             const definition = STORE_TREND_METRICS[metric];
-            const yAxisId = metric === "revenue" ? "revenue" : metric === "spend" ? "spend" : "efficiency";
             return (
               <Line
                 key={metric}
-                yAxisId={yAxisId}
+                yAxisId={metric}
                 type="monotone"
                 dataKey={definition.dataKey}
                 name={definition.dataKey}
@@ -1000,7 +1315,11 @@ const RecentImportList = memo(function RecentImportList({
   onDeleteSelected: () => void;
   onDelete: (id: string) => void;
 }) {
-  const groups = useMemo(() => groupReportsByStatisticsDate(reports), [reports]);
+  const storeGroups = useMemo(
+    () => groupReportsByStoreAndStatisticsDate(reports),
+    [reports],
+  );
+  const [expandedStore, setExpandedStore] = useState("");
   const [expandedPeriod, setExpandedPeriod] = useState("");
   const selectedReports = useMemo(
     () => reports.filter((report) => selectedIds.has(report.id)),
@@ -1009,12 +1328,19 @@ const RecentImportList = memo(function RecentImportList({
   const allSelected = reports.length > 0 && selectedReports.length === reports.length;
 
   useEffect(() => {
-    setExpandedPeriod((current) =>
-      groups.some((group) => group.key === current)
+    setExpandedStore((current) =>
+      storeGroups.some((group) => group.key === current)
         ? current
-        : (groups[0]?.key || ""),
+        : (storeGroups[0]?.key || ""),
     );
-  }, [groups]);
+    setExpandedPeriod((current) =>
+      storeGroups.some((store) =>
+        store.dateGroups.some((group) => `${store.key}\u0001${group.key}` === current),
+      )
+        ? current
+        : "",
+    );
+  }, [storeGroups]);
 
   if (!reports.length)
     return (
@@ -1064,44 +1390,68 @@ const RecentImportList = memo(function RecentImportList({
           </div>
         )}
       </div>
-      {groups.map((group) => {
-        const expanded = expandedPeriod === group.key;
-        const groupSelected = group.reports.every((report) => selectedIds.has(report.id));
+      {storeGroups.map((store) => {
+        const storeExpanded = expandedStore === store.key;
+        const storeSelected = store.reports.every((report) => selectedIds.has(report.id));
         return (
-          <div key={group.key} className="border border-slate-200 bg-white">
-            <div className="flex items-center gap-2 px-2.5 py-2 hover:bg-slate-50">
+          <div key={store.key} className="border border-blue-200 bg-white shadow-sm">
+            <div className="flex items-center gap-2 bg-blue-50/80 px-2.5 py-2.5 hover:bg-blue-50">
               <input
                 type="checkbox"
-                aria-label={`选择${group.scopeLabel} ${group.label}的所有报表`}
-                checked={groupSelected}
-                onChange={(event) => onSelectDate(group.reports, event.target.checked)}
+                aria-label={`选择店铺 ${store.label} 的所有报表`}
+                checked={storeSelected}
+                onChange={(event) => onSelectDate(store.reports, event.target.checked)}
               />
               <button
                 type="button"
-                aria-expanded={expanded}
-                onClick={() => setExpandedPeriod(expanded ? "" : group.key)}
+                aria-expanded={storeExpanded}
+                onClick={() => {
+                  setExpandedStore(storeExpanded ? "" : store.key);
+                  setExpandedPeriod("");
+                }}
                 className="flex min-w-0 flex-1 items-center gap-2 text-left"
               >
-                {expanded ? (
-                  <ChevronDown className="h-4 w-4 shrink-0 text-slate-500" />
+                {storeExpanded ? (
+                  <ChevronDown className="h-4 w-4 shrink-0 text-blue-600" />
                 ) : (
-                  <ChevronRight className="h-4 w-4 shrink-0 text-slate-500" />
+                  <ChevronRight className="h-4 w-4 shrink-0 text-blue-600" />
                 )}
-                <span className="truncate text-xs font-semibold text-slate-800">
-                  {group.scopeLabel} {group.label}
+                <span className="truncate text-xs font-semibold text-blue-950">
+                  店铺 · {store.label}
                 </span>
-                <span className="ml-auto shrink-0 text-[11px] text-slate-400">
-                  {group.reports.length} 份 · {group.totalRows} 行
+                <span className="ml-auto shrink-0 text-[11px] text-blue-600/80">
+                  {store.dateGroups.length} 个日期 · {store.reports.length} 份
                 </span>
               </button>
             </div>
-            {expanded && (
-              <div className="border-t border-slate-100 px-1 py-1">
-                {group.reports.map((report) => (
-                  <div
-                    key={report.id}
-                    className="flex min-w-0 items-center gap-2 px-2 py-1.5 hover:bg-slate-50"
-                  >
+            {storeExpanded && (
+              <div className="space-y-1 border-t border-blue-100 p-1.5">
+                {store.dateGroups.map((group) => {
+                  const periodKey = `${store.key}\u0001${group.key}`;
+                  const expanded = expandedPeriod === periodKey;
+                  const groupSelected = group.reports.every((report) => selectedIds.has(report.id));
+                  return (
+                    <div key={periodKey} className="border border-slate-200 bg-white">
+                      <div className="flex items-center gap-2 px-2 py-1.5 hover:bg-slate-50">
+                        <input
+                          type="checkbox"
+                          aria-label={`选择${store.label} ${group.scopeLabel} ${group.label}的所有报表`}
+                          checked={groupSelected}
+                          onChange={(event) => onSelectDate(group.reports, event.target.checked)}
+                        />
+                        <button
+                          type="button"
+                          aria-expanded={expanded}
+                          onClick={() => setExpandedPeriod(expanded ? "" : periodKey)}
+                          className="flex min-w-0 flex-1 items-center gap-2 text-left"
+                        >
+                          {expanded ? <ChevronDown className="h-3.5 w-3.5 shrink-0 text-slate-500" /> : <ChevronRight className="h-3.5 w-3.5 shrink-0 text-slate-500" />}
+                          <span className="truncate text-xs font-semibold text-slate-700">{group.scopeLabel} {group.label}</span>
+                          <span className="ml-auto shrink-0 text-[11px] text-slate-400">{group.reports.length} 份 · {group.totalRows} 行</span>
+                        </button>
+                      </div>
+                      {expanded && <div className="border-t border-slate-100 px-1 py-1">{group.reports.map((report) => (
+                        <div key={report.id} className="flex min-w-0 items-center gap-2 px-2 py-1.5 hover:bg-slate-50">
                     <input
                       type="checkbox"
                       aria-label={`选择 ${report.fileName}`}
@@ -1136,8 +1486,11 @@ const RecentImportList = memo(function RecentImportList({
                         <Trash2 className="h-3.5 w-3.5" />
                       )}
                     </Button>
-                  </div>
-                ))}
+                        </div>
+                      ))}</div>}
+                    </div>
+                  );
+                })}
               </div>
             )}
           </div>
@@ -1161,7 +1514,7 @@ const ArchiveReportRows = memo(function ArchiveReportRows({
   onCancelRename,
   onDelete,
 }: {
-  groups: ReportDateGroup[];
+  groups: ReportStoreGroup[];
   selectedIds: Set<string>;
   busy: string;
   editingReportId: string;
@@ -1174,47 +1527,86 @@ const ArchiveReportRows = memo(function ArchiveReportRows({
   onCancelRename: () => void;
   onDelete: (id: string) => void;
 }) {
+  const [expandedStore, setExpandedStore] = useState("");
   const [expandedPeriod, setExpandedPeriod] = useState("");
 
   useEffect(() => {
-    setExpandedPeriod((current) =>
+    setExpandedStore((current) =>
       groups.some((group) => group.key === current)
         ? current
         : (groups[0]?.key || ""),
+    );
+    setExpandedPeriod((current) =>
+      groups.some((store) =>
+        store.dateGroups.some((group) => `${store.key}\u0001${group.key}` === current),
+      )
+        ? current
+        : "",
     );
   }, [groups]);
 
   return (
     <tbody>
       {groups.length ? (
-        groups.map((group) => {
-          const expanded = expandedPeriod === group.key;
-          const groupSelected = group.reports.every((report) => selectedIds.has(report.id));
+        groups.map((store) => {
+          const storeExpanded = expandedStore === store.key;
+          const storeSelected = store.reports.every((report) => selectedIds.has(report.id));
           return (
-            <Fragment key={group.key}>
-              <tr className="border-b border-slate-200 bg-slate-50/80">
+            <Fragment key={store.key}>
+              <tr className="border-b border-blue-200 bg-blue-50/90">
                 <td className="px-4 py-2.5">
                   <input
                     type="checkbox"
-                    aria-label={`选择${group.scopeLabel} ${group.label}的所有文件`}
-                    checked={groupSelected}
-                    onChange={(event) => onSelectDate(group.reports, event.target.checked)}
+                    aria-label={`选择店铺 ${store.label} 的所有文件`}
+                    checked={storeSelected}
+                    onChange={(event) => onSelectDate(store.reports, event.target.checked)}
                   />
                 </td>
                 <td colSpan={5} className="p-0">
                   <button
                     type="button"
-                    aria-expanded={expanded}
-                    onClick={() => setExpandedPeriod((current) => current === group.key ? "" : group.key)}
-                    className="flex w-full items-center gap-2 px-4 py-2.5 text-left hover:bg-slate-100"
+                    aria-expanded={storeExpanded}
+                    onClick={() => {
+                      setExpandedStore((current) => current === store.key ? "" : store.key);
+                      setExpandedPeriod("");
+                    }}
+                    className="flex w-full items-center gap-2 px-4 py-2.5 text-left hover:bg-blue-100/70"
                   >
-                    {expanded ? <ChevronDown className="h-4 w-4 shrink-0 text-slate-500" /> : <ChevronRight className="h-4 w-4 shrink-0 text-slate-500" />}
-                    <span className="font-semibold text-slate-800">{group.scopeLabel} {group.label}</span>
-                    <span className="text-xs text-slate-400">{group.reports.length} 份文件 · {group.totalRows} 行数据</span>
+                    {storeExpanded ? <ChevronDown className="h-4 w-4 shrink-0 text-blue-600" /> : <ChevronRight className="h-4 w-4 shrink-0 text-blue-600" />}
+                    <span className="font-semibold text-blue-950">店铺 · {store.label}</span>
+                    <span className="text-xs text-blue-600/80">{store.dateGroups.length} 个日期 · {store.reports.length} 份文件 · {store.totalRows} 行</span>
                   </button>
                 </td>
               </tr>
-              {expanded && group.reports.map((report) => (
+              {storeExpanded && store.dateGroups.map((group) => {
+                const periodKey = `${store.key}\u0001${group.key}`;
+                const expanded = expandedPeriod === periodKey;
+                const groupSelected = group.reports.every((report) => selectedIds.has(report.id));
+                return (
+                  <Fragment key={periodKey}>
+                    <tr className="border-b border-slate-200 bg-slate-50/80">
+                      <td className="px-4 py-2 pl-8">
+                        <input
+                          type="checkbox"
+                          aria-label={`选择${store.label} ${group.scopeLabel} ${group.label}的所有文件`}
+                          checked={groupSelected}
+                          onChange={(event) => onSelectDate(group.reports, event.target.checked)}
+                        />
+                      </td>
+                      <td colSpan={5} className="p-0">
+                        <button
+                          type="button"
+                          aria-expanded={expanded}
+                          onClick={() => setExpandedPeriod((current) => current === periodKey ? "" : periodKey)}
+                          className="flex w-full items-center gap-2 px-4 py-2 text-left hover:bg-slate-100"
+                        >
+                          {expanded ? <ChevronDown className="h-3.5 w-3.5 shrink-0 text-slate-500" /> : <ChevronRight className="h-3.5 w-3.5 shrink-0 text-slate-500" />}
+                          <span className="font-semibold text-slate-700">{group.scopeLabel} {group.label}</span>
+                          <span className="text-xs text-slate-400">{group.reports.length} 份文件 · {group.totalRows} 行数据</span>
+                        </button>
+                      </td>
+                    </tr>
+                    {expanded && group.reports.map((report) => (
                 <tr key={report.id} className="border-b border-slate-100 last:border-0 hover:bg-slate-50/70">
                   <td className="px-4 py-3">
                     <input
@@ -1261,7 +1653,7 @@ const ArchiveReportRows = memo(function ArchiveReportRows({
                   </td>
                   <td className="px-4 py-3 text-slate-600">
                     {report.periodLabel || report.reportDate}
-                    <div className="mt-1 text-xs text-slate-400">{periodKindLabels[report.periodKind]} · {report.storeName || "未标记店铺"}</div>
+                    <div className="mt-1 text-xs text-slate-400">{periodKindLabels[report.periodKind]} · {reportStoreName(report)}</div>
                   </td>
                   <td className="px-4 py-3 text-slate-600">
                     {reportTypeLabels[report.type]}
@@ -1275,7 +1667,10 @@ const ArchiveReportRows = memo(function ArchiveReportRows({
                     </Button>
                   </td>
                 </tr>
-              ))}
+                    ))}
+                  </Fragment>
+                );
+              })}
             </Fragment>
           );
         })
@@ -1327,15 +1722,10 @@ export function OperationsAssistant({
   const [storePickerOpen, setStorePickerOpen] = useState(false);
   const [sourceName, setSourceName] = useState("");
   const [selectedReport, setSelectedReport] = useState<File | null>(null);
-  const [reportPreview, setReportPreview] = useState<{
-    fileName: string;
-    kind: "xls" | "xlsx" | "csv" | "json" | "screenshot";
-    columns: string[];
-    rowCount: number;
-    exactRowCount: boolean;
-    period?: { start: string; end: string; label: string } | null;
-    detectedType?: OperationsReportType | null;
-  } | null>(null);
+  const [reportPreview, setReportPreview] = useState<ReportPreview | null>(null);
+  const [reportBatch, setReportBatch] = useState<ReportBatchItem[]>([]);
+  const [activeReportId, setActiveReportId] = useState("");
+  const [reportBatchProgress, setReportBatchProgress] = useState({ completed: 0, total: 0 });
   const [pasteOpen, setPasteOpen] = useState(false);
   const [pastedData, setPastedData] = useState("");
   const [archiveType, setArchiveType] = useState<OperationsReportType | "all">(
@@ -1356,6 +1746,8 @@ export function OperationsAssistant({
   const [displayStore, setDisplayStore] = useState("");
   const [sourcePeriodKind, setSourcePeriodKind] = useState<OperationsSourcePeriodKind>("auto");
   const [selectedTrendMetrics, setSelectedTrendMetrics] = useState<StoreTrendMetric[]>(["revenue"]);
+  const [visibleCategoryItems, setVisibleCategoryItems] = useState<OperationsBusinessEntity[] | null>(null);
+  const [visibleProductItems, setVisibleProductItems] = useState<OperationsBusinessEntity[] | null>(null);
   const [analysis, setAnalysis] = useState<OperationsAnalysis | null>(
     workspace.analyses[0] || null,
   );
@@ -1363,6 +1755,8 @@ export function OperationsAssistant({
     id: string;
     fileName: string;
     rowCount: number;
+    successCount?: number;
+    failureCount?: number;
   } | null>(null);
   const [selectedArchiveIds, setSelectedArchiveIds] = useState<Set<string>>(
     new Set(),
@@ -1411,11 +1805,24 @@ export function OperationsAssistant({
     ].filter(Boolean),
     [periodEnd, periodStart, reportPreview, reportType, selectedReport, storeName],
   );
+  const pendingReportBatch = reportBatch.filter((item) => item.status !== "success");
+  const invalidReportBatch = pendingReportBatch.filter((item) => (
+    !item.preview
+    || !item.reportType
+    || !item.periodStart
+    || !item.periodEnd
+    || item.periodStart > item.periodEnd
+    || item.status === "preview-error"
+    || item.status === "previewing"
+  ));
   const canUploadReport =
-    uploadRequirements.length === 0 &&
+    reportBatch.length > 0 &&
+    pendingReportBatch.length > 0 &&
+    invalidReportBatch.length === 0 &&
+    Boolean(storeName) &&
     busy !== "upload" &&
-    busy !== "preview-report";
-  const showUploadRequirements = Boolean(selectedReport || reportPreview);
+    busy !== "preview-reports";
+  const showUploadRequirements = reportBatch.length > 0;
 
   useEffect(
     () => setAnalysis(workspace.analyses[0] || null),
@@ -1493,47 +1900,125 @@ export function OperationsAssistant({
     sourcePeriodKind,
   ]);
 
-  async function inspectReport(file: File | null) {
-    setSelectedReport(file);
-    setReportPreview(null);
-    setError("");
-    if (!file) return;
-    await run("preview-report", async () => {
-      const preview = await onPreview(file);
-      if (preview.kind === "screenshot")
-        throw new Error(
-          "请选择可计算数据文件，支持 XLS、XLSX、CSV 或 JSON。",
-        );
-      const exactRowCount = Number.isFinite(preview.rowCount);
-      const rowCount = exactRowCount
-        ? Number(preview.rowCount)
-        : preview.sampleRows.length;
-      if (!rowCount || !preview.columns.length)
-        throw new Error("没有识别到可计算的数据行，请确认文件第一行是表头。");
-      setReportPreview({ ...preview, rowCount, exactRowCount });
-      if (preview.detectedType && manualReportTypes.includes(preview.detectedType)) {
-        setReportType(preview.detectedType);
-      }
-      if (preview.period) {
-        setPeriodStart(preview.period.start);
-        setPeriodEnd(preview.period.end);
-        setPeriodKind(periodKindForRange(preview.period.start, preview.period.end));
-      } else {
-        // Do not carry the preceding file's day into an undated export.
-        // An export/download timestamp is not a business reporting date.
-        setPeriodStart("");
-        setPeriodEnd("");
-      }
-    });
+  function updateReportBatchItem(id: string, changes: Partial<ReportBatchItem>) {
+    setReportBatch((current) => current.map((item) => item.id === id ? { ...item, ...changes } : item));
   }
 
-  const uploadPayload = (type: OperationsReportType = reportType || "market") => ({
+  function activateReportItem(item: ReportBatchItem | null) {
+    setActiveReportId(item?.id || "");
+    setSelectedReport(item?.file || null);
+    setReportPreview(item?.preview || null);
+    setReportType(item?.reportType || "");
+    setPeriodKind(item?.periodKind || "day");
+    setPeriodStart(item?.periodStart || "");
+    setPeriodEnd(item?.periodEnd || "");
+    setReportTypePickerOpen(false);
+  }
+
+  function removeReportBatchItem(id: string) {
+    if (busy === "upload" || busy === "preview-reports") return;
+    const nextBatch = reportBatch.filter((item) => item.id !== id);
+    setReportBatch(nextBatch);
+    if (activeReportId === id) activateReportItem(nextBatch[0] || null);
+  }
+
+  async function previewReportItem(item: ReportBatchItem, activateWhenReady = false) {
+    try {
+      const preview = await onPreview(item.file);
+      if (preview.kind === "screenshot") {
+        throw new Error("请选择可计算数据文件，支持 XLS、XLSX、CSV 或 JSON。");
+      }
+      const exactRowCount = Number.isFinite(preview.rowCount);
+      const rowCount = exactRowCount ? Number(preview.rowCount) : preview.sampleRows.length;
+      if (!rowCount || !preview.columns.length) {
+        throw new Error("没有识别到可计算的数据行，请确认文件第一行是表头。");
+      }
+      const normalizedPreview: ReportPreview = { ...preview, rowCount, exactRowCount };
+      const detectedType = preview.detectedType && manualReportTypes.includes(preview.detectedType)
+        ? preview.detectedType
+        : "";
+      const nextItem: ReportBatchItem = {
+        ...item,
+        preview: normalizedPreview,
+        reportType: detectedType,
+        periodKind: preview.period ? periodKindForRange(preview.period.start, preview.period.end) : "day",
+        periodStart: preview.period?.start || "",
+        periodEnd: preview.period?.end || "",
+        status: "ready",
+        error: "",
+      };
+      updateReportBatchItem(item.id, nextItem);
+      if (activateWhenReady || activeReportId === item.id) activateReportItem(nextItem);
+      return nextItem;
+    } catch (reason) {
+      const message = reason instanceof Error ? reason.message : "文件识别失败，请重试。";
+      const failedItem: ReportBatchItem = { ...item, preview: null, status: "preview-error", error: message };
+      updateReportBatchItem(item.id, failedItem);
+      if (activateWhenReady || activeReportId === item.id) activateReportItem(failedItem);
+      return failedItem;
+    }
+  }
+
+  async function inspectReports(files: File[]) {
+    if (!files.length || busy === "upload" || busy === "preview-reports") return;
+    const known = new Set(reportBatch.map((item) => `${item.file.name}\u0000${item.file.size}\u0000${item.file.lastModified}`));
+    const additions = files
+      .filter((file) => !known.has(`${file.name}\u0000${file.size}\u0000${file.lastModified}`))
+      .map<ReportBatchItem>((file) => ({
+        id: `local-report-${crypto.randomUUID()}`,
+        file,
+        preview: null,
+        reportType: "",
+        periodKind: "day",
+        periodStart: "",
+        periodEnd: "",
+        status: "previewing",
+        error: "",
+      }));
+    if (!additions.length) {
+      setError("所选文件已经在批量清单中；如需重新选择，请先从清单移除。");
+      return;
+    }
+    const activateFirst = !activeReportId;
+    setError("");
+    setUploadFeedback(null);
+    setReportBatch((current) => [...current, ...additions]);
+    if (activateFirst) activateReportItem(additions[0]);
+    setBusy("preview-reports");
+    setReportBatchProgress({ completed: 0, total: additions.length });
+    try {
+      for (let index = 0; index < additions.length; index += 1) {
+        await previewReportItem(additions[index], activateFirst && index === 0);
+        setReportBatchProgress({ completed: index + 1, total: additions.length });
+      }
+    } finally {
+      setBusy("");
+    }
+  }
+
+  async function retryReportPreview(item: ReportBatchItem) {
+    if (busy) return;
+    updateReportBatchItem(item.id, { status: "previewing", error: "" });
+    setBusy("preview-reports");
+    setReportBatchProgress({ completed: 0, total: 1 });
+    try {
+      await previewReportItem({ ...item, status: "previewing", error: "" }, activeReportId === item.id);
+      setReportBatchProgress({ completed: 1, total: 1 });
+    } finally {
+      setBusy("");
+    }
+  }
+
+  const uploadPayload = (
+    type: OperationsReportType = reportType || "market",
+    item?: Pick<ReportBatchItem, "periodKind" | "periodStart" | "periodEnd">,
+  ) => ({
     type,
     storeName,
-    reportDate: periodEnd,
-    periodKind,
-    periodStart,
-    periodEnd,
+    reportDate: item?.periodEnd ?? periodEnd,
+    periodKind: item?.periodKind ?? periodKind,
+    periodStart: item?.periodStart ?? periodStart,
+    periodEnd: item?.periodEnd ?? periodEnd,
     sourceName,
   });
 
@@ -1582,34 +2067,77 @@ export function OperationsAssistant({
   }
 
   async function uploadReport() {
-    if (!selectedReport || !reportPreview) {
-      setError("请先选择并完成报表预检。");
-      return;
-    }
-    if (!reportType) {
-      setError("请选择报表类型后再导入，系统不会自动猜测。 ");
-      return;
-    }
     if (!storeName) {
       setError("请选择归属店铺；没有时可先新增店铺。");
       return;
     }
-    if (!periodStart || !periodEnd) {
-      setError("未检测到报表统计日期，请先选择统计日期或统计区间。下载日期不会作为统计日期使用。");
+    const pending = reportBatch.filter((item) => item.status !== "success");
+    if (!pending.length) {
+      setError("请先批量选择要导入的数据文件。");
       return;
     }
-    await run("upload", async () => {
-      const next = await onUpload(selectedReport, uploadPayload(reportType));
-      const report = next.reports[0];
-      setUploadFeedback({
-        id: report?.id || "",
-        fileName: report?.fileName || selectedReport.name,
-        rowCount: report ? reportRowCount(report) : reportPreview.rowCount,
-      });
+    const invalid = pending.find((item) => (
+      !item.preview
+      || !item.reportType
+      || !item.periodStart
+      || !item.periodEnd
+      || item.periodStart > item.periodEnd
+      || item.status === "preview-error"
+      || item.status === "previewing"
+    ));
+    if (invalid) {
+      activateReportItem(invalid);
+      setError(`请先补全“${invalid.file.name}”的报表类型和有效统计日期。`);
+      return;
+    }
+    setBusy("upload");
+    setError("");
+    setReportBatchProgress({ completed: 0, total: pending.length });
+    let successCount = 0;
+    let failureCount = 0;
+    let lastSuccess: { id: string; fileName: string; rowCount: number } | null = null;
+    let firstFailureItem: ReportBatchItem | null = null;
+    for (let index = 0; index < pending.length; index += 1) {
+      const item = pending[index];
+      updateReportBatchItem(item.id, { status: "uploading", error: "" });
+      try {
+        const next = await onUpload(item.file, uploadPayload(item.reportType as OperationsReportType, item));
+        const report = next.reports.find((candidate) => candidate.fileName === item.file.name) || next.reports[0];
+        const importedRowCount = report ? reportRowCount(report) : item.preview?.rowCount || 0;
+        updateReportBatchItem(item.id, {
+          status: "success",
+          error: "",
+          reportId: report?.id || "",
+          importedRowCount,
+        });
+        lastSuccess = { id: report?.id || "", fileName: item.file.name, rowCount: importedRowCount };
+        successCount += 1;
+      } catch (reason) {
+        const message = reason instanceof Error ? reason.message : "导入失败，请修正后重试。";
+        updateReportBatchItem(item.id, { status: "upload-error", error: message });
+        firstFailureItem ||= { ...item, status: "upload-error", error: message };
+        failureCount += 1;
+      }
+      setReportBatchProgress({ completed: index + 1, total: pending.length });
+    }
+    try {
       await refreshArchive();
-      setSelectedReport(null);
-      setReportPreview(null);
-    });
+    } catch (reason) {
+      setError(reason instanceof Error ? `报表已导入，但数据仓刷新失败：${reason.message}` : "报表已导入，但数据仓刷新失败，请重新进入数据仓库。");
+    } finally {
+      setBusy("");
+    }
+    if (lastSuccess) {
+      setUploadFeedback({
+        ...lastSuccess,
+        successCount,
+        failureCount,
+      });
+    }
+    if (failureCount) {
+      setError(`${failureCount} 份报表导入失败；已成功的不会重复导入，修正失败项后可直接重试。`);
+      if (firstFailureItem) activateReportItem(firstFailureItem);
+    }
   }
 
   async function uploadCatalog() {
@@ -1842,6 +2370,10 @@ export function OperationsAssistant({
   const stores = dashboard.stores;
   const products = dashboard.products;
   const categories = dashboard.categories;
+  const categoryCardItems = visibleCategoryItems || categories;
+  const productCardItems = visibleProductItems || products;
+  const categoryCardRecords = useMemo(() => categoryCardItems.map(metricRecordFromBusiness), [categoryCardItems]);
+  const productCardRecords = useMemo(() => productCardItems.map(metricRecordFromBusiness), [productCardItems]);
   const archive = archiveData.archive || {
     days: [],
     totalReports: archiveData.reports.length,
@@ -1914,7 +2446,7 @@ export function OperationsAssistant({
     [archiveData.reports, archiveStore, archiveType],
   );
   const filteredReportGroups = useMemo(
-    () => groupReportsByStatisticsDate(filteredReports),
+    () => groupReportsByStoreAndStatisticsDate(filteredReports),
     [filteredReports],
   );
   const recentDataReports = useMemo(
@@ -2096,6 +2628,8 @@ export function OperationsAssistant({
             {([
               ["today", "今天"],
               ["yesterday", "昨天"],
+              ["last-7-days", "近 7 日"],
+              ["last-15-days", "近 15 日"],
               ["this-week", "本周"],
               ["last-week", "上周"],
               ["this-month", "本月"],
@@ -2213,46 +2747,20 @@ export function OperationsAssistant({
 
       {view === "store" && (
         <div className="space-y-5">
-          <section className="grid gap-px overflow-hidden border border-slate-200 bg-slate-200 sm:grid-cols-2 xl:grid-cols-4">
-            <MetricTile
-              label="整店净 GSV"
-              value={money(store.revenue)}
-              detail={store.refundDataAvailable
-                ? `支付 ${money(store.grossRevenue)} · 退款 ${money(store.refundAmount)}${store.salesDeduction > 0 ? ` · 扣除 ${money(store.salesDeduction)}` : ""}`
-                : "当前报表缺退款字段，需重新导入商品经营报表"}
-              tone="emerald"
-              emphasis
-              selected={selectedTrendMetrics.includes("revenue")}
-              onClick={() => toggleTrendMetric("revenue")}
-            />
-            <MetricTile
-              label="推广花费"
-              value={money(store.spend)}
-              detail={storePromotionCoverageComplete ? "单品推广消耗" : "已导入单品推广消耗，非完整周期"}
-              tone="blue"
-              emphasis
-              selected={selectedTrendMetrics.includes("spend")}
-              onClick={() => toggleTrendMetric("spend")}
-            />
-            <MetricTile
-              label="整店经营 ROI"
-              value={fixed(store.managementRoi)}
-              detail={storePromotionCoverageComplete ? "净 GSV ÷ 推广花费" : "缺少同周期单品付费，暂不计算"}
-              tone="amber"
-              emphasis
-              selected={selectedTrendMetrics.includes("roi")}
-              onClick={() => toggleTrendMetric("roi")}
-            />
-            <MetricTile
-              label="推广费率"
-              value={percent(store.feeRate)}
-              detail={storePromotionCoverageComplete ? "推广花费 ÷ 净 GSV" : "缺少同周期单品付费，暂不计算"}
-              tone="rose"
-              emphasis
-              selected={selectedTrendMetrics.includes("feeRate")}
-              onClick={() => toggleTrendMetric("feeRate")}
-            />
-          </section>
+          <MetricCardGrid
+            panel="store"
+            coreCards={[
+              { id: "store-revenue", metricId: "revenue", label: "整店净 GSV", value: money(store.revenue), detail: store.refundDataAvailable ? `支付 ${money(store.grossRevenue)} · 退款 ${money(store.refundAmount)}${store.salesDeduction > 0 ? ` · 扣除 ${money(store.salesDeduction)}` : ""}` : "当前报表缺退款字段，需重新导入商品经营报表", tone: "emerald", emphasis: true, selected: selectedTrendMetrics.includes("revenue"), onClick: () => toggleTrendMetric("revenue") },
+              { id: "store-spend", metricId: "spend", label: "推广花费", value: money(store.spend), detail: storePromotionCoverageComplete ? "单品推广消耗" : "已导入单品推广消耗，非完整周期", tone: "blue", emphasis: true, selected: selectedTrendMetrics.includes("spend"), onClick: () => toggleTrendMetric("spend") },
+              { id: "store-roi", metricId: "managementRoi", label: "整店经营 ROI", value: fixed(store.managementRoi), detail: storePromotionCoverageComplete ? "净 GSV ÷ 推广花费" : "缺少同周期单品付费，暂不计算", tone: "amber", emphasis: true, selected: selectedTrendMetrics.includes("managementRoi"), onClick: () => toggleTrendMetric("managementRoi") },
+              { id: "store-fee-rate", metricId: "feeRate", label: "推广费率", value: percent(store.feeRate), detail: storePromotionCoverageComplete ? "推广花费 ÷ 净 GSV" : "缺少同周期单品付费，暂不计算", tone: "rose", emphasis: true, selected: selectedTrendMetrics.includes("feeRate"), onClick: () => toggleTrendMetric("feeRate") },
+            ]}
+            currentEntities={[store]}
+            comparisons={dashboard.comparisons}
+            comparisonId={automaticComparisonId(datePreset)}
+            trendMetrics={selectedTrendMetrics}
+            onToggleTrendMetric={toggleTrendMetric}
+          />
           {dashboard.sourceWarnings.storePromotion && (
             <div className="flex items-start gap-2 border border-amber-200 bg-amber-50 px-3 py-2 text-xs leading-5 text-amber-800">
               <CircleAlert className="mt-0.5 h-4 w-4 shrink-0" />
@@ -2320,34 +2828,18 @@ export function OperationsAssistant({
 
       {view === "category" && (
         <div className="space-y-5">
-          <section className="grid gap-px overflow-hidden border border-slate-200 bg-slate-200 sm:grid-cols-2 xl:grid-cols-4">
-            <MetricTile
-              label="已关联品类"
-              value={count(dashboard.coverage.categories.linked)}
-              detail="销售与按 ID 映射的单品付费已关联"
-              tone="emerald"
-            />
-            <MetricTile
-              label="待补单品付费"
-              value={count(dashboard.coverage.categories.salesOnly)}
-              detail="仅有品类360销售数据"
-              tone="amber"
-            />
-            <MetricTile
-              label="待补品类360"
-              value={count(dashboard.coverage.categories.promotionOnly)}
-              detail="仅有按 ID 映射的单品付费"
-              tone="blue"
-            />
-            <MetricTile
-              label="品类360 净 GSV"
-              value={money(
-                categories.reduce((sum, item) => sum + item.revenue, 0),
-              )}
-              detail="当前可视范围"
-              tone="slate"
-            />
-          </section>
+          <MetricCardGrid
+            panel="category"
+            coreCards={[
+              { id: "category-linked", metricId: "linkedCount", label: "已关联品类", value: count(Number(cardMetricValue(categoryCardRecords, "linkedCount"))), detail: "当前筛选范围内销售与单品付费已关联", tone: "emerald" },
+              { id: "category-sales-only", metricId: "salesOnlyCount", label: "待补单品付费", value: count(Number(cardMetricValue(categoryCardRecords, "salesOnlyCount"))), detail: "当前筛选范围内仅有品类360销售数据", tone: "amber" },
+              { id: "category-promotion-only", metricId: "promotionOnlyCount", label: "待补品类360", value: count(Number(cardMetricValue(categoryCardRecords, "promotionOnlyCount"))), detail: "当前筛选范围内仅有单品付费数据", tone: "blue" },
+              { id: "category-revenue", metricId: "revenue", label: "品类360 净 GSV", value: money(Number(cardMetricValue(categoryCardRecords, "revenue"))), detail: "当前筛选范围", tone: "slate" },
+            ]}
+            currentEntities={categoryCardItems}
+            comparisons={dashboard.comparisons}
+            comparisonId={automaticComparisonId(datePreset)}
+          />
           <section className="grid gap-5 xl:grid-cols-2">
             <Card>
               <CardContent className="p-5">
@@ -2378,38 +2870,25 @@ export function OperationsAssistant({
             subtitle={dashboard.sourceWarnings.categoryPromotion || "净 GSV = 支付金额 - 售中售后成功退款金额；未关联项不计算费率。"}
             items={categories}
             kind="category"
+            onVisibleItemsChange={setVisibleCategoryItems}
           />
         </div>
       )}
 
       {view === "product" && (
         <div className="space-y-5">
-          <section className="grid gap-px overflow-hidden border border-slate-200 bg-slate-200 sm:grid-cols-2 xl:grid-cols-4">
-            <MetricTile
-              label="已关联单品"
-              value={count(dashboard.coverage.products.linked)}
-              detail="ID 或名称完成关联"
-              tone="emerald"
-            />
-            <MetricTile
-              label="待补推广数据"
-              value={count(dashboard.coverage.products.salesOnly)}
-              detail="仅有商品经营"
-              tone="amber"
-            />
-            <MetricTile
-              label="待补经营数据"
-              value={count(dashboard.coverage.products.promotionOnly)}
-              detail="仅有单品推广"
-              tone="blue"
-            />
-            <MetricTile
-              label="单品推广花费"
-              value={money(products.reduce((sum, item) => sum + item.spend, 0))}
-              detail="当前可视范围"
-              tone="rose"
-            />
-          </section>
+          <MetricCardGrid
+            panel="product"
+            coreCards={[
+              { id: "product-linked", metricId: "linkedCount", label: "已关联单品", value: count(Number(cardMetricValue(productCardRecords, "linkedCount"))), detail: "当前筛选范围内经营与推广已关联", tone: "emerald" },
+              { id: "product-sales-only", metricId: "salesOnlyCount", label: "待补推广数据", value: count(Number(cardMetricValue(productCardRecords, "salesOnlyCount"))), detail: "当前筛选范围内仅有商品经营", tone: "amber" },
+              { id: "product-promotion-only", metricId: "promotionOnlyCount", label: "待补经营数据", value: count(Number(cardMetricValue(productCardRecords, "promotionOnlyCount"))), detail: "当前筛选范围内仅有单品推广", tone: "blue" },
+              { id: "product-spend", metricId: "spend", label: "单品推广花费", value: money(Number(cardMetricValue(productCardRecords, "spend"))), detail: "当前筛选范围", tone: "rose" },
+            ]}
+            currentEntities={productCardItems}
+            comparisons={dashboard.comparisons}
+            comparisonId={automaticComparisonId(datePreset)}
+          />
           <section className="grid gap-5 xl:grid-cols-2">
             <Card>
               <CardContent className="p-5">
@@ -2439,6 +2918,7 @@ export function OperationsAssistant({
             subtitle="每行保留支付、退款、净 GSV、推广成交与推广花费，支持直接核对关联状态。"
             items={products}
             kind="product"
+            onVisibleItemsChange={setVisibleProductItems}
           />
         </div>
       )}
@@ -2663,6 +3143,7 @@ export function OperationsAssistant({
                         aria-selected={!reportType}
                         onClick={() => {
                           setReportType("");
+                          if (activeReportId) updateReportBatchItem(activeReportId, { reportType: "" });
                           setReportTypePickerOpen(false);
                         }}
                         className={`flex h-9 w-full items-center whitespace-nowrap px-3 text-left text-sm ${
@@ -2683,6 +3164,7 @@ export function OperationsAssistant({
                             aria-selected={selected}
                             onClick={() => {
                               setReportType(value);
+                              if (activeReportId) updateReportBatchItem(activeReportId, { reportType: value });
                               setReportTypePickerOpen(false);
                             }}
                             className={`flex h-9 w-full items-center whitespace-nowrap px-3 text-left text-sm ${
@@ -2706,7 +3188,9 @@ export function OperationsAssistant({
                   onChange={(event) => {
                     const next = event.target.value as OperationsPeriodKind;
                     setPeriodKind(next);
-                    if (next === "day") setPeriodEnd(periodStart);
+                    const nextEnd = next === "day" ? periodStart : periodEnd;
+                    if (next === "day") setPeriodEnd(nextEnd);
+                    if (activeReportId) updateReportBatchItem(activeReportId, { periodKind: next, periodEnd: nextEnd });
                   }}
                   className="h-10 w-full border border-slate-200 bg-white px-3 text-sm text-slate-800"
                 >
@@ -2723,8 +3207,11 @@ export function OperationsAssistant({
                   type="date"
                   value={periodStart}
                   onChange={(event) => {
-                    setPeriodStart(event.target.value);
-                    if (periodKind === "day") setPeriodEnd(event.target.value);
+                    const nextStart = event.target.value;
+                    const nextEnd = periodKind === "day" ? nextStart : periodEnd;
+                    setPeriodStart(nextStart);
+                    if (periodKind === "day") setPeriodEnd(nextEnd);
+                    if (activeReportId) updateReportBatchItem(activeReportId, { periodStart: nextStart, periodEnd: nextEnd });
                   }}
                   className="h-10 w-full border border-slate-200 bg-white px-3 text-sm text-slate-800"
                 />
@@ -2737,7 +3224,10 @@ export function OperationsAssistant({
                 <input
                   type="date"
                   value={periodEnd}
-                  onChange={(event) => setPeriodEnd(event.target.value)}
+                  onChange={(event) => {
+                    setPeriodEnd(event.target.value);
+                    if (activeReportId) updateReportBatchItem(activeReportId, { periodEnd: event.target.value });
+                  }}
                   className="h-10 w-full border border-slate-200 bg-white px-3 text-sm text-slate-800"
                 />
               </label>
@@ -2910,22 +3400,24 @@ export function OperationsAssistant({
                   <button
                     type="button"
                     onClick={() => reportFileInput.current?.click()}
+                    disabled={busy === "upload" || busy === "preview-reports"}
                     className="flex h-10 min-w-0 flex-1 items-center gap-2 border border-dashed border-emerald-300 bg-emerald-50/40 px-3 text-left text-sm text-emerald-800 hover:border-emerald-500"
                   >
                     <FileSpreadsheet className="h-4 w-4 shrink-0" />
                     <span className="truncate">
-                      {selectedReport?.name || "选择数据文件"}
+                      {reportBatch.length ? `继续添加报表（当前 ${reportBatch.length} 份）` : "批量选择数据文件"}
                     </span>
                   </button>
                   <input
                     ref={reportFileInput}
                     type="file"
+                    multiple
                     accept=".xls,.xlsx,.xlsm,.xlsb,.ods,.csv,.tsv,.txt,.json,application/vnd.ms-excel,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,text/csv,text/plain,application/json"
                     className="hidden"
                     onChange={(event) => {
-                      const file = event.target.files?.[0] || null;
+                      const files = Array.from(event.target.files || []);
                       event.target.value = "";
-                      void inspectReport(file);
+                      void inspectReports(files);
                     }}
                   />
                     <Button
@@ -2938,9 +3430,95 @@ export function OperationsAssistant({
                     ) : (
                       <Upload className="h-4 w-4" />
                     )}
-                    导入报表
+                    {busy === "upload"
+                      ? `正在导入 ${reportBatchProgress.completed}/${reportBatchProgress.total}`
+                      : `批量导入${pendingReportBatch.length ? ` ${pendingReportBatch.length} 份` : "报表"}`}
                     </Button>
                   </div>
+                  {busy === "preview-reports" && (
+                    <div
+                      role="status"
+                      aria-live="polite"
+                      className="border border-blue-200 bg-blue-50 px-3 py-2.5 text-xs text-blue-800"
+                    >
+                      <div className="flex items-center gap-2 font-semibold">
+                        <LoaderCircle className="h-4 w-4 shrink-0 animate-spin" />
+                        正在逐份读取并识别报表（{reportBatchProgress.completed}/{reportBatchProgress.total}）
+                      </div>
+                      <div className="mt-2 h-1.5 overflow-hidden bg-blue-100">
+                        <div className="h-full w-2/3 animate-pulse bg-blue-600" />
+                      </div>
+                      <div className="mt-1.5 text-blue-700">正在检查报表类型、数据行和统计日期，请稍候。</div>
+                    </div>
+                  )}
+                  {reportBatch.length > 0 && (
+                    <div className="border border-slate-200 bg-slate-50/70">
+                      <div className="flex flex-wrap items-center justify-between gap-2 border-b border-slate-200 px-3 py-2 text-xs text-slate-600">
+                        <span>文件清单 · 点击某一份单独修正上方报表类型与统计日期</span>
+                        <strong className="text-slate-800">
+                          {reportBatch.filter((item) => item.status === "success").length} 已导入 · {pendingReportBatch.length} 待处理
+                        </strong>
+                      </div>
+                      <div className="max-h-64 divide-y divide-slate-200 overflow-y-auto">
+                        {reportBatch.map((item, index) => {
+                          const active = item.id === activeReportId;
+                          const statusLabel = item.status === "previewing" ? "识别中"
+                            : item.status === "ready" ? "待导入"
+                              : item.status === "preview-error" ? "识别失败"
+                                : item.status === "uploading" ? "导入中"
+                                  : item.status === "success" ? "已导入"
+                                    : "导入失败";
+                          const statusClass = item.status === "success" ? "bg-emerald-100 text-emerald-800"
+                            : item.status === "ready" ? "bg-blue-100 text-blue-800"
+                              : item.status === "previewing" || item.status === "uploading" ? "bg-amber-100 text-amber-800"
+                                : "bg-red-100 text-red-800";
+                          return (
+                            <div key={item.id} className={`grid grid-cols-[minmax(0,1fr)_auto] items-center gap-2 px-2 py-2 ${active ? "bg-white ring-1 ring-inset ring-teal-500" : ""}`}>
+                              <button
+                                type="button"
+                                onClick={() => activateReportItem(item)}
+                                className="grid min-w-0 grid-cols-[24px_minmax(0,1fr)_auto] items-center gap-2 px-1 text-left"
+                              >
+                                <span className="grid h-6 w-6 place-items-center bg-slate-200 text-[10px] font-bold text-slate-600">{index + 1}</span>
+                                <span className="min-w-0">
+                                  <strong className="block truncate text-xs text-slate-900" title={item.file.name}>{item.file.name}</strong>
+                                  <small className="mt-0.5 block truncate text-[10px] text-slate-500">
+                                    {item.reportType ? reportTypeLabels[item.reportType] : "待选报表类型"} · {item.periodStart && item.periodEnd ? (item.periodStart === item.periodEnd ? item.periodEnd : `${item.periodStart} 至 ${item.periodEnd}`) : "待选统计日期"}{item.preview ? ` · ${item.preview.rowCount} 行` : ""}
+                                  </small>
+                                  {item.error && <em className="mt-0.5 block truncate text-[10px] not-italic text-red-700" title={item.error}>{item.error}</em>}
+                                </span>
+                                <span className={`shrink-0 px-2 py-1 text-[10px] font-semibold ${statusClass}`}>{statusLabel}</span>
+                              </button>
+                              <div className="flex items-center gap-1">
+                                {item.status === "preview-error" && (
+                                  <button
+                                    type="button"
+                                    onClick={() => void retryReportPreview(item)}
+                                    disabled={Boolean(busy)}
+                                    className="h-7 px-2 text-[10px] font-semibold text-blue-700 hover:bg-blue-50 disabled:opacity-50"
+                                  >
+                                    重新识别
+                                  </button>
+                                )}
+                                {item.status !== "uploading" && (
+                                  <button
+                                    type="button"
+                                    onClick={() => removeReportBatchItem(item.id)}
+                                    disabled={busy === "upload" || busy === "preview-reports"}
+                                    aria-label={`移除 ${item.file.name}`}
+                                    title="从批量清单移除"
+                                    className="grid h-7 w-7 place-items-center text-slate-400 hover:bg-red-50 hover:text-red-700 disabled:opacity-50"
+                                  >
+                                    <X className="h-3.5 w-3.5" />
+                                  </button>
+                                )}
+                              </div>
+                            </div>
+                          );
+                        })}
+                      </div>
+                    </div>
+                  )}
                   {showUploadRequirements && uploadRequirements.length > 0 && (
                     <div
                       role="status"
@@ -2948,6 +3526,12 @@ export function OperationsAssistant({
                     >
                       <CircleAlert className="h-3.5 w-3.5 shrink-0" />
                       还需要选择：{uploadRequirements.join("、")}
+                    </div>
+                  )}
+                  {invalidReportBatch.length > 0 && (
+                    <div role="status" className="flex items-center gap-1.5 text-xs text-amber-800">
+                      <CircleAlert className="h-3.5 w-3.5 shrink-0" />
+                      批量清单还有 {invalidReportBatch.length} 份需要补全或重新识别；点击对应文件逐份处理。
                     </div>
                   )}
                   {reportPreview && (
@@ -2998,10 +3582,16 @@ export function OperationsAssistant({
               >
                 <Check className="h-4 w-4 shrink-0" />
                 <span className="font-medium">
-                  已导入 {uploadFeedback.fileName}
+                  {uploadFeedback.successCount && uploadFeedback.successCount > 1
+                    ? `本次已导入 ${uploadFeedback.successCount} 份报表`
+                    : `已导入 ${uploadFeedback.fileName}`}
                 </span>
-                <span>已识别 {uploadFeedback.rowCount} 条可计算数据</span>
-                {uploadFeedback.id && (
+                <span>
+                  {uploadFeedback.failureCount
+                    ? `${uploadFeedback.failureCount} 份失败，可在文件清单直接重试`
+                    : `最后一份识别 ${uploadFeedback.rowCount} 条可计算数据`}
+                </span>
+                {uploadFeedback.id && (!uploadFeedback.successCount || uploadFeedback.successCount === 1) && (
                   <button
                     type="button"
                     onClick={() => void deleteImportedReport(uploadFeedback.id)}
@@ -3126,7 +3716,7 @@ export function OperationsAssistant({
               <div>
                 <CardTitle>本机运营数据仓</CardTitle>
                 <p className="mt-1 text-xs text-slate-500">
-                  按日期、周期、店铺和数据表归档，支持批量删除。
+                  先按店铺归档，再按统计日期或周期从新到旧排列，支持整店、整期和单份报表批量操作。
                 </p>
               </div>
               <div className="flex items-center gap-2">
@@ -3255,7 +3845,7 @@ export function OperationsAssistant({
                       />
                     </th>
                     <th className="px-4 py-3 font-medium">文件</th>
-                    <th className="px-4 py-3 font-medium">统计周期 / 店铺</th>
+                    <th className="px-4 py-3 font-medium">统计周期</th>
                     <th className="px-4 py-3 font-medium">数据表</th>
                     <th className="px-4 py-3 font-medium">数据</th>
                     <th className="px-4 py-3 font-medium text-right">操作</th>
@@ -3472,18 +4062,25 @@ export function OperationsAssistant({
               <div className="mt-6 border-t border-slate-200 pt-5">
                 <div className="flex items-center justify-between gap-3">
                   <div>
-                    <div className="text-sm font-semibold text-slate-900">当前口径内的扣除</div>
-                    <div className="mt-1 text-xs text-slate-500">共 {workspace.salesDeductions.length} 笔 · {money(dashboard.totalSalesDeduction)}</div>
+                    <div className="text-sm font-semibold text-slate-900">销售扣除历史</div>
+                    <div className="mt-1 text-xs text-slate-500">
+                      历史共 {(workspace.salesDeductionHistory || workspace.salesDeductions).length} 笔 · 当前口径 {workspace.salesDeductions.length} 笔 / {money(dashboard.totalSalesDeduction)}
+                    </div>
                   </div>
                 </div>
                 <div className="mt-3 divide-y divide-slate-100 border-y border-slate-100">
-                  {workspace.salesDeductions.length ? (
-                    workspace.salesDeductions.map((item) => (
+                  {(workspace.salesDeductionHistory || workspace.salesDeductions).length ? (
+                    (workspace.salesDeductionHistory || workspace.salesDeductions).map((item) => {
+                      const active = workspace.salesDeductions.some((current) => current.id === item.id);
+                      return (
                       <div key={item.id} className="grid grid-cols-[minmax(0,1fr)_auto] gap-3 py-3">
                         <div className="min-w-0">
                           <div className="flex items-center gap-2 text-sm font-medium text-slate-800">
                             <span className="truncate">{item.storeName}</span>
                             <span className="shrink-0 text-xs font-normal text-slate-500">{item.reportDate}</span>
+                            <span className={`shrink-0 px-1.5 py-0.5 text-[10px] font-semibold ${active ? "bg-emerald-50 text-emerald-700" : "bg-slate-100 text-slate-500"}`}>
+                              {active ? "当前口径" : "历史"}
+                            </span>
                           </div>
                           {item.note && <div className="mt-1 break-words text-xs leading-5 text-slate-500">{item.note}</div>}
                         </div>
@@ -3501,9 +4098,10 @@ export function OperationsAssistant({
                           </button>
                         </div>
                       </div>
-                    ))
+                      );
+                    })
                   ) : (
-                    <div className="py-6 text-center text-sm text-slate-400">当前筛选口径暂无销售扣除。</div>
+                    <div className="py-6 text-center text-sm text-slate-400">还没有销售扣除记录。</div>
                   )}
                 </div>
               </div>
@@ -3638,11 +4236,13 @@ function EntityTable({
   subtitle,
   items,
   kind,
+  onVisibleItemsChange,
 }: {
   title: string;
   subtitle: string;
   items: OperationsBusinessEntity[];
   kind: "category" | "product";
+  onVisibleItemsChange: (items: OperationsBusinessEntity[]) => void;
 }) {
   const [keyword, setKeyword] = useState("");
   const [sortKey, setSortKey] = useState<EntityTableSortKey>("revenue");
@@ -3711,6 +4311,7 @@ function EntityTable({
         return sortDirection === "asc" ? compare : -compare;
       });
   }, [dataItems, keyword, kind, selectedCategoryNames, selectedModelNames, sortKey, sortDirection]);
+  useEffect(() => onVisibleItemsChange(visibleItems), [onVisibleItemsChange, visibleItems]);
   const selectionSummary = useMemo(() => {
     const totals = visibleItems.reduce(
       (result, item) => ({

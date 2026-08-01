@@ -695,8 +695,44 @@ test("store sales deductions recalculate only the explicit management scope", as
   assert.equal(workspace.dashboard.products.find((item) => item.productId === "1001")?.revenue, 900);
   assert.equal(workspace.dashboard.totalSalesDeduction, 200);
   assert.equal(workspace.salesDeductions.length, 1);
+  assert.equal(workspace.salesDeductionHistory.length, 2);
   assert.equal(workspace.storeOverview.managementRoi, 7);
   assert.equal(workspace.storeOverview.performance.roi, 5);
+});
+
+test("rolling date ranges aggregate every included daily ledger", async () => {
+  const productFile = (amount, refund) => ({
+    originalname: "商品排行.csv",
+    buffer: Buffer.from(`商品ID,商品名称,支付金额,成功退款金额\n1001,电饭煲A,${amount},${refund}\n`, "utf8"),
+  });
+  const campaignFile = (spend) => ({
+    originalname: "单品付费.csv",
+    buffer: Buffer.from(`商品ID,主体名称,消耗,总成交金额\n1001,电饭煲A,${spend},500\n`, "utf8"),
+  });
+  const reports = [];
+  for (const [date, amount, refund, spend] of [
+    ["2026-07-25", 1_000, 100, 100],
+    ["2026-07-26", 2_000, 200, 200],
+  ]) {
+    const productSource = productFile(amount, refund);
+    const campaignSource = campaignFile(spend);
+    reports.push(
+      createOperationsReport({ type: "product", storeName: "店铺A", reportDate: date }, await parseOperationsFile(productSource), { file: productSource }),
+      createOperationsReport({ type: "campaign", storeName: "店铺A", reportDate: date }, await parseOperationsFile(campaignSource), { file: campaignSource }),
+    );
+  }
+
+  const workspace = buildOperationsWorkspace({ reports }, {
+    filters: { periodKind: "custom", sourcePeriodKind: "auto", start: "2026-07-20", end: "2026-07-26" },
+  });
+
+  assert.equal(workspace.reports.length, 4);
+  assert.equal(workspace.dashboard.store.grossRevenue, 3_000);
+  assert.equal(workspace.dashboard.store.refundAmount, 300);
+  assert.equal(workspace.dashboard.store.revenue, 2_700);
+  assert.equal(workspace.dashboard.store.spend, 300);
+  assert.equal(workspace.dashboard.store.feeRate, 300 / 2_700);
+  assert.equal(workspace.dashboard.trend.length, 2);
 });
 
 test("operations dashboard links product and category sources without mixing sales with attributed promotion revenue", async () => {
@@ -870,6 +906,97 @@ test("operations data archive keeps daily snapshots separate and compares only t
   const context = JSON.parse(operationsAgentContextText(workspace));
   assert.equal(context.archive.currentDate, "2026-07-25");
   assert.equal(context.archive.days.length, 2);
+});
+
+test("operations comparisons follow the selected end date and preserve natural period boundaries", () => {
+  const reports = [];
+  for (const month of ["2026-06", "2026-07"]) {
+    const days = month === "2026-06" ? 30 : 31;
+    for (let day = 1; day <= days; day += 1) {
+      const date = `${month}-${String(day).padStart(2, "0")}`;
+      reports.push({
+        id: `product-${date}`,
+        type: "product",
+        storeName: "测试店铺",
+        reportDate: date,
+        periodKind: "day",
+        periodStart: date,
+        periodEnd: date,
+        importedAt: `${date}T12:00:00.000Z`,
+        rows: [{ productId: "1001", productName: "测试商品", storeName: "测试店铺", grossRevenue: 100, refundAmount: 10, revenue: 90, refundDataAvailable: true, visitors: 10, paidBuyers: 2 }],
+      }, {
+        id: `campaign-${date}`,
+        type: "campaign",
+        storeName: "测试店铺",
+        reportDate: date,
+        periodKind: "day",
+        periodStart: date,
+        periodEnd: date,
+        importedAt: `${date}T12:00:00.000Z`,
+        rows: [{ productId: "1001", productName: "测试商品", storeName: "测试店铺", spend: 10, revenue: 30, clicks: 5, orders: 1 }],
+      });
+    }
+  }
+  const workspace = buildOperationsWorkspace({ reports }, {
+    filters: { sourcePeriodKind: "auto", storeName: "测试店铺", start: "2026-07-01", end: "2026-07-31" },
+  });
+  const comparisons = workspace.dashboard.comparisons;
+
+  assert.deepEqual(
+    [comparisons.day.currentStart, comparisons.day.currentEnd, comparisons.day.previousStart, comparisons.day.previousEnd],
+    ["2026-07-31", "2026-07-31", "2026-07-30", "2026-07-30"],
+  );
+  assert.deepEqual(
+    [comparisons.week.currentStart, comparisons.week.currentEnd, comparisons.week.previousStart, comparisons.week.previousEnd],
+    ["2026-07-27", "2026-07-31", "2026-07-20", "2026-07-24"],
+  );
+  assert.deepEqual(
+    [comparisons.last15.currentStart, comparisons.last15.currentEnd, comparisons.last15.previousStart, comparisons.last15.previousEnd],
+    ["2026-07-17", "2026-07-31", "2026-07-02", "2026-07-16"],
+  );
+  assert.deepEqual(
+    [comparisons.month.currentStart, comparisons.month.currentEnd, comparisons.month.previousStart, comparisons.month.previousEnd],
+    ["2026-07-01", "2026-07-31", "2026-06-01", "2026-06-30"],
+  );
+  assert.equal(comparisons.day.current.store.revenue, 90);
+  assert.equal(comparisons.week.current.store.revenue, 450);
+  assert.equal(comparisons.last15.current.store.revenue, 1350);
+  assert.equal(comparisons.month.current.store.revenue, 2790);
+  assert.equal(comparisons.month.previous.store.revenue, 2700);
+  assert.equal(comparisons.month.current.store.feeRate, 310 / 2790);
+  assert.equal(comparisons.month.previous.store.feeRate, 300 / 2700);
+
+  const customWorkspace = buildOperationsWorkspace({ reports }, {
+    filters: { sourcePeriodKind: "auto", storeName: "测试店铺", start: "2026-07-20", end: "2026-07-29" },
+  });
+  const customComparison = customWorkspace.dashboard.comparisons.custom;
+  assert.deepEqual(
+    [customComparison.currentStart, customComparison.currentEnd, customComparison.previousStart, customComparison.previousEnd],
+    ["2026-07-20", "2026-07-29", "2026-07-10", "2026-07-19"],
+  );
+  assert.equal(customComparison.currentAvailable, true);
+  assert.equal(customComparison.previousAvailable, true);
+  assert.equal(customComparison.current.store.revenue, 900);
+  assert.equal(customComparison.previous.store.revenue, 900);
+});
+
+test("operations comparisons mark a missing prior period unavailable instead of fabricating zero", () => {
+  const date = "2026-07-31";
+  const workspace = buildOperationsWorkspace({ reports: [{
+    id: "single-day-product",
+    type: "product",
+    storeName: "测试店铺",
+    reportDate: date,
+    periodKind: "day",
+    periodStart: date,
+    periodEnd: date,
+    importedAt: `${date}T12:00:00.000Z`,
+    rows: [{ productId: "1001", productName: "测试商品", storeName: "测试店铺", grossRevenue: 100, refundAmount: 10, revenue: 90, refundDataAvailable: true }],
+  }] }, { filters: { sourcePeriodKind: "auto", start: date, end: date } });
+
+  assert.equal(workspace.dashboard.comparisons.day.currentAvailable, true);
+  assert.equal(workspace.dashboard.comparisons.day.previousAvailable, false);
+  assert.equal(workspace.dashboard.comparisons.day.previous.store.available, false);
 });
 
 test("operations assistant parses legacy XLS reports with export notes before the real header", async () => {

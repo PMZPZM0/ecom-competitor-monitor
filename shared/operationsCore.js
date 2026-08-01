@@ -447,6 +447,15 @@ function repairLegacyPromotionChannels(reports) {
 }
 
 function decodeCsv(buffer) {
+  // A valid UTF-8 stream is unambiguous and must win before heuristic
+  // scoring. Short Chinese exports can otherwise look more "printable" when
+  // the same bytes are incorrectly decoded as GB18030, producing mojibake.
+  try {
+    const utf8 = new TextDecoder("utf-8", { fatal: true }).decode(buffer).replace(/^\uFEFF/, "");
+    return utf8;
+  } catch {
+    // Fall through to legacy Chinese encodings used by older export tools.
+  }
   const candidates = ["utf-8", "gb18030", "gbk"].flatMap((encoding) => {
     try {
       return [{ encoding, value: new TextDecoder(encoding, { fatal: false }).decode(buffer).replace(/^\uFEFF/, "") }];
@@ -660,12 +669,14 @@ function normalizeProductCatalogEntries(entries) {
     const productId = text(entry?.productId, 80).replace(/\s+/g, "");
     const category = text(entry?.category, 80);
     const model = text(entry?.model, 80);
+    const replacesId = text(entry?.replacesId, 80);
     if (!productId || (!category && !model)) continue;
     normalized.push({
       // Legacy catalog records had no identity or timestamp. Preserve their
       // original array order as version order so migrating local data never
       // replaces a newer mapping with an older one.
       id: text(entry?.id, 80) || `catalog_legacy_${crypto.createHash("sha256").update(`${storeName}\n${productId}\n${category}\n${model}\n${index}`).digest("hex").slice(0, 20)}`,
+      ...(replacesId ? { replacesId } : {}),
       storeName,
       productId,
       category,
@@ -1785,7 +1796,9 @@ function groupByJoinValue(rows, valueFor) {
 function buildProductCatalogIndex(entries) {
   const exact = new Map();
   const entriesByProductId = new Map();
+  const replacedIds = new Set((entries || []).map((entry) => entry.replacesId).filter(Boolean));
   for (const entry of entries || []) {
+    if (replacedIds.has(entry.id)) continue;
     exact.set(catalogEntryKey(entry.storeName, entry.productId), entry);
     const current = entriesByProductId.get(entry.productId) || [];
     current.push(entry);
@@ -2030,6 +2043,19 @@ function buildStoreTrend(reports, salesDeductions) {
       salesDeduction,
       spend: promotion.spend,
       promotionRevenue: promotion.revenue,
+      visitors: sales.visitors,
+      paidBuyers: sales.paidBuyers,
+      conversionRate: sales.visitors > 0 ? sales.paidBuyers / sales.visitors : null,
+      clicks: promotion.clicks,
+      impressions: promotion.impressions,
+      orders: promotion.orders,
+      pageViews: sales.pageViews,
+      favorites: sales.favorites,
+      cartUsers: sales.cartUsers,
+      cartItems: sales.cartItems,
+      paidItems: sales.paidItems,
+      cpc: promotion.clicks > 0 ? promotion.spend / promotion.clicks : null,
+      costPerCollectCart: sales.cartUsers > 0 ? promotion.spend / sales.cartUsers : null,
       promotionCoverageComplete: coverage.complete,
       roi: coverage.complete && promotion.spend > 0 ? revenue / promotion.spend : null,
       feeRate: coverage.complete && sales.refundDataAvailable && revenue > 0 ? promotion.spend / revenue : null,
@@ -2175,6 +2201,145 @@ function reportsForAutomaticSource(reports, filters = {}) {
   return selected;
 }
 
+function parseIsoDate(value) {
+  const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(String(value || ""));
+  if (!match) return null;
+  const date = new Date(Date.UTC(Number(match[1]), Number(match[2]) - 1, Number(match[3])));
+  return Number.isFinite(date.getTime()) ? date : null;
+}
+
+function comparisonIsoDate(value) {
+  return value.toISOString().slice(0, 10);
+}
+
+function shiftIsoDate(value, days) {
+  const date = parseIsoDate(value);
+  if (!date) return "";
+  date.setUTCDate(date.getUTCDate() + days);
+  return comparisonIsoDate(date);
+}
+
+function comparisonWindows(endValue, startValue = "") {
+  const endDate = parseIsoDate(endValue);
+  if (!endDate) return [];
+  const end = comparisonIsoDate(endDate);
+  const mondayOffset = (endDate.getUTCDay() + 6) % 7;
+  const monthStart = new Date(Date.UTC(endDate.getUTCFullYear(), endDate.getUTCMonth(), 1));
+  const currentMonthEnd = new Date(Date.UTC(endDate.getUTCFullYear(), endDate.getUTCMonth() + 1, 0));
+  const previousMonthStart = new Date(Date.UTC(endDate.getUTCFullYear(), endDate.getUTCMonth() - 1, 1));
+  const previousMonthEnd = new Date(Date.UTC(endDate.getUTCFullYear(), endDate.getUTCMonth(), 0));
+  const previousMonthDay = endDate.getUTCDate() === currentMonthEnd.getUTCDate()
+    ? previousMonthEnd.getUTCDate()
+    : Math.min(endDate.getUTCDate(), previousMonthEnd.getUTCDate());
+  const previousMonthComparableEnd = new Date(Date.UTC(
+    previousMonthEnd.getUTCFullYear(),
+    previousMonthEnd.getUTCMonth(),
+    previousMonthDay,
+  ));
+  const windows = [
+    { id: "day", label: "日环比", currentStart: end, currentEnd: end, previousStart: shiftIsoDate(end, -1), previousEnd: shiftIsoDate(end, -1) },
+    { id: "week", label: "周环比", currentStart: shiftIsoDate(end, -mondayOffset), currentEnd: end, previousStart: shiftIsoDate(end, -mondayOffset - 7), previousEnd: shiftIsoDate(end, -7) },
+    { id: "last7", label: "近 7 天", currentStart: shiftIsoDate(end, -6), currentEnd: end, previousStart: shiftIsoDate(end, -13), previousEnd: shiftIsoDate(end, -7) },
+    { id: "last15", label: "近 15 天", currentStart: shiftIsoDate(end, -14), currentEnd: end, previousStart: shiftIsoDate(end, -29), previousEnd: shiftIsoDate(end, -15) },
+    { id: "month", label: "月环比", currentStart: comparisonIsoDate(monthStart), currentEnd: end, previousStart: comparisonIsoDate(previousMonthStart), previousEnd: comparisonIsoDate(previousMonthComparableEnd) },
+  ];
+  const startDate = parseIsoDate(startValue);
+  if (startDate && startDate <= endDate) {
+    const days = Math.round((endDate.getTime() - startDate.getTime()) / 86_400_000) + 1;
+    windows.push({
+      id: "custom",
+      label: "区间环比",
+      currentStart: comparisonIsoDate(startDate),
+      currentEnd: end,
+      previousStart: shiftIsoDate(comparisonIsoDate(startDate), -days),
+      previousEnd: shiftIsoDate(comparisonIsoDate(startDate), -1),
+    });
+  }
+  return windows;
+}
+
+function comparableEntity(entity) {
+  if (!entity) return null;
+  return {
+    key: entity.key,
+    name: entity.name,
+    productId: entity.productId || "",
+    storeName: entity.storeName || "",
+    model: entity.model || "",
+    category: entity.category || "",
+    available: Boolean(entity.salesCount || entity.promotionCount),
+    salesCount: entity.salesCount,
+    promotionCount: entity.promotionCount,
+    refundDataAvailable: entity.refundDataAvailable,
+    promotionCoverageComplete: entity.promotionCoverageComplete,
+    grossRevenue: entity.grossRevenue,
+    refundAmount: entity.refundAmount,
+    revenue: entity.revenue,
+    spend: entity.spend,
+    promotionRevenue: entity.promotionRevenue,
+    managementRoi: entity.managementRoi,
+    roi: entity.roi,
+    feeRate: entity.feeRate,
+    visitors: entity.visitors,
+    paidBuyers: entity.paidBuyers,
+    conversionRate: entity.conversionRate,
+    clicks: entity.clicks,
+    impressions: entity.impressions,
+    orders: entity.orders,
+    pageViews: entity.sales?.pageViews || 0,
+    favorites: entity.sales?.favorites || 0,
+    cartUsers: entity.sales?.cartUsers || 0,
+    cartItems: entity.sales?.cartItems || 0,
+    paidItems: entity.sales?.paidItems || 0,
+    cpc: entity.promotion?.cpc ?? null,
+    costPerCollectCart: entity.promotion?.costPerCollectCart ?? null,
+  };
+}
+
+function comparisonSnapshot(dashboard) {
+  return {
+    store: comparableEntity(dashboard.store),
+    products: dashboard.products.map(comparableEntity),
+    categories: dashboard.categories.map(comparableEntity),
+  };
+}
+
+function dashboardForComparisonRange(normalized, filters, start, end) {
+  const rangeFilters = { ...filters, start, end };
+  const matchedReports = normalized.reports.filter((report) => (
+    reportMatchesWorkspaceFilters(report, rangeFilters)
+    && report.periodStart >= start
+    && report.periodEnd <= end
+  ));
+  const selectedReports = String(filters.sourcePeriodKind || "") === "auto"
+    ? reportsForAutomaticSource(matchedReports, rangeFilters)
+    : matchedReports;
+  const state = {
+    ...normalized,
+    filters: rangeFilters,
+    reports: ledgerBackedReports(selectedReports, normalized.ledger),
+  };
+  return {
+    available: selectedReports.length > 0,
+    dashboard: buildOperationsDashboard(state),
+  };
+}
+
+function buildDashboardComparisons(normalized, filters, fallbackEnd) {
+  const end = String(filters.end || fallbackEnd || "");
+  return Object.fromEntries(comparisonWindows(end, String(filters.start || "")).map((window) => {
+    const current = dashboardForComparisonRange(normalized, filters, window.currentStart, window.currentEnd);
+    const previous = dashboardForComparisonRange(normalized, filters, window.previousStart, window.previousEnd);
+    return [window.id, {
+      ...window,
+      currentAvailable: current.available,
+      previousAvailable: previous.available,
+      current: comparisonSnapshot(current.dashboard),
+      previous: comparisonSnapshot(previous.dashboard),
+    }];
+  }));
+}
+
 export function buildOperationsWorkspace(value = {}, { now = new Date(), filters = {} } = {}) {
   const normalized = normalizeOperationsState(value);
   const matchedReports = normalized.reports.filter((report) => reportMatchesWorkspaceFilters(report, filters));
@@ -2191,6 +2356,11 @@ export function buildOperationsWorkspace(value = {}, { now = new Date(), filters
   };
   const currentDate = state.reports.map(reportSnapshotDate).sort().at(-1) || "";
   const dashboard = buildOperationsDashboard(state);
+  dashboard.comparisons = buildDashboardComparisons(
+    normalized,
+    filters,
+    currentDate || dateOnly(now),
+  );
   const datasets = buildDatasetViews(state);
   // The dashboard has already guaranteed period alignment.  Reuse that exact
   // source pair for the Agent and summary logic instead of independently
@@ -2256,6 +2426,10 @@ export function buildOperationsWorkspace(value = {}, { now = new Date(), filters
     archive: buildOperationsArchive(state.reports),
     profile: { principles: state.principles, dailyReport: state.dailyReport, targets: state.targets },
     salesDeductions: dashboard.salesDeductions,
+    salesDeductionHistory: state.salesDeductions.slice().sort((left, right) => (
+      String(right.reportDate || "").localeCompare(String(left.reportDate || ""))
+      || String(right.createdAt || "").localeCompare(String(left.createdAt || ""))
+    )),
     freshness,
     totals: total,
     products: productGroups.slice(0, 50),
