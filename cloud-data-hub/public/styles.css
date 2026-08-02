@@ -214,6 +214,67 @@ input:focus, select:focus { border-color: #2563c8; box-shadow: 0 0 0 3px rgba(37
 .deduction-scope { display: inline-flex; padding: 3px 6px; border-radius: 3px; color: #6b7f99; background: #edf2f8; font-size: 10px; font-weight: 700; }
 .deduction-scope.active { color: #176a50; background: #e5f6ef; }
 
+/* Category and product metric controls stay compact while preserving each view's own comparison preference. */
+.metric-grid-controls { position: absolute; z-index: 3; top: 9px; right: 9px; display: flex; align-items: center; gap: 6px; }
+.metric-grid-controls .metric-settings-button { position: static; }
+.metric-comparison-switch { display: inline-flex; height: 28px; align-items: center; gap: 7px; padding: 0 7px 0 9px; border: 1px solid #cbd9eb; border-radius: 4px; color: #4e6686; background: #fff; box-shadow: 0 2px 8px rgba(31,65,112,.08); font-size: 10px; font-weight: 800; cursor: pointer; }
+.metric-comparison-switch:hover { border-color: #73a1dd; color: #1f5eab; background: #f5f9ff; }
+.metric-comparison-switch input { position: absolute; width: 1px; height: 1px; overflow: hidden; opacity: 0; pointer-events: none; }
+.metric-comparison-switch i { position: relative; display: block; width: 26px; height: 15px; border-radius: 10px; background: #cbd5e1; transition: background .16s ease; }
+.metric-comparison-switch i::after { position: absolute; top: 2px; left: 2px; width: 11px; height: 11px; border-radius: 50%; background: #fff; box-shadow: 0 1px 3px rgba(31,49,75,.24); content: ''; transition: transform .16s ease; }
+.metric-comparison-switch input:checked + i { background: #2563c8; }
+.metric-comparison-switch input:checked + i::after { transform: translateX(11px); }
+.metric-comparison-switch:has(input:focus-visible) { outline: 2px solid #2563c8; outline-offset: 2px; }
+.custom-card-global.disabled { border-color: #dce5ef; background: #f6f8fb; }
+.custom-card-global.disabled strong { color: #52657f; }
+.custom-metric-options { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 7px; margin-top: 3px; }
+.custom-metric-option { display: flex; min-width: 0; align-items: flex-start; gap: 9px; padding: 10px; border: 1px solid #dce6f2; border-radius: 4px; color: #304b6c; background: #fff; cursor: pointer; transition: border-color .14s ease, background .14s ease; }
+.custom-metric-option:hover { border-color: #9abbe3; background: #f8fbff; }
+.custom-metric-option.selected { border-color: #76a7df; background: #edf5ff; box-shadow: inset 3px 0 #2563c8; }
+.custom-metric-option.disabled { cursor: not-allowed; opacity: .48; }
+.custom-metric-option input { flex: 0 0 auto; width: 14px; height: 14px; margin-top: 1px; accent-color: #2563c8; }
+.custom-metric-option > span { min-width: 0; }
+.custom-metric-option strong, .custom-metric-option small { display: block; letter-spacing: 0; }
+.custom-metric-option strong { color: #244568; font-size: 11px; }
+.custom-metric-option small { margin-top: 4px; color: #74859c; font-size: 9px; line-height: 1.45; }
+.matrix-metric-order-section { display: grid; gap: 9px; padding: 12px; border: 1px solid #d5e2f1; border-radius: 4px; background: #f7faff; }
+.matrix-metric-order-section > header { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.matrix-metric-order-section h4 { margin: 0; color: #203858; font-size: 12px; }
+.matrix-metric-order-section > header > span { color: #6f819b; font-size: 10px; font-weight: 800; font-variant-numeric: tabular-nums; }
+.matrix-metric-order-list { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 7px; }
+.matrix-metric-order-item { display: grid; grid-template-columns: 18px minmax(0, 1fr) auto; align-items: center; gap: 7px; min-width: 0; padding: 8px; border: 1px solid #d8e3f0; border-radius: 3px; background: #fff; cursor: grab; transition: border-color .14s ease, box-shadow .14s ease, opacity .14s ease; }
+.matrix-metric-order-item:hover, .matrix-metric-order-item.drag-over { border-color: #6f9fdb; box-shadow: 0 0 0 2px rgba(37,99,200,.1); }
+.matrix-metric-order-item.dragging { opacity: .55; cursor: grabbing; }
+.matrix-metric-drag { color: #8a9ab0; font-size: 13px; letter-spacing: 0; }
+.matrix-metric-order-item > span:nth-child(2) { min-width: 0; }
+.matrix-metric-order-item strong, .matrix-metric-order-item small { display: block; overflow: hidden; letter-spacing: 0; text-overflow: ellipsis; white-space: nowrap; }
+.matrix-metric-order-item strong { color: #28466b; font-size: 10px; }
+.matrix-metric-order-item small { margin-top: 3px; color: #7b899d; font-size: 9px; }
+.matrix-metric-order-actions { display: flex; gap: 3px; }
+.matrix-metric-order-actions button { display: grid; width: 24px; height: 24px; place-items: center; padding: 0; border: 1px solid #d3dfed; border-radius: 3px; color: #59718f; background: #fff; font-size: 12px; }
+.matrix-metric-order-actions button:hover:not(:disabled) { border-color: #6f9fdb; color: #1e5ca8; background: #f3f8ff; }
+.matrix-metric-order-actions button:disabled { cursor: not-allowed; opacity: .3; }
+.matrix-metric-order-empty { padding: 13px; border: 1px dashed #d6e1ee; color: #8795a8; background: #fff; font-size: 10px; text-align: center; }
+.matrix-comparison-switch { box-shadow: none; }
+.matrix-metric-button { white-space: nowrap; }
+.entity-value-line { display: flex!important; align-items: center; gap: 5px; flex-wrap: wrap; }
+.entity-metric-cell > strong { display: block; font-variant-numeric: tabular-nums; }
+.entity-comparison-badge { display: inline-flex; width: max-content; margin-top: 4px; padding: 2px 4px; border: 1px solid #dce5ef; border-radius: 3px; color: #748399; background: #f5f7fa; font-size: 9px; font-weight: 800; line-height: 1.05; white-space: nowrap; font-variant-numeric: tabular-nums; }
+.entity-value-line .entity-comparison-badge { margin-top: 0; }
+.entity-comparison-badge.comparison-up { color: #bb3449; border-color: #efbbc4; background: #fff0f2; }
+.entity-comparison-badge.comparison-down { color: #087255; border-color: #abdcca; background: #eaf8f3; }
+.entity-comparison-badge.unavailable { color: #8795a8; }
+
+@media (max-width: 760px) {
+  .custom-metric-options { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .matrix-metric-order-list { grid-template-columns: 1fr; }
+  .metric-comparison-switch { padding-left: 7px; }
+}
+
+@media (max-width: 430px) {
+  .custom-metric-options { grid-template-columns: 1fr; }
+}
+
 /* Entity filters are application-managed so selection remains stable while the results refresh. */
 .entity-filter { position: relative; }
 .entity-filter-trigger { display: inline-flex; align-items: center; justify-content: space-between; gap: 8px; min-width: 104px; min-height: 31px; padding: 4px 9px; border: 1px solid #cfdded; border-radius: 4px; color: #516887; background: #fff; font-size: 11px; font-weight: 700; text-align: left; }
@@ -640,7 +701,7 @@ input:focus, select:focus { border-color: #2563c8; box-shadow: 0 0 0 3px rgba(37
   .entity-comparison > footer { margin-top: 8px; }
 
   .entity-table { max-height: 640px; overflow-x: hidden; padding: 8px; background: #f4f8fd; }
-  .entity-table table { display: block; width: 100%; min-width: 0; }
+  .entity-table table { display: block; width: 100%; min-width: 0!important; }
   .entity-table thead { display: none; }
   .entity-table tbody { display: grid; gap: 8px; }
   .entity-table tbody > tr { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 9px 12px; padding: 11px; border: 1px solid #d9e5f3; border-radius: 6px; background: #fff; }
@@ -650,17 +711,18 @@ input:focus, select:focus { border-color: #2563c8; box-shadow: 0 0 0 3px rgba(37
   .entity-table td::before { display: block; margin-bottom: 3px; color: #8393a9; font-size: 8px; font-weight: 750; }
   .entity-table td > strong { display: block; overflow: hidden; color: #203a5d; font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }
   .entity-table td > small { margin-top: 2px; font-size: 9px; }
-  .product-matrix-table td:nth-child(1), .category-matrix-table td:nth-child(1) { grid-column: 1 / -1; }
-  .product-matrix-table td:nth-child(1) strong, .category-matrix-table td:nth-child(1) strong { display: -webkit-box; line-height: 1.4; white-space: normal; -webkit-box-orient: vertical; -webkit-line-clamp: 2; }
-  .product-matrix-table td:nth-child(2)::before { content: "商品 ID"; }
-  .product-matrix-table td:nth-child(3)::before { content: "型号 / 品类"; }
-  .product-matrix-table td:nth-child(5)::before, .category-matrix-table td:nth-child(3)::before { content: "净 GSV"; }
-  .product-matrix-table td:nth-child(6)::before, .category-matrix-table td:nth-child(4)::before { content: "推广花费"; }
-  .product-matrix-table td:nth-child(8)::before, .category-matrix-table td:nth-child(6)::before { content: "ROI"; }
-  .product-matrix-table td:nth-child(9)::before, .category-matrix-table td:nth-child(7)::before { content: "推广费率"; }
-  .product-matrix-table td:nth-child(4), .product-matrix-table td:nth-child(7), .product-matrix-table td:nth-child(11),
-  .category-matrix-table td:nth-child(2), .category-matrix-table td:nth-child(5), .category-matrix-table td:nth-child(9) { display: none; }
-  .product-matrix-table td:nth-child(10), .category-matrix-table td:nth-child(8) { grid-column: 1 / -1; }
+  .entity-table .entity-name-cell { grid-column: 1 / -1; }
+  .entity-table .entity-name-cell strong { display: -webkit-box; line-height: 1.4; white-space: normal; -webkit-box-orient: vertical; -webkit-line-clamp: 2; }
+  .entity-table .entity-id-cell::before { content: "商品 ID"; }
+  .entity-table .entity-model-cell::before { content: "型号 / 品类"; }
+  .entity-table .metric-revenue::before { content: "净 GSV"; }
+  .entity-table .metric-spend::before { content: "推广花费"; }
+  .entity-table .metric-roi::before { content: "ROI"; }
+  .entity-table .metric-fee-rate::before { content: "推广费率"; }
+  .entity-table .metric-custom::before { content: attr(data-mobile-label); }
+  .entity-table .entity-payment-cell, .entity-table .metric-promotion-revenue, .entity-table .entity-match-cell { display: none; }
+  .entity-table .entity-promotion-cell { grid-column: 1 / -1; }
+  .entity-table .entity-comparison-badge { max-width: 100%; overflow: hidden; text-overflow: ellipsis; }
   .entity-table .promotion-toggle { width: 100%; }
 
   .promotion-drawer { top: auto; bottom: 0; width: 100%; height: min(84vh, 720px); border-top: 1px solid #c9d9ed; border-left: 0; border-radius: 8px 8px 0 0; box-shadow: 0 -18px 48px rgba(20, 50, 92, .22); }

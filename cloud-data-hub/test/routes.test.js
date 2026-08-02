@@ -29,7 +29,7 @@ function latestProductCatalogEntriesForTest(entries = []) {
 
 test("the product brand and team cards expose a clear operating identity", () => {
   assert.match(htmlSource, /<title>经营罗盘 · 团队经营决策<\/title>/);
-  assert.match(htmlSource, /auto-comparison-35/);
+  assert.match(htmlSource, /matrix-drag-order-3/);
   assert.match(appSource, /operationsCore\.js\?v=20260801-auto-comparison-8/);
   assert.match(appSource, /function brandLockup\(subtitle, compact = false\)/);
   assert.match(appSource, /<strong>经营罗盘<\/strong>/);
@@ -118,22 +118,38 @@ test("operations toolbar exposes a rolling seven-day daily aggregation shortcut"
   assert.match(appSource, /\['last-15-days', '近 15 日'\]/);
 });
 
-test("operations cards show inline comparisons and merge custom metrics into the existing grid", () => {
+test("entity matrices replace large cards with row comparisons and custom columns", () => {
   assert.match(appSource, /function managedMetricGrid\(panel, coreCards, visibleRows\)/);
+  assert.match(appSource, /managedMetricGrid\('store'/);
+  assert.doesNotMatch(appSource, /managedMetricGrid\('category'/);
+  assert.doesNotMatch(appSource, /managedMetricGrid\('product'/);
   assert.match(appSource, /function customCardSettingsModal\(\)/);
   assert.match(appSource, /operations-custom-cards-v1:/);
+  assert.match(appSource, /operations-comparison-visibility-v1:/);
+  assert.match(appSource, /operations-matrix-metrics-v1:/);
+  assert.match(appSource, /MATRIX_CUSTOM_METRIC_LIMIT = 8/);
   assert.doesNotMatch(appSource, /operations-core-card-comparisons-v1:/);
-  assert.match(appSource, /metric-value-row/);
   assert.match(appSource, /comparison-up/);
   assert.match(appSource, /comparison-down/);
-  assert.doesNotMatch(appSource, /function customCardsBand\(/);
   assert.match(appSource, /\['day', '日环比'\]/);
   assert.match(appSource, /\['last15', '近 15 天'\]/);
   assert.match(appSource, /function automaticComparisonId\(preset\)/);
-  assert.match(appSource, /comparisonBadges\(panel, card\.metricId, \[comparisonId\]/);
-  assert.doesNotMatch(appSource, /data-apply-global-comparisons/);
-  assert.match(appSource, /panel === 'store' \? card\.metricId : ''/);
-  assert.match(appSource, /trend-toggle-card/);
+  assert.match(appSource, /function entityComparisonBadge\(metricId, row, previousRow, comparison\)/);
+  assert.match(appSource, /previousEntityIndex\(kind, previousRows\)/);
+  for (const metricId of ['grossRevenue', 'refundAmount', 'revenue', 'spend', 'promotionRevenue', 'roi', 'feeRate']) {
+    assert.match(appSource, new RegExp(`badge\\('${metricId}', row, previousRow\\)`));
+  }
+  assert.match(appSource, /data-comparison-toggle=/);
+  assert.match(appSource, /data-matrix-metric-toggle=/);
+  assert.match(appSource, /data-matrix-metric-order=/);
+  assert.match(appSource, /data-matrix-metric-move=/);
+  assert.match(appSource, /function reorderMatrixMetric\(panel, sourceId, targetId\)/);
+  assert.match(appSource, /customMetricIds\.map/);
+  assert.match(stylesSource, /\.metric-comparison-switch/);
+  assert.match(stylesSource, /\.entity-comparison-badge/);
+  assert.match(stylesSource, /\.custom-metric-options/);
+  assert.match(stylesSource, /\.matrix-metric-order-list/);
+  assert.match(stylesSource, /\.entity-table \.metric-custom::before/);
   assert.match(operationsCoreSource, /function buildDashboardComparisons\(normalized, filters, fallbackEnd\)/);
   assert.match(operationsCoreSource, /dashboard\.comparisons = buildDashboardComparisons/);
 });
@@ -259,8 +275,9 @@ test("mobile operations view prioritizes executive metrics and converts matrices
   assert.match(stylesSource, /\.metrics-grid\.dashboard-metrics \{ grid-template-columns: repeat\(2, minmax\(0, 1fr\)\)/);
   assert.match(stylesSource, /\.operations-nav-row \.data-tabs \{ display: grid; grid-template-columns: repeat\(4, minmax\(76px, 1fr\)\)/);
   assert.match(stylesSource, /\.entity-table tbody > tr \{ display: grid; grid-template-columns: repeat\(2, minmax\(0, 1fr\)\)/);
-  assert.match(stylesSource, /\.product-matrix-table td:nth-child\(5\)::before/);
-  assert.match(stylesSource, /\.category-matrix-table td:nth-child\(3\)::before/);
+  assert.match(stylesSource, /\.entity-table \.metric-revenue::before/);
+  assert.match(stylesSource, /\.entity-table \.metric-custom::before/);
+  assert.doesNotMatch(stylesSource, /\.product-matrix-table td:nth-child/);
   assert.match(stylesSource, /\.promotion-drawer \{ top: auto; bottom: 0;/);
 });
 

@@ -5,6 +5,7 @@ import {
   Check,
   ChevronDown,
   ChevronRight,
+  ChevronUp,
   CircleAlert,
   CircleHelp,
   ClipboardPaste,
@@ -12,10 +13,10 @@ import {
   Clock3,
   Database,
   FileSpreadsheet,
+  GripVertical,
   Layers3,
   LoaderCircle,
   PenLine,
-  Plus,
   Search,
   Send,
   Settings2,
@@ -186,6 +187,7 @@ type CustomMetricId = "grossRevenue" | "refundAmount" | "revenue" | "spend" | "p
 type StoreTrendMetric = CustomMetricId;
 type CardMetricId = CustomMetricId | "linkedCount" | "salesOnlyCount" | "promotionOnlyCount";
 type CustomCardPanel = "store" | "category" | "product";
+type EntityPanel = Exclude<CustomCardPanel, "store">;
 type CustomCardConfig = { id: string; metricId: CustomMetricId; comparisonIds?: OperationsComparisonId[] };
 type CoreMetricCard = {
   id: string;
@@ -244,11 +246,17 @@ const CUSTOM_METRICS: Array<{
 ];
 
 const CUSTOM_CARD_STORAGE_KEY = "operations-custom-cards-v1";
+const COMPARISON_VISIBILITY_STORAGE_KEY = "operations-comparison-visibility-v1";
+const MATRIX_METRIC_STORAGE_KEY = "operations-matrix-metrics-v1";
+const MATRIX_CUSTOM_METRIC_LIMIT = 8;
+const MATRIX_FIXED_METRIC_IDS = new Set<CustomMetricId>([
+  "grossRevenue", "refundAmount", "revenue", "spend", "promotionRevenue", "roi", "feeRate",
+]);
 
 function loadCustomCards(panel: CustomCardPanel) {
   try {
     const parsed = JSON.parse(window.localStorage.getItem(CUSTOM_CARD_STORAGE_KEY) || "{}");
-    return Array.isArray(parsed?.[panel]) ? parsed[panel].slice(0, 6) as CustomCardConfig[] : [];
+    return Array.isArray(parsed?.[panel]) ? parsed[panel] as CustomCardConfig[] : [];
   } catch {
     return [];
   }
@@ -257,7 +265,54 @@ function loadCustomCards(panel: CustomCardPanel) {
 function saveCustomCards(panel: CustomCardPanel, cards: CustomCardConfig[]) {
   try {
     const parsed = JSON.parse(window.localStorage.getItem(CUSTOM_CARD_STORAGE_KEY) || "{}");
-    window.localStorage.setItem(CUSTOM_CARD_STORAGE_KEY, JSON.stringify({ ...parsed, [panel]: cards.slice(0, 6) }));
+    window.localStorage.setItem(CUSTOM_CARD_STORAGE_KEY, JSON.stringify({ ...parsed, [panel]: cards }));
+  } catch {
+    // A disabled localStorage must not block the operations dashboard.
+  }
+}
+
+function loadComparisonVisibility(panel: CustomCardPanel) {
+  if (panel === "store") return true;
+  try {
+    const parsed = JSON.parse(window.localStorage.getItem(COMPARISON_VISIBILITY_STORAGE_KEY) || "{}");
+    return parsed?.[panel] !== false;
+  } catch {
+    return true;
+  }
+}
+
+function saveComparisonVisibility(panel: CustomCardPanel, visible: boolean) {
+  if (panel === "store") return;
+  try {
+    const parsed = JSON.parse(window.localStorage.getItem(COMPARISON_VISIBILITY_STORAGE_KEY) || "{}");
+    window.localStorage.setItem(COMPARISON_VISIBILITY_STORAGE_KEY, JSON.stringify({ ...parsed, [panel]: visible }));
+  } catch {
+    // A disabled localStorage must not block the operations dashboard.
+  }
+}
+
+function loadMatrixMetrics(panel: EntityPanel) {
+  try {
+    const parsed = JSON.parse(window.localStorage.getItem(MATRIX_METRIC_STORAGE_KEY) || "{}");
+    const stored = Array.isArray(parsed?.[panel])
+      ? parsed[panel]
+      : loadCustomCards(panel).map((card) => card.metricId);
+    const knownIds = new Set(CUSTOM_METRICS.map((metric) => metric.id));
+    return [...new Set(stored)]
+      .filter((metricId): metricId is CustomMetricId => knownIds.has(metricId) && !MATRIX_FIXED_METRIC_IDS.has(metricId))
+      .slice(0, MATRIX_CUSTOM_METRIC_LIMIT);
+  } catch {
+    return [];
+  }
+}
+
+function saveMatrixMetrics(panel: EntityPanel, metricIds: CustomMetricId[]) {
+  try {
+    const parsed = JSON.parse(window.localStorage.getItem(MATRIX_METRIC_STORAGE_KEY) || "{}");
+    window.localStorage.setItem(MATRIX_METRIC_STORAGE_KEY, JSON.stringify({
+      ...parsed,
+      [panel]: metricIds.slice(0, MATRIX_CUSTOM_METRIC_LIMIT),
+    }));
   } catch {
     // A disabled localStorage must not block the operations dashboard.
   }
@@ -380,7 +435,7 @@ type CategorySelectionHistoryItem = {
   updatedAt: string;
 };
 
-type EntityTableSortKey = "revenue" | "grossRevenue" | "refundAmount" | "spend" | "promotionRevenue" | "roi" | "feeRate" | "name" | "model" | "productId" | "promotionCount";
+type EntityTableSortKey = CustomMetricId | "name" | "model" | "productId" | "promotionCount";
 
 const CATEGORY_SELECTION_HISTORY_LIMIT = 3;
 const PRODUCT_CATALOG_PAGE_SIZE = 60;
@@ -904,26 +959,45 @@ function MetricCardGrid({ panel, coreCards, currentEntities, comparisons, compar
   onToggleTrendMetric?: (metric: StoreTrendMetric) => void;
 }) {
   const [cards, setCards] = useState<CustomCardConfig[]>(() => loadCustomCards(panel));
+  const [showComparisons, setShowComparisons] = useState(() => loadComparisonVisibility(panel));
   const [settingsOpen, setSettingsOpen] = useState(false);
   useEffect(() => saveCustomCards(panel, cards), [cards, panel]);
+  useEffect(() => saveComparisonVisibility(panel, showComparisons), [panel, showComparisons]);
   const currentRecords = useMemo(() => currentEntities.map(metricRecordFromBusiness), [currentEntities]);
-  const usedMetrics = new Set(cards.map((card) => card.metricId));
-  const updateCard = (id: string, changes: Partial<CustomCardConfig>) => setCards((current) => current.map((card) => card.id === id ? { ...card, ...changes } : card));
-  const addCard = () => {
-    const metric = CUSTOM_METRICS.find((item) => !usedMetrics.has(item.id));
-    if (!metric || cards.length >= 6) return;
-    setCards((current) => [...current, { id: `${panel}-${Date.now()}`, metricId: metric.id }]);
+  const coreMetricIds = useMemo(() => new Set(coreCards.map((card) => card.metricId)), [coreCards]);
+  const customCards = cards.filter((card) => !coreMetricIds.has(card.metricId));
+  const selectedMetricIds = new Set(customCards.map((card) => card.metricId));
+  const toggleCustomMetric = (metricId: CustomMetricId) => {
+    setCards((current) => {
+      const withoutCoreMetrics = current.filter((card) => !coreMetricIds.has(card.metricId));
+      if (withoutCoreMetrics.some((card) => card.metricId === metricId)) {
+        return withoutCoreMetrics.filter((card) => card.metricId !== metricId);
+      }
+      return [...withoutCoreMetrics, { id: `${panel}-${metricId}`, metricId }];
+    });
   };
   const panelLabel = panel === "store" ? "整店总览" : panel === "category" ? "品类 360" : "商品排行";
+  const comparison = showComparisons
+    ? (metricId: CardMetricId) => <CardComparisonBadges panel={panel} metricId={metricId} comparisonIds={[comparisonId]} comparisons={comparisons} currentEntities={currentEntities} />
+    : undefined;
   return (
     <div className="relative">
-      <Button type="button" size="sm" variant="secondary" title="设置指标卡片" aria-label="设置指标卡片" className="absolute right-2 top-2 z-20 h-7 w-7 p-0" onClick={() => setSettingsOpen(true)}><Settings2 className="h-4 w-4" /></Button>
+      <div className="absolute right-2 top-2 z-20 flex items-center gap-1.5">
+        {panel !== "store" && (
+          <label className="inline-flex h-7 cursor-pointer items-center gap-1.5 border border-slate-200 bg-white px-2 text-[11px] font-semibold text-slate-600 shadow-sm" title={`${showComparisons ? "关闭" : "开启"}${panelLabel}环比展示`}>
+            <span>环比</span>
+            <input type="checkbox" checked={showComparisons} onChange={(event) => setShowComparisons(event.target.checked)} className="peer sr-only" />
+            <span className="relative h-4 w-7 bg-slate-200 transition-colors peer-checked:bg-teal-600 peer-focus-visible:ring-2 peer-focus-visible:ring-teal-500 peer-focus-visible:ring-offset-1 after:absolute after:left-0.5 after:top-0.5 after:h-3 after:w-3 after:bg-white after:transition-transform peer-checked:after:translate-x-3" />
+          </label>
+        )}
+        <Button type="button" size="sm" variant="secondary" title="设置指标卡片" aria-label="设置指标卡片" className="h-7 w-7 p-0" onClick={() => setSettingsOpen(true)}><Settings2 className="h-4 w-4" /></Button>
+      </div>
       <section className="grid gap-px overflow-hidden border border-slate-200 bg-slate-200 sm:grid-cols-2 xl:grid-cols-4">
-        {coreCards.map((card) => <MetricTile key={card.id} {...card} comparison={<CardComparisonBadges panel={panel} metricId={card.metricId} comparisonIds={[comparisonId]} comparisons={comparisons} currentEntities={currentEntities} />} />)}
-        {cards.map((card) => {
+        {coreCards.map((card) => <MetricTile key={card.id} {...card} comparison={comparison?.(card.metricId)} />)}
+        {customCards.map((card) => {
           const metric = CUSTOM_METRICS.find((item) => item.id === card.metricId) || CUSTOM_METRICS[0];
           const trendEnabled = panel === "store" && Boolean(onToggleTrendMetric);
-          return <MetricTile key={card.id} label={metric.label} value={formatCustomMetric(card.metricId, customMetricValue(currentRecords, card.metricId))} detail={metric.description} tone={metric.tone} selected={trendEnabled && trendMetrics.includes(card.metricId)} onClick={trendEnabled ? () => onToggleTrendMetric?.(card.metricId) : undefined} comparison={<CardComparisonBadges panel={panel} metricId={card.metricId} comparisonIds={[comparisonId]} comparisons={comparisons} currentEntities={currentEntities} />} />;
+          return <MetricTile key={card.id} label={metric.label} value={formatCustomMetric(card.metricId, customMetricValue(currentRecords, card.metricId))} detail={metric.description} tone={metric.tone} selected={trendEnabled && trendMetrics.includes(card.metricId)} onClick={trendEnabled ? () => onToggleTrendMetric?.(card.metricId) : undefined} comparison={comparison?.(card.metricId)} />;
         })}
       </section>
       {settingsOpen && (
@@ -931,8 +1005,8 @@ function MetricCardGrid({ panel, coreCards, currentEntities, comparisons, compar
           <section className="max-h-[88vh] w-full max-w-4xl overflow-y-auto border border-slate-200 bg-white shadow-2xl">
             <header className="sticky top-0 z-10 flex items-start justify-between gap-4 border-b border-slate-200 bg-white px-5 py-4"><div><h3 className="text-base font-semibold text-slate-950">{panelLabel}指标卡片</h3><p className="mt-1 text-xs text-slate-500">环比跟随当前统计范围自动计算；自定义卡片从数据表可计算字段中新增。</p></div><Button type="button" size="sm" variant="ghost" title="关闭" className="h-8 w-8 p-0" onClick={() => setSettingsOpen(false)}><X className="h-4 w-4" /></Button></header>
             <div className="space-y-5 p-5">
-              <section className="border border-blue-200 bg-blue-50/55 p-4"><div className="text-sm font-semibold text-blue-950">环比已自动匹配：{COMPARISON_OPTIONS.find((option) => option.id === comparisonId)?.label}</div><div className="mt-1 text-xs leading-5 text-blue-700">无需逐卡设置。切换今天、周、月、近 7 日、近 15 日或自定义区间后，全部卡片会立即使用对应公式重算。</div></section>
-              <section><div className="mb-2"><h4 className="text-sm font-semibold text-slate-900">自定义数据卡片</h4><p className="mt-1 text-xs text-slate-500">从经营表和推广表的全部可计算指标中选择，最多新增 6 张且不可重复。店铺页可直接点击卡片加入趋势。</p></div><div className="space-y-3">{cards.map((card, index) => <div key={card.id} className="border border-slate-200 p-3"><div className="flex flex-wrap items-center gap-3"><span className="text-xs font-semibold text-slate-400">卡片 {index + 1}</span><select value={card.metricId} onChange={(event) => updateCard(card.id, { metricId: event.target.value as CustomMetricId })} className="h-9 min-w-48 flex-1 border border-slate-200 bg-white px-2 text-sm text-slate-800">{CUSTOM_METRICS.map((metric) => <option key={metric.id} value={metric.id} disabled={metric.id !== card.metricId && usedMetrics.has(metric.id)}>{metric.label} · {metric.description}</option>)}</select><Button type="button" size="sm" variant="ghost" title="删除卡片" className="h-8 w-8 p-0 text-rose-600" onClick={() => setCards((current) => current.filter((item) => item.id !== card.id))}><Trash2 className="h-4 w-4" /></Button></div></div>)}</div><Button type="button" variant="secondary" className="mt-3 w-full" onClick={addCard} disabled={cards.length >= 6 || usedMetrics.size >= CUSTOM_METRICS.length}><Plus className="h-4 w-4" />{cards.length >= 6 ? "已达到 6 张上限" : "从数据表新增指标卡片"}</Button></section>
+              <section className={`border p-4 ${showComparisons ? "border-blue-200 bg-blue-50/55" : "border-slate-200 bg-slate-50"}`}><div className={`text-sm font-semibold ${showComparisons ? "text-blue-950" : "text-slate-700"}`}>{showComparisons ? `环比已自动匹配：${COMPARISON_OPTIONS.find((option) => option.id === comparisonId)?.label}` : "当前已隐藏环比"}</div><div className={`mt-1 text-xs leading-5 ${showComparisons ? "text-blue-700" : "text-slate-500"}`}>{panel === "store" ? "切换日期范围后，全部卡片会立即使用对应公式重算。" : `可在卡片右上角独立${showComparisons ? "关闭" : "开启"}${panelLabel}环比；设置会在下次打开时保留。`}</div></section>
+              <section><div className="mb-3"><h4 className="text-sm font-semibold text-slate-900">自定义数据卡片</h4><p className="mt-1 text-xs text-slate-500">默认指标固定保留；其余经营与付费字段直接勾选，已选 {customCards.length} 项。每项都会使用当前周期的同口径环比。</p></div><div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-3">{CUSTOM_METRICS.filter((metric) => !coreMetricIds.has(metric.id)).map((metric) => { const selected = selectedMetricIds.has(metric.id); return <label key={metric.id} className={`flex cursor-pointer items-start gap-3 border p-3 transition-colors ${selected ? "border-teal-300 bg-teal-50/70" : "border-slate-200 bg-white hover:border-slate-300 hover:bg-slate-50"}`}><input type="checkbox" checked={selected} onChange={() => toggleCustomMetric(metric.id)} className="mt-0.5 h-4 w-4 shrink-0 accent-teal-600" /><span className="min-w-0"><span className="block text-sm font-semibold text-slate-800">{metric.label}</span><span className="mt-1 block text-[11px] leading-4 text-slate-500">{metric.description}</span></span></label>; })}</div></section>
             </div>
             <footer className="sticky bottom-0 flex justify-end border-t border-slate-200 bg-white px-5 py-3"><Button type="button" onClick={() => setSettingsOpen(false)}>完成</Button></footer>
           </section>
@@ -1746,8 +1820,6 @@ export function OperationsAssistant({
   const [displayStore, setDisplayStore] = useState("");
   const [sourcePeriodKind, setSourcePeriodKind] = useState<OperationsSourcePeriodKind>("auto");
   const [selectedTrendMetrics, setSelectedTrendMetrics] = useState<StoreTrendMetric[]>(["revenue"]);
-  const [visibleCategoryItems, setVisibleCategoryItems] = useState<OperationsBusinessEntity[] | null>(null);
-  const [visibleProductItems, setVisibleProductItems] = useState<OperationsBusinessEntity[] | null>(null);
   const [analysis, setAnalysis] = useState<OperationsAnalysis | null>(
     workspace.analyses[0] || null,
   );
@@ -2370,10 +2442,6 @@ export function OperationsAssistant({
   const stores = dashboard.stores;
   const products = dashboard.products;
   const categories = dashboard.categories;
-  const categoryCardItems = visibleCategoryItems || categories;
-  const productCardItems = visibleProductItems || products;
-  const categoryCardRecords = useMemo(() => categoryCardItems.map(metricRecordFromBusiness), [categoryCardItems]);
-  const productCardRecords = useMemo(() => productCardItems.map(metricRecordFromBusiness), [productCardItems]);
   const archive = archiveData.archive || {
     days: [],
     totalReports: archiveData.reports.length,
@@ -2828,18 +2896,6 @@ export function OperationsAssistant({
 
       {view === "category" && (
         <div className="space-y-5">
-          <MetricCardGrid
-            panel="category"
-            coreCards={[
-              { id: "category-linked", metricId: "linkedCount", label: "已关联品类", value: count(Number(cardMetricValue(categoryCardRecords, "linkedCount"))), detail: "当前筛选范围内销售与单品付费已关联", tone: "emerald" },
-              { id: "category-sales-only", metricId: "salesOnlyCount", label: "待补单品付费", value: count(Number(cardMetricValue(categoryCardRecords, "salesOnlyCount"))), detail: "当前筛选范围内仅有品类360销售数据", tone: "amber" },
-              { id: "category-promotion-only", metricId: "promotionOnlyCount", label: "待补品类360", value: count(Number(cardMetricValue(categoryCardRecords, "promotionOnlyCount"))), detail: "当前筛选范围内仅有单品付费数据", tone: "blue" },
-              { id: "category-revenue", metricId: "revenue", label: "品类360 净 GSV", value: money(Number(cardMetricValue(categoryCardRecords, "revenue"))), detail: "当前筛选范围", tone: "slate" },
-            ]}
-            currentEntities={categoryCardItems}
-            comparisons={dashboard.comparisons}
-            comparisonId={automaticComparisonId(datePreset)}
-          />
           <section className="grid gap-5 xl:grid-cols-2">
             <Card>
               <CardContent className="p-5">
@@ -2870,25 +2926,14 @@ export function OperationsAssistant({
             subtitle={dashboard.sourceWarnings.categoryPromotion || "净 GSV = 支付金额 - 售中售后成功退款金额；未关联项不计算费率。"}
             items={categories}
             kind="category"
-            onVisibleItemsChange={setVisibleCategoryItems}
+            comparisons={dashboard.comparisons}
+            comparisonId={automaticComparisonId(datePreset)}
           />
         </div>
       )}
 
       {view === "product" && (
         <div className="space-y-5">
-          <MetricCardGrid
-            panel="product"
-            coreCards={[
-              { id: "product-linked", metricId: "linkedCount", label: "已关联单品", value: count(Number(cardMetricValue(productCardRecords, "linkedCount"))), detail: "当前筛选范围内经营与推广已关联", tone: "emerald" },
-              { id: "product-sales-only", metricId: "salesOnlyCount", label: "待补推广数据", value: count(Number(cardMetricValue(productCardRecords, "salesOnlyCount"))), detail: "当前筛选范围内仅有商品经营", tone: "amber" },
-              { id: "product-promotion-only", metricId: "promotionOnlyCount", label: "待补经营数据", value: count(Number(cardMetricValue(productCardRecords, "promotionOnlyCount"))), detail: "当前筛选范围内仅有单品推广", tone: "blue" },
-              { id: "product-spend", metricId: "spend", label: "单品推广花费", value: money(Number(cardMetricValue(productCardRecords, "spend"))), detail: "当前筛选范围", tone: "rose" },
-            ]}
-            currentEntities={productCardItems}
-            comparisons={dashboard.comparisons}
-            comparisonId={automaticComparisonId(datePreset)}
-          />
           <section className="grid gap-5 xl:grid-cols-2">
             <Card>
               <CardContent className="p-5">
@@ -2918,7 +2963,8 @@ export function OperationsAssistant({
             subtitle="每行保留支付、退款、净 GSV、推广成交与推广花费，支持直接核对关联状态。"
             items={products}
             kind="product"
-            onVisibleItemsChange={setVisibleProductItems}
+            comparisons={dashboard.comparisons}
+            comparisonId={automaticComparisonId(datePreset)}
           />
         </div>
       )}
@@ -4231,18 +4277,103 @@ function AnalysisBlock({
   );
 }
 
+function entityIdentityKeys(kind: EntityPanel, item: Pick<OperationsComparisonEntity, "key" | "name" | "productId" | "storeName" | "category" | "model">) {
+  const storeName = item.storeName.trim().toLowerCase();
+  const keys = item.key ? [`key:${item.key}`] : [];
+  if (kind === "category") {
+    if (storeName && item.name) keys.push(`store-category:${storeName}\u0000${item.name}`);
+    if (!storeName && item.name) keys.push(`category:${item.name}`);
+    return keys;
+  }
+  if (item.productId) {
+    if (storeName) keys.push(`store-product:${storeName}\u0000${item.productId}`);
+    else keys.push(`product:${item.productId}`);
+  }
+  if (storeName && item.name) keys.push(`store-name:${storeName}\u0000${item.name}`);
+  if (!storeName && item.category && item.model) keys.push(`model:${item.category}\u0000${item.model}`);
+  return keys;
+}
+
+function previousEntityIndex(kind: EntityPanel, items: OperationsComparisonEntity[]) {
+  const index = new Map<string, OperationsComparisonEntity>();
+  for (const item of items) {
+    for (const key of entityIdentityKeys(kind, item)) {
+      if (!index.has(key)) index.set(key, item);
+    }
+  }
+  return index;
+}
+
+function previousEntityForItem(kind: EntityPanel, item: OperationsBusinessEntity, index: Map<string, OperationsComparisonEntity>) {
+  for (const key of entityIdentityKeys(kind, {
+    key: item.key,
+    name: item.name,
+    productId: item.productId || "",
+    storeName: item.storeName || "",
+    category: item.category || "",
+    model: item.model || "",
+  })) {
+    const previous = index.get(key);
+    if (previous) return previous;
+  }
+  return null;
+}
+
+function entityMetricValue(item: OperationsBusinessEntity | OperationsComparisonEntity, metricId: CustomMetricId) {
+  const record = "sales" in item ? metricRecordFromBusiness(item) : item;
+  return customMetricValue([record], metricId);
+}
+
+function EntityComparisonBadge({
+  item,
+  previousItem,
+  metricId,
+  comparison,
+}: {
+  item: OperationsBusinessEntity;
+  previousItem: OperationsComparisonEntity | null;
+  metricId: CustomMetricId;
+  comparison: OperationsComparison | undefined;
+}) {
+  const label = comparison?.label || "环比";
+  const current = comparison?.currentAvailable ? entityMetricValue(item, metricId) : null;
+  const previous = comparison?.previousAvailable && previousItem ? entityMetricValue(previousItem, metricId) : null;
+  const delta = current !== null && previous !== null ? current - previous : null;
+  const relative = delta !== null && previous !== null && previous !== 0 ? delta / Math.abs(previous) : null;
+  const metric = CUSTOM_METRICS.find((definition) => definition.id === metricId);
+  const title = comparison
+    ? `${comparison.currentStart} 至 ${comparison.currentEnd} 对比 ${comparison.previousStart} 至 ${comparison.previousEnd}`
+    : "当前或同期报表不完整";
+  if (delta === null) {
+    return <span title={title} className="inline-flex border border-slate-200 bg-slate-50 px-1.5 py-0.5 text-[10px] font-semibold text-slate-400">{label} --</span>;
+  }
+  const display = relative === null
+    ? (delta === 0 ? "持平" : "新增")
+    : metric?.kind === "percent"
+      ? `${delta >= 0 ? "+" : ""}${(delta * 100).toFixed(1)}pp`
+      : `${relative >= 0 ? "+" : ""}${(relative * 100).toFixed(1)}%`;
+  const tone = delta > 0
+    ? "border-rose-200 bg-rose-50 text-rose-600"
+    : delta < 0
+      ? "border-emerald-200 bg-emerald-50 text-emerald-700"
+      : "border-slate-200 bg-slate-50 text-slate-500";
+  return <span title={title} className={`inline-flex border px-1.5 py-0.5 text-[10px] font-semibold tabular-nums ${tone}`}>{label} {display}</span>;
+}
+
 function EntityTable({
   title,
   subtitle,
   items,
   kind,
-  onVisibleItemsChange,
+  comparisons,
+  comparisonId,
 }: {
   title: string;
   subtitle: string;
   items: OperationsBusinessEntity[];
-  kind: "category" | "product";
-  onVisibleItemsChange: (items: OperationsBusinessEntity[]) => void;
+  kind: EntityPanel;
+  comparisons: OperationsWorkspace["dashboard"]["comparisons"];
+  comparisonId: OperationsComparisonId;
 }) {
   const [keyword, setKeyword] = useState("");
   const [sortKey, setSortKey] = useState<EntityTableSortKey>("revenue");
@@ -4257,6 +4388,12 @@ function EntityTable({
   const [selectedModelNames, setSelectedModelNames] = useState<Set<string>>(new Set());
   const [modelPickerQuery, setModelPickerQuery] = useState("");
   const [expandedPromotionKey, setExpandedPromotionKey] = useState("");
+  const [matrixMetricIds, setMatrixMetricIds] = useState<CustomMetricId[]>(() => loadMatrixMetrics(kind));
+  const [matrixMetricSettingsOpen, setMatrixMetricSettingsOpen] = useState(false);
+  const [draggingMatrixMetricId, setDraggingMatrixMetricId] = useState<CustomMetricId | null>(null);
+  const [showComparisons, setShowComparisons] = useState(() => loadComparisonVisibility(kind));
+  useEffect(() => saveMatrixMetrics(kind, matrixMetricIds), [kind, matrixMetricIds]);
+  useEffect(() => saveComparisonVisibility(kind, showComparisons), [kind, showComparisons]);
   const dataItems = useMemo(() => items.filter(hasVisibleBusinessData), [items]);
   const categoryOptions = useMemo(
     () =>
@@ -4299,19 +4436,23 @@ function EntityTable({
       .filter((item) => kind !== "product" || selectedModelNames.size === 0 || selectedModelNames.has(item.model || "型号待补"))
       .slice()
       .sort((left, right) => {
-        const leftValue = ["name", "model", "productId"].includes(sortKey)
-          ? String(sortKey === "name" ? left.name : left[sortKey] || "")
-          : Number(left[sortKey] ?? 0);
-        const rightValue = ["name", "model", "productId"].includes(sortKey)
-          ? String(sortKey === "name" ? right.name : right[sortKey] || "")
-          : Number(right[sortKey] ?? 0);
+        const textSort = sortKey === "name" || sortKey === "model" || sortKey === "productId";
+        const leftValue = textSort
+          ? String(sortKey === "name" ? left.name : sortKey === "model" ? left.model || "" : left.productId || "")
+          : sortKey === "promotionCount"
+            ? left.promotionCount
+            : entityMetricValue(left, sortKey);
+        const rightValue = textSort
+          ? String(sortKey === "name" ? right.name : sortKey === "model" ? right.model || "" : right.productId || "")
+          : sortKey === "promotionCount"
+            ? right.promotionCount
+            : entityMetricValue(right, sortKey);
         const compare = typeof leftValue === "string"
           ? leftValue.localeCompare(String(rightValue), "zh-CN")
-          : Number(leftValue) - Number(rightValue);
+          : Number(leftValue ?? 0) - Number(rightValue ?? 0);
         return sortDirection === "asc" ? compare : -compare;
       });
   }, [dataItems, keyword, kind, selectedCategoryNames, selectedModelNames, sortKey, sortDirection]);
-  useEffect(() => onVisibleItemsChange(visibleItems), [onVisibleItemsChange, visibleItems]);
   const selectionSummary = useMemo(() => {
     const totals = visibleItems.reduce(
       (result, item) => ({
@@ -4396,6 +4537,41 @@ function EntityTable({
       setExpandedPromotionKey("");
     }
   }, [expandedPromotionKey, visibleItems]);
+  const activeComparison = comparisons?.[comparisonId];
+  const previousItems = useMemo(
+    () => activeComparison?.previous[kind === "category" ? "categories" : "products"] || [],
+    [activeComparison, kind],
+  );
+  const previousIndex = useMemo(() => previousEntityIndex(kind, previousItems), [kind, previousItems]);
+  const matrixMetricOptions = CUSTOM_METRICS.filter((metric) => !MATRIX_FIXED_METRIC_IDS.has(metric.id));
+  const toggleMatrixMetric = (metricId: CustomMetricId) => {
+    setMatrixMetricIds((current) => {
+      if (current.includes(metricId)) return current.filter((id) => id !== metricId);
+      if (current.length >= MATRIX_CUSTOM_METRIC_LIMIT) return current;
+      return [...current, metricId];
+    });
+  };
+  const reorderMatrixMetric = (sourceId: CustomMetricId, targetId: CustomMetricId) => {
+    setMatrixMetricIds((current) => {
+      const sourceIndex = current.indexOf(sourceId);
+      const targetIndex = current.indexOf(targetId);
+      if (sourceIndex < 0 || targetIndex < 0 || sourceIndex === targetIndex) return current;
+      const next = [...current];
+      const [moved] = next.splice(sourceIndex, 1);
+      next.splice(targetIndex, 0, moved);
+      return next;
+    });
+  };
+  const moveMatrixMetric = (metricId: CustomMetricId, offset: -1 | 1) => {
+    setMatrixMetricIds((current) => {
+      const sourceIndex = current.indexOf(metricId);
+      const targetIndex = sourceIndex + offset;
+      if (sourceIndex < 0 || targetIndex < 0 || targetIndex >= current.length) return current;
+      const next = [...current];
+      [next[sourceIndex], next[targetIndex]] = [next[targetIndex], next[sourceIndex]];
+      return next;
+    });
+  };
   return (
     <Card>
       <CardHeader className="flex flex-row flex-wrap items-center justify-between gap-3">
@@ -4573,6 +4749,19 @@ function EntityTable({
               </div>
             </details>
           )}
+          <label className="inline-flex h-8 cursor-pointer items-center gap-2 border border-slate-200 bg-white px-2 text-xs font-medium text-slate-600 hover:border-teal-400 hover:text-teal-800" title={`${showComparisons ? "关闭" : "开启"}${kind === "category" ? "品类" : "商品"}矩阵环比`}>
+            <span>环比</span>
+            <input type="checkbox" checked={showComparisons} onChange={(event) => setShowComparisons(event.target.checked)} className="peer sr-only" />
+            <span className="relative h-4 w-7 bg-slate-200 transition-colors peer-checked:bg-teal-600 peer-focus-visible:ring-2 peer-focus-visible:ring-teal-500 peer-focus-visible:ring-offset-1 after:absolute after:left-0.5 after:top-0.5 after:h-3 after:w-3 after:bg-white after:transition-transform peer-checked:after:translate-x-3" />
+          </label>
+          <button
+            type="button"
+            onClick={() => setMatrixMetricSettingsOpen(true)}
+            className="inline-flex h-8 items-center gap-1.5 border border-slate-200 bg-white px-2 text-xs font-medium text-slate-600 hover:border-teal-400 hover:text-teal-800"
+          >
+            <Settings2 className="h-3.5 w-3.5" />
+            自定义数据 {matrixMetricIds.length}/{MATRIX_CUSTOM_METRIC_LIMIT}
+          </button>
           <span className="inline-flex items-center gap-1 bg-slate-100 px-2 py-1 text-xs text-slate-600">
             <Layers3 className="h-3.5 w-3.5" />
             {visibleItems.length}/{dataItems.length} 项
@@ -4614,7 +4803,7 @@ function EntityTable({
         </div>
       )}
       <div className="max-h-[530px] overflow-auto">
-        <table className="w-full min-w-[1320px] text-left text-sm">
+        <table className="w-full text-left text-sm" style={{ minWidth: `${1320 + matrixMetricIds.length * 145}px` }}>
           <thead className="sticky top-0 z-10 border-y border-slate-100 bg-slate-50 text-xs text-slate-500">
             <tr>
               <th className="px-4 py-3 font-medium">
@@ -4632,6 +4821,10 @@ function EntityTable({
               <th className="px-4 py-3 font-medium"><EntitySortHeader label="推广成交" sortKey="promotionRevenue" activeSortKey={sortKey} direction={sortDirection} onSort={applySort} /></th>
               <th className="px-4 py-3 font-medium"><EntitySortHeader label="ROI" sortKey="roi" activeSortKey={sortKey} direction={sortDirection} onSort={applySort} /></th>
               <th className="px-4 py-3 font-medium"><EntitySortHeader label="费率" sortKey="feeRate" activeSortKey={sortKey} direction={sortDirection} onSort={applySort} /></th>
+              {matrixMetricIds.map((metricId) => {
+                const metric = CUSTOM_METRICS.find((definition) => definition.id === metricId);
+                return metric ? <th key={metricId} className="px-4 py-3 font-medium"><EntitySortHeader label={metric.label} sortKey={metricId} activeSortKey={sortKey} direction={sortDirection} onSort={applySort} /></th> : null;
+              })}
               <th className="px-4 py-3 font-medium"><EntitySortHeader label="推广类型 / 计划" sortKey="promotionCount" activeSortKey={sortKey} direction={sortDirection} onSort={applySort} /></th>
               <th className="px-4 py-3 font-medium">关联状态</th>
             </tr>
@@ -4645,12 +4838,16 @@ function EntityTable({
                   kind={kind}
                   expanded={expandedPromotionKey === item.key}
                   onToggle={togglePromotionExpansion}
+                  previousItem={previousEntityForItem(kind, item, previousIndex)}
+                  comparison={activeComparison}
+                  showComparisons={showComparisons}
+                  customMetricIds={matrixMetricIds}
                 />
               ))
             ) : (
               <tr>
                 <td
-                  colSpan={kind === "product" ? 11 : 9}
+                  colSpan={(kind === "product" ? 11 : 9) + matrixMetricIds.length}
                   className="px-4 py-12 text-center text-sm text-slate-400"
                 >
                   {items.length ? "没有符合当前筛选条件的数据。" : "导入对应报表后展示关联矩阵。"}
@@ -4660,6 +4857,90 @@ function EntityTable({
           </tbody>
         </table>
       </div>
+      {matrixMetricSettingsOpen && (
+        <div className="fixed inset-0 z-[100] flex items-center justify-center bg-slate-950/45 p-4" role="dialog" aria-modal="true" aria-label={`${kind === "category" ? "品类" : "商品"}矩阵自定义数据`}>
+          <section className="max-h-[88vh] w-full max-w-4xl overflow-y-auto border border-slate-200 bg-white shadow-2xl">
+            <header className="sticky top-0 z-10 flex items-start justify-between gap-4 border-b border-slate-200 bg-white px-5 py-4">
+              <div>
+                <h3 className="text-base font-semibold text-slate-950">{kind === "category" ? "品类 360" : "商品排行"}矩阵自定义数据</h3>
+                <p className="mt-1 text-xs text-slate-500">固定经营指标始终保留，可额外选择最多 {MATRIX_CUSTOM_METRIC_LIMIT} 项；每项按当前日期范围自动计算环比。</p>
+              </div>
+              <button type="button" title="关闭" aria-label="关闭" onClick={() => setMatrixMetricSettingsOpen(false)} className="grid h-8 w-8 shrink-0 place-items-center text-slate-500 hover:bg-slate-100 hover:text-slate-900"><X className="h-4 w-4" /></button>
+            </header>
+            <div className="border-b border-slate-200 bg-slate-50/70 p-5">
+              <div className="flex items-center justify-between gap-3">
+                <h4 className="text-sm font-semibold text-slate-800">已选列顺序</h4>
+                <span className="text-xs tabular-nums text-slate-500">{matrixMetricIds.length}/{MATRIX_CUSTOM_METRIC_LIMIT}</span>
+              </div>
+              {matrixMetricIds.length ? (
+                <div className="mt-3 grid gap-2 sm:grid-cols-2" role="list" aria-label="自定义列顺序">
+                  {matrixMetricIds.map((metricId, index) => {
+                    const metric = CUSTOM_METRICS.find((item) => item.id === metricId);
+                    if (!metric) return null;
+                    return (
+                      <div
+                        key={metric.id}
+                        draggable
+                        role="listitem"
+                        aria-label={`${metric.label}，第 ${index + 1} 列`}
+                        title="拖动调整列顺序"
+                        onDragStart={(event) => {
+                          setDraggingMatrixMetricId(metric.id);
+                          event.dataTransfer.effectAllowed = "move";
+                          event.dataTransfer.setData("text/plain", metric.id);
+                        }}
+                        onDragOver={(event) => {
+                          event.preventDefault();
+                          event.dataTransfer.dropEffect = "move";
+                        }}
+                        onDrop={(event) => {
+                          event.preventDefault();
+                          const sourceId = (draggingMatrixMetricId || event.dataTransfer.getData("text/plain")) as CustomMetricId;
+                          if (sourceId) reorderMatrixMetric(sourceId, metric.id);
+                          setDraggingMatrixMetricId(null);
+                        }}
+                        onDragEnd={() => setDraggingMatrixMetricId(null)}
+                        className={`flex min-w-0 items-center gap-2 border bg-white p-2.5 transition ${draggingMatrixMetricId === metric.id ? "border-teal-400 opacity-60" : "border-slate-200 hover:border-teal-300"}`}
+                      >
+                        <GripVertical className="h-4 w-4 shrink-0 cursor-grab text-slate-400" aria-hidden="true" />
+                        <div className="min-w-0 flex-1">
+                          <strong className="block truncate text-xs text-slate-800">{index + 1}. {metric.label}</strong>
+                          <span className="mt-0.5 block truncate text-[10px] text-slate-500">{metric.description}</span>
+                        </div>
+                        <div className="flex shrink-0 items-center gap-1">
+                          <button type="button" disabled={index === 0} onClick={() => moveMatrixMetric(metric.id, -1)} title={`上移${metric.label}`} aria-label={`上移${metric.label}`} className="grid h-7 w-7 place-items-center border border-slate-200 text-slate-500 hover:border-teal-300 hover:text-teal-700 disabled:cursor-not-allowed disabled:opacity-30"><ChevronUp className="h-3.5 w-3.5" /></button>
+                          <button type="button" disabled={index === matrixMetricIds.length - 1} onClick={() => moveMatrixMetric(metric.id, 1)} title={`下移${metric.label}`} aria-label={`下移${metric.label}`} className="grid h-7 w-7 place-items-center border border-slate-200 text-slate-500 hover:border-teal-300 hover:text-teal-700 disabled:cursor-not-allowed disabled:opacity-30"><ChevronDown className="h-3.5 w-3.5" /></button>
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              ) : (
+                <div className="mt-3 border border-dashed border-slate-200 bg-white px-3 py-4 text-center text-xs text-slate-400">尚未选择自定义列</div>
+              )}
+            </div>
+            <div className="grid gap-2 p-5 sm:grid-cols-2 lg:grid-cols-3">
+              {matrixMetricOptions.map((metric) => {
+                const selected = matrixMetricIds.includes(metric.id);
+                const disabled = !selected && matrixMetricIds.length >= MATRIX_CUSTOM_METRIC_LIMIT;
+                return (
+                  <label key={metric.id} className={`flex items-start gap-3 border p-3 transition-colors ${disabled ? "cursor-not-allowed border-slate-100 bg-slate-50 opacity-50" : selected ? "cursor-pointer border-teal-300 bg-teal-50/70" : "cursor-pointer border-slate-200 bg-white hover:border-slate-300 hover:bg-slate-50"}`}>
+                    <input type="checkbox" checked={selected} disabled={disabled} onChange={() => toggleMatrixMetric(metric.id)} className="mt-0.5 h-4 w-4 shrink-0 accent-teal-600" />
+                    <span className="min-w-0">
+                      <span className="block text-sm font-semibold text-slate-800">{metric.label}</span>
+                      <span className="mt-1 block text-[11px] leading-4 text-slate-500">{metric.description}</span>
+                    </span>
+                  </label>
+                );
+              })}
+            </div>
+            <footer className="sticky bottom-0 flex items-center justify-between gap-3 border-t border-slate-200 bg-white px-5 py-3">
+              <span className="text-xs text-slate-500">已选择 {matrixMetricIds.length}/{MATRIX_CUSTOM_METRIC_LIMIT} 项</span>
+              <Button type="button" onClick={() => setMatrixMetricSettingsOpen(false)}>完成</Button>
+            </footer>
+          </section>
+        </div>
+      )}
     </Card>
   );
 }
@@ -4696,16 +4977,27 @@ const EntityTableRow = memo(function EntityTableRow({
   kind,
   expanded,
   onToggle,
+  previousItem,
+  comparison,
+  showComparisons,
+  customMetricIds,
 }: {
   item: OperationsBusinessEntity;
-  kind: "category" | "product";
+  kind: EntityPanel;
   expanded: boolean;
   onToggle: (key: string) => void;
+  previousItem: OperationsComparisonEntity | null;
+  comparison: OperationsComparison | undefined;
+  showComparisons: boolean;
+  customMetricIds: CustomMetricId[];
 }) {
   const promotionTypeCount = item.promotionChannels.length;
   const promotionPlanCount = promotionPlanCountFor(item.promotionChannels);
   const promotionSummary = promotionTypeSummary(item.promotionChannels);
-  const columnCount = kind === "product" ? 11 : 9;
+  const columnCount = (kind === "product" ? 11 : 9) + customMetricIds.length;
+  const comparisonBadge = (metricId: CustomMetricId) => showComparisons
+    ? <EntityComparisonBadge item={item} previousItem={previousItem} metricId={metricId} comparison={comparison} />
+    : null;
   return (
     <Fragment>
       <tr className="border-b border-slate-100 last:border-0 hover:bg-slate-50/70">
@@ -4725,18 +5017,24 @@ const EntityTableRow = memo(function EntityTableRow({
           </td>
         )}
         <td className="px-4 py-3 text-slate-700">
-          <div>{money(item.grossRevenue)}</div>
+          <div className="flex flex-wrap items-center gap-1.5"><span>{money(item.grossRevenue)}</span>{comparisonBadge("grossRevenue")}</div>
           {item.refundDataAvailable ? (
-            <div className="mt-1 text-xs text-emerald-600">- {money(item.refundAmount)}</div>
+            <div className="mt-1 flex flex-wrap items-center gap-1.5 text-xs text-emerald-600"><span>- {money(item.refundAmount)}</span>{comparisonBadge("refundAmount")}</div>
           ) : (
             <div className="mt-1 text-xs text-amber-600">待补退款字段</div>
           )}
         </td>
-        <td className="px-4 py-3 font-medium text-slate-900">{money(item.revenue)}</td>
-        <td className="px-4 py-3 text-slate-700">{money(item.spend)}</td>
-        <td className="px-4 py-3 text-slate-700">{money(item.promotionRevenue)}</td>
-        <td className="px-4 py-3 font-medium text-slate-800">{fixed(item.roi)}</td>
-        <td className="px-4 py-3 font-medium text-slate-800">{percent(item.feeRate)}</td>
+        <td className="px-4 py-3 font-medium text-slate-900"><div>{money(item.revenue)}</div>{showComparisons && <div className="mt-1">{comparisonBadge("revenue")}</div>}</td>
+        <td className="px-4 py-3 text-slate-700"><div>{money(item.spend)}</div>{showComparisons && <div className="mt-1">{comparisonBadge("spend")}</div>}</td>
+        <td className="px-4 py-3 text-slate-700"><div>{money(item.promotionRevenue)}</div>{showComparisons && <div className="mt-1">{comparisonBadge("promotionRevenue")}</div>}</td>
+        <td className="px-4 py-3 font-medium text-slate-800"><div>{fixed(item.roi)}</div>{showComparisons && <div className="mt-1">{comparisonBadge("roi")}</div>}</td>
+        <td className="px-4 py-3 font-medium text-slate-800"><div>{percent(item.feeRate)}</div>{showComparisons && <div className="mt-1">{comparisonBadge("feeRate")}</div>}</td>
+        {customMetricIds.map((metricId) => (
+          <td key={metricId} className="px-4 py-3 text-slate-700">
+            <div className="font-medium text-slate-800">{formatCustomMetric(metricId, entityMetricValue(item, metricId))}</div>
+            {showComparisons && <div className="mt-1">{comparisonBadge(metricId)}</div>}
+          </td>
+        ))}
         <td className="px-4 py-3">
           {promotionTypeCount ? (
             <button

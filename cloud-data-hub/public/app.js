@@ -337,8 +337,38 @@ const CUSTOM_METRICS = [
 ].map(([id, label, kind, description]) => ({ id, label, kind, description }));
 const COMPARISON_OPTIONS = [['day', '日环比'], ['week', '周环比'], ['last7', '近 7 天'], ['last15', '近 15 天'], ['month', '月环比'], ['custom', '区间环比']].map(([id, label]) => ({ id, label }));
 function customCardStorageKey(panel) { return `operations-custom-cards-v1:${state.session?.username || 'anonymous'}:${activeTeamId() || state.mode}:${panel}`; }
-function loadCustomCards(panel) { try { const value = JSON.parse(localStorage.getItem(customCardStorageKey(panel)) || '[]'); return Array.isArray(value) ? value.slice(0, 6) : []; } catch { return []; } }
-function saveCustomCards(panel, cards) { localStorage.setItem(customCardStorageKey(panel), JSON.stringify(cards.slice(0, 6))); }
+function comparisonVisibilityStorageKey(panel) { return `operations-comparison-visibility-v1:${state.session?.username || 'anonymous'}:${activeTeamId() || state.mode}:${panel}`; }
+function matrixMetricStorageKey(panel) { return `operations-matrix-metrics-v1:${state.session?.username || 'anonymous'}:${activeTeamId() || state.mode}:${panel}`; }
+function loadCustomCards(panel) { try { const value = JSON.parse(localStorage.getItem(customCardStorageKey(panel)) || '[]'); return Array.isArray(value) ? value : []; } catch { return []; } }
+function saveCustomCards(panel, cards) { localStorage.setItem(customCardStorageKey(panel), JSON.stringify(cards)); }
+function loadComparisonVisibility(panel) { if (panel === 'store') return true; try { return localStorage.getItem(comparisonVisibilityStorageKey(panel)) !== 'false'; } catch { return true; } }
+function saveComparisonVisibility(panel, visible) { if (panel !== 'store') localStorage.setItem(comparisonVisibilityStorageKey(panel), visible ? 'true' : 'false'); }
+const MATRIX_CUSTOM_METRIC_LIMIT = 8;
+const MATRIX_FIXED_METRIC_IDS = new Set(['grossRevenue', 'refundAmount', 'revenue', 'spend', 'promotionRevenue', 'roi', 'feeRate']);
+function loadMatrixMetrics(panel) {
+  try {
+    const stored = localStorage.getItem(matrixMetricStorageKey(panel));
+    const values = stored === null ? loadCustomCards(panel).map((card) => card.metricId) : JSON.parse(stored);
+    const knownIds = new Set(CUSTOM_METRICS.map((metric) => metric.id));
+    return Array.isArray(values) ? [...new Set(values)].filter((metricId) => knownIds.has(metricId) && !MATRIX_FIXED_METRIC_IDS.has(metricId)).slice(0, MATRIX_CUSTOM_METRIC_LIMIT) : [];
+  } catch { return []; }
+}
+function saveMatrixMetrics(panel, metricIds) { localStorage.setItem(matrixMetricStorageKey(panel), JSON.stringify(metricIds.slice(0, MATRIX_CUSTOM_METRIC_LIMIT))); }
+function reorderMatrixMetric(panel, sourceId, targetId) {
+  const metricIds = loadMatrixMetrics(panel); const sourceIndex = metricIds.indexOf(sourceId); const targetIndex = metricIds.indexOf(targetId);
+  if (sourceIndex < 0 || targetIndex < 0 || sourceIndex === targetIndex) return;
+  const [moved] = metricIds.splice(sourceIndex, 1); metricIds.splice(targetIndex, 0, moved); saveMatrixMetrics(panel, metricIds);
+}
+function moveMatrixMetric(panel, metricId, offset) {
+  const metricIds = loadMatrixMetrics(panel); const sourceIndex = metricIds.indexOf(metricId); const targetIndex = sourceIndex + offset;
+  if (sourceIndex < 0 || targetIndex < 0 || targetIndex >= metricIds.length) return;
+  [metricIds[sourceIndex], metricIds[targetIndex]] = [metricIds[targetIndex], metricIds[sourceIndex]]; saveMatrixMetrics(panel, metricIds);
+}
+const CORE_METRIC_IDS_BY_PANEL = {
+  store: ['revenue', 'spend', 'managementRoi', 'feeRate'],
+  category: ['revenue', 'spend', 'feeRate', 'roi'],
+  product: ['revenue', 'spend', 'feeRate', 'roi'],
+};
 function automaticComparisonId(preset) {
   if (preset === 'last-7-days') return 'last7';
   if (preset === 'last-15-days') return 'last15';
@@ -394,15 +424,26 @@ function comparisonBadges(panel, metricId, comparisonIds, visibleRows) {
   }).join('');
 }
 function managedMetricGrid(panel, coreCards, visibleRows) {
-  const customCards = loadCustomCards(panel); const comparisonId = automaticComparisonId(state.datePreset);
-  const coreHtml = coreCards.map((card) => metric(card.label, card.value, card.detail, card.tone, comparisonBadges(panel, card.metricId, [comparisonId], visibleRows))).join('');
-  const customHtml = customCards.map((card) => { const definition = customMetricDefinition(card.metricId); const tone = ['revenue', 'paidBuyers', 'conversionRate', 'paidItems'].includes(card.metricId) ? 'mint' : ['spend', 'promotionRevenue', 'clicks', 'cpc'].includes(card.metricId) ? 'blue' : ['managementRoi', 'roi', 'cartUsers', 'cartItems'].includes(card.metricId) ? 'orange' : ['feeRate', 'refundAmount'].includes(card.metricId) ? 'purple' : ''; return metric(definition.label, formatCustomMetric(card.metricId, customMetricValue(visibleRows, card.metricId)), definition.description, tone, comparisonBadges(panel, card.metricId, [comparisonId], visibleRows), panel === 'store' ? card.metricId : ''); }).join('');
-  return `<div class="managed-metric-grid"><button class="metric-settings-button" data-card-settings="${panel}" title="设置指标卡片" aria-label="设置指标卡片">⚙</button><div class="metrics-grid dashboard-metrics">${coreHtml}${customHtml}</div></div>`;
+  const coreMetricIds = new Set(coreCards.map((card) => card.metricId)); const customCards = loadCustomCards(panel).filter((card) => !coreMetricIds.has(card.metricId)); const comparisonId = automaticComparisonId(state.datePreset); const showComparisons = loadComparisonVisibility(panel);
+  const badges = (metricId) => showComparisons ? comparisonBadges(panel, metricId, [comparisonId], visibleRows) : '';
+  const coreHtml = coreCards.map((card) => metric(card.label, card.value, card.detail, card.tone, badges(card.metricId))).join('');
+  const customHtml = customCards.map((card) => { const definition = customMetricDefinition(card.metricId); const tone = ['revenue', 'paidBuyers', 'conversionRate', 'paidItems'].includes(card.metricId) ? 'mint' : ['spend', 'promotionRevenue', 'clicks', 'cpc'].includes(card.metricId) ? 'blue' : ['managementRoi', 'roi', 'cartUsers', 'cartItems'].includes(card.metricId) ? 'orange' : ['feeRate', 'refundAmount'].includes(card.metricId) ? 'purple' : ''; return metric(definition.label, formatCustomMetric(card.metricId, customMetricValue(visibleRows, card.metricId)), definition.description, tone, badges(card.metricId), panel === 'store' ? card.metricId : ''); }).join('');
+  const comparisonSwitch = panel === 'store' ? '' : `<label class="metric-comparison-switch" title="${showComparisons ? '关闭' : '开启'}${panel === 'category' ? '品类 360' : '商品排行'}环比展示"><span>环比</span><input type="checkbox" data-comparison-toggle="${panel}" ${showComparisons ? 'checked' : ''} /><i aria-hidden="true"></i></label>`;
+  return `<div class="managed-metric-grid"><div class="metric-grid-controls">${comparisonSwitch}<button class="metric-settings-button" data-card-settings="${panel}" title="设置指标卡片" aria-label="设置指标卡片">⚙</button></div><div class="metrics-grid dashboard-metrics">${coreHtml}${customHtml}</div></div>`;
 }
 function customCardSettingsModal() {
-  const panel = state.cardUi.openPanel; if (!panel) return ''; const cards = loadCustomCards(panel); const used = new Set(cards.map((card) => card.metricId)); const panelLabel = panel === 'store' ? '整店总览' : panel === 'category' ? '品类 360' : '商品排行'; const comparisonId = automaticComparisonId(state.datePreset); const comparisonLabel = COMPARISON_OPTIONS.find((option) => option.id === comparisonId)?.label || '日环比';
-  const customRows = cards.map((card, index) => `<section class="custom-card-editor" data-card-id="${escape(card.id)}"><div><span>自定义 ${index + 1}</span><select data-card-metric="${escape(card.id)}">${CUSTOM_METRICS.map((item) => `<option value="${item.id}" ${item.id === card.metricId ? 'selected' : ''} ${item.id !== card.metricId && used.has(item.id) ? 'disabled' : ''}>${escape(item.label)} · ${escape(item.description)}</option>`).join('')}</select><button class="btn text tiny" data-card-delete="${escape(card.id)}">删除</button></div></section>`).join('');
-  return `<div class="modal custom-card-modal"><section class="modal-card"><header class="modal-head"><div><h3>${panelLabel}指标卡片</h3><p>环比跟随当前统计范围自动计算；自定义卡片从数据表全部可计算字段中新增。</p></div><button class="btn text" data-close-card-settings>关闭</button></header><div class="modal-body"><section class="custom-card-global automatic-comparison"><div><strong>环比已自动匹配：${escape(comparisonLabel)}</strong><small>切换今天、周、月、近 7 日、近 15 日或自定义区间后，全部卡片会立即按对应公式重算。</small></div></section><div class="card-settings-section"><h4>自定义数据卡片</h4><p>经营表与推广表全部可计算指标，最多新增 6 张且不可重复。整店卡片可直接点击加入经营趋势。</p><div class="custom-card-editors">${customRows}</div><button class="btn secondary card-add-button" data-add-custom-card ${cards.length >= 6 ? 'disabled' : ''}>${cards.length >= 6 ? '已达到 6 张上限' : '＋ 从数据表新增指标卡片'}</button></div></div><footer class="modal-actions"><button class="btn primary" data-close-card-settings>完成</button></footer></section></div>`;
+  const panel = state.cardUi.openPanel; if (!panel) return '';
+  const panelLabel = panel === 'store' ? '整店总览' : panel === 'category' ? '品类 360' : '商品排行';
+  if (panel !== 'store') {
+    const metricIds = loadMatrixMetrics(panel); const selected = new Set(metricIds); const limitReached = metricIds.length >= MATRIX_CUSTOM_METRIC_LIMIT;
+    const options = CUSTOM_METRICS.filter((item) => !MATRIX_FIXED_METRIC_IDS.has(item.id)).map((item) => `<label class="custom-metric-option ${selected.has(item.id) ? 'selected' : ''} ${!selected.has(item.id) && limitReached ? 'disabled' : ''}"><input type="checkbox" data-matrix-metric-toggle="${escape(item.id)}" ${selected.has(item.id) ? 'checked' : ''} ${!selected.has(item.id) && limitReached ? 'disabled' : ''}/><span><strong>${escape(item.label)}</strong><small>${escape(item.description)}</small></span></label>`).join('');
+    const orderItems = metricIds.map((metricId, index) => { const metric = customMetricDefinition(metricId); return `<div class="matrix-metric-order-item" draggable="true" data-matrix-metric-order="${escape(metricId)}" role="listitem" aria-label="${escape(`${metric.label}，第 ${index + 1} 列`)}" title="拖动调整列顺序"><span class="matrix-metric-drag" aria-hidden="true">⋮⋮</span><span><strong>${index + 1}. ${escape(metric.label)}</strong><small>${escape(metric.description)}</small></span><span class="matrix-metric-order-actions"><button type="button" data-matrix-metric-move="${escape(metricId)}:up" title="上移${escape(metric.label)}" aria-label="上移${escape(metric.label)}" ${index === 0 ? 'disabled' : ''}>↑</button><button type="button" data-matrix-metric-move="${escape(metricId)}:down" title="下移${escape(metric.label)}" aria-label="下移${escape(metric.label)}" ${index === metricIds.length - 1 ? 'disabled' : ''}>↓</button></span></div>`; }).join('');
+    const order = `<section class="matrix-metric-order-section"><header><h4>已选列顺序</h4><span>${metricIds.length}/${MATRIX_CUSTOM_METRIC_LIMIT}</span></header>${orderItems ? `<div class="matrix-metric-order-list" role="list" aria-label="自定义列顺序">${orderItems}</div>` : '<div class="matrix-metric-order-empty">尚未选择自定义列</div>'}</section>`;
+    return `<div class="modal custom-card-modal"><section class="modal-card"><header class="modal-head"><div><h3>${panelLabel}矩阵自定义数据</h3><p>固定经营指标始终保留，可额外选择最多 ${MATRIX_CUSTOM_METRIC_LIMIT} 项。</p></div><button class="btn text" data-close-card-settings>关闭</button></header><div class="modal-body">${order}<div class="card-settings-section"><h4>经营与付费字段</h4><p>已选择 ${metricIds.length}/${MATRIX_CUSTOM_METRIC_LIMIT} 项；新增列按当前日期范围自动计算环比。</p><div class="custom-metric-options">${options}</div></div></div><footer class="modal-actions"><span>${metricIds.length}/${MATRIX_CUSTOM_METRIC_LIMIT}</span><button class="btn primary" data-close-card-settings>完成</button></footer></section></div>`;
+  }
+  const coreMetricIds = new Set(CORE_METRIC_IDS_BY_PANEL.store); const cards = loadCustomCards('store').filter((card) => !coreMetricIds.has(card.metricId)); const selected = new Set(cards.map((card) => card.metricId)); const comparisonId = automaticComparisonId(state.datePreset); const comparisonLabel = COMPARISON_OPTIONS.find((option) => option.id === comparisonId)?.label || '日环比';
+  const customRows = CUSTOM_METRICS.filter((item) => !coreMetricIds.has(item.id)).map((item) => `<label class="custom-metric-option ${selected.has(item.id) ? 'selected' : ''}"><input type="checkbox" data-card-metric-toggle="${escape(item.id)}" ${selected.has(item.id) ? 'checked' : ''} /><span><strong>${escape(item.label)}</strong><small>${escape(item.description)}</small></span></label>`).join('');
+  return `<div class="modal custom-card-modal"><section class="modal-card"><header class="modal-head"><div><h3>整店总览指标卡片</h3><p>默认经营指标固定保留，其余经营与付费数据直接勾选展示。</p></div><button class="btn text" data-close-card-settings>关闭</button></header><div class="modal-body"><section class="custom-card-global automatic-comparison"><div><strong>环比已自动匹配：${escape(comparisonLabel)}</strong><small>切换日期范围后，全部卡片会立即按对应公式重算。</small></div></section><div class="card-settings-section"><h4>自定义数据卡片</h4><p>全部标准化经营与付费指标均可选择，已选 ${cards.length} 项。</p><div class="custom-metric-options">${customRows}</div></div></div><footer class="modal-actions"><button class="btn primary" data-close-card-settings>完成</button></footer></section></div>`;
 }
 function operationsModel() {
   if (state.mode === 'cloud') {
@@ -523,8 +564,9 @@ function entityRows(kind, items) {
     return (!keyword || search.includes(keyword)) && (!categories.size || categories.has(category)) && (!models.size || models.has(row.model || '型号待补'));
   });
   const key = ui.sort; const direction = ui.direction === 'asc' ? 1 : -1;
+  const metricSort = CUSTOM_METRICS.some((metric) => metric.id === key);
   return rows.sort((left, right) => {
-    const a = left[key] ?? ''; const b = right[key] ?? '';
+    const a = metricSort ? customMetricValue([left], key) : left[key] ?? ''; const b = metricSort ? customMetricValue([right], key) : right[key] ?? '';
     if (hasNumber(a) && hasNumber(b)) return (Number(a) - Number(b)) * direction;
     return String(a).localeCompare(String(b), 'zh-CN') * direction;
   });
@@ -663,6 +705,35 @@ function overviewPanel(workspace) {
 function storeTable(rows) {
   return `<div class="table-wrap"><table><thead><tr><th>店铺</th><th>支付 / 退款</th><th>净 GSV</th><th>推广花费</th><th>ROI</th><th>费率</th></tr></thead><tbody>${rows?.length ? rows.map((row) => { const verified = calculatedPromotion(row); return `<tr><td><strong>${escape(row.name || '--')}</strong></td><td>${money(row.grossRevenue)}<small class="negative">-${money(row.refundAmount)}</small></td><td><strong>${money(row.revenue)}</strong></td><td>${money(row.spend)}</td><td>${fmtNumber(verified.roi)}</td><td>${percent(verified.feeRate)}</td></tr>`; }).join('') : '<tr><td colspan="6" class="empty-cell">导入商品排行和单品付费报表后显示店铺经营。</td></tr>'}</tbody></table></div>`;
 }
+function entityIdentityKeys(kind, row) {
+  const storeName = String(row?.storeName || '').trim().toLocaleLowerCase('zh-CN'); const keys = row?.key ? [`key:${row.key}`] : [];
+  if (kind === 'category') {
+    if (storeName && row?.name) keys.push(`store-category:${storeName}\u0000${row.name}`);
+    else if (row?.name) keys.push(`category:${row.name}`);
+    return keys;
+  }
+  if (row?.productId) keys.push(storeName ? `store-product:${storeName}\u0000${row.productId}` : `product:${row.productId}`);
+  if (storeName && row?.name) keys.push(`store-name:${storeName}\u0000${row.name}`);
+  else if (row?.category && row?.model) keys.push(`model:${row.category}\u0000${row.model}`);
+  return keys;
+}
+function previousEntityIndex(kind, rows) {
+  const index = new Map();
+  for (const row of rows || []) for (const key of entityIdentityKeys(kind, row)) if (!index.has(key)) index.set(key, row);
+  return index;
+}
+function previousEntityForRow(kind, row, index) {
+  for (const key of entityIdentityKeys(kind, row)) if (index.has(key)) return index.get(key);
+  return null;
+}
+function entityComparisonBadge(metricId, row, previousRow, comparison) {
+  const label = comparison?.label || '环比'; const current = comparison?.currentAvailable ? customMetricValue([row], metricId) : null; const previous = comparison?.previousAvailable && previousRow ? customMetricValue([previousRow], metricId) : null;
+  const delta = hasNumber(current) && hasNumber(previous) ? Number(current) - Number(previous) : null; const relative = delta !== null && Number(previous) !== 0 ? delta / Math.abs(Number(previous)) : null; const definition = customMetricDefinition(metricId);
+  const title = comparison ? `${comparison.currentStart} 至 ${comparison.currentEnd} 对比 ${comparison.previousStart} 至 ${comparison.previousEnd}` : '当前或同期报表不完整';
+  if (delta === null) return `<span class="entity-comparison-badge unavailable" title="${escape(title)}">${escape(label)} --</span>`;
+  const display = relative === null ? (delta === 0 ? '持平' : '新增') : definition.kind === 'percent' ? `${delta >= 0 ? '+' : ''}${(delta * 100).toFixed(1)}pp` : `${relative >= 0 ? '+' : ''}${(relative * 100).toFixed(1)}%`;
+  return `<span class="entity-comparison-badge ${customComparisonTone(delta)}" title="${escape(title)}">${escape(label)} ${display}</span>`;
+}
 function entityTable(rows, kind = 'product') {
   if (kind === 'store') return storeTable(rows);
   const ui = entityUi(kind); const allRows = (rows || []).filter((row) => hasNumber(row.revenue) || hasNumber(row.spend) || hasNumber(row.grossRevenue));
@@ -670,9 +741,20 @@ function entityTable(rows, kind = 'product') {
   const visible = entityRows(kind, allRows); const summary = sumRows(visible);
   const categories = entityFilterOptions(kind, 'category', allRows); const models = entityFilterOptions(kind, 'model', allRows);
   const allCategories = entityFilterOptions(kind, 'category', allRows, false); const allModels = entityFilterOptions(kind, 'model', allRows, false);
-  const columns = kind === 'product' ? 11 : 9;
+  const comparisonId = automaticComparisonId(state.datePreset); const comparison = operationsModel()?.core?.dashboard?.comparisons?.[comparisonId]; const showComparisons = loadComparisonVisibility(kind);
+  const previousRows = comparison?.previous?.[kind === 'category' ? 'categories' : 'products'] || []; const previousIndex = previousEntityIndex(kind, previousRows);
+  const customMetricIds = loadMatrixMetrics(kind); const customMetrics = customMetricIds.map((metricId) => customMetricDefinition(metricId));
+  const columns = (kind === 'product' ? 11 : 9) + customMetrics.length;
   const sortHeader = (label, key) => `<button class="sort-header ${ui.sort === key ? 'active' : ''}" data-entity-sort="${kind}:${key}">${label}<i>${ui.sort === key ? (ui.direction === 'asc' ? '↑' : '↓') : '↕'}</i></button>`;
-  return `<article class="entity-matrix"><header class="matrix-head"><div><h3>${kind === 'product' ? '商品排行经营矩阵' : '品类 360 经营矩阵'}</h3><p>${kind === 'product' ? '商品 ID、型号、品类、销售与每种推广计划在同一行核对。' : '品类花费按商品资料库映射的单品付费汇总，和整店推广花费可核对。'}</p></div><div class="matrix-tools"><label class="search-field"><span>搜索</span><input data-entity-keyword="${kind}" value="${escape(ui.keyword)}" placeholder="名称、ID、型号" /></label>${entityFilterMenu(kind, 'category', categories, allCategories.length)}${kind === 'product' ? entityFilterMenu(kind, 'model', models, allModels.length) : ''}<button class="btn text small" data-entity-clear="${kind}">清除筛选</button></div></header><div class="selection-summary"><div><span>当前范围</span><strong>${visible.length} / ${allRows.length} 项</strong></div><div><span>支付 / 退款</span><strong>${money(summary.grossRevenue)}</strong><small>-${money(summary.refundAmount)}</small></div><div><span>净 GSV</span><strong>${money(summary.revenue)}</strong></div><div><span>推广花费</span><strong>${money(summary.spend)}</strong></div><div><span>推广成交</span><strong>${money(summary.promotionRevenue)}</strong></div><div><span>ROI</span><strong>${fmtNumber(summary.roi)}</strong></div><div><span>费率</span><strong>${percent(summary.feeRate)}</strong></div></div>${entityComparisonChart(visible, kind)}<div class="table-wrap entity-table" data-entity-table="${kind}"><table class="${kind}-matrix-table"><thead><tr><th>${sortHeader(kind === 'product' ? '商品' : '品类', 'name')}</th>${kind === 'product' ? `<th>${sortHeader('商品 ID', 'productId')}</th><th>${sortHeader('型号 / 品类', 'model')}</th>` : ''}<th>${sortHeader('支付 / 退款', 'grossRevenue')}</th><th>${sortHeader('净 GSV', 'revenue')}</th><th>${sortHeader('推广花费', 'spend')}</th><th>${sortHeader('推广成交', 'promotionRevenue')}</th><th>${sortHeader('ROI', 'roi')}</th><th>${sortHeader('费率', 'feeRate')}</th><th>${sortHeader('推广类型 / 计划', 'promotionCount')}</th><th>关联</th></tr></thead><tbody>${visible.length ? visible.map((row) => { const verified = calculatedPromotion(row); const channels = row.promotionChannels || []; const planCount = channels.reduce((sum, channel) => sum + (channel.planCount || channel.plans?.length || 0), 0); const expanded = ui.expanded === row.key; const expansionSummary = `${channels.length} 类 / ${planCount} 个计划`; return `<tr class="${expanded ? 'entity-row-active' : ''}" data-entity-row="${escape(row.key)}"><td><strong title="${escape(row.name || '')}">${escape(row.name || '--')}</strong></td>${kind === 'product' ? `<td class="mono">${escape(row.productId || '--')}</td><td><strong>${escape(row.model || '型号待补')}</strong><small>${escape(row.category || '品类待补')}</small></td>` : ''}<td>${money(row.grossRevenue)}<small class="negative">-${money(row.refundAmount)}</small></td><td><strong>${money(row.revenue)}</strong></td><td>${money(row.spend)}</td><td>${money(row.promotionRevenue)}</td><td>${fmtNumber(verified.roi)}</td><td>${percent(verified.feeRate)}</td><td>${channels.length ? `<button class="promotion-toggle" data-entity-kind="${kind}" data-entity-key="${escape(row.key)}" data-entity-summary="${escape(expansionSummary)}" aria-expanded="${expanded}">${expanded ? '收起' : '展开'} ${escape(expansionSummary)}</button>` : '<small>暂无付费数据</small>'}</td><td><span class="match ${escape(row.matchStatus || 'unmatched')}">${row.matchStatus === 'id' ? 'ID 已关联' : row.matchStatus === 'name' ? '名称关联' : row.matchStatus === 'sales-only' ? '待补推广' : row.matchStatus === 'promotion-only' ? '待补经营' : '未关联'}</span></td></tr>`; }).join('') : `<tr><td colspan="${columns}" class="empty-cell">${allRows.length ? '没有符合当前筛选条件的数据。' : '导入对应报表后展示关联矩阵。'}</td></tr>`}</tbody></table></div></article>`;
+  const badge = (metricId, row, previousRow) => showComparisons ? entityComparisonBadge(metricId, row, previousRow, comparison) : '';
+  const customHeaders = customMetrics.map((metric) => `<th>${sortHeader(escape(metric.label), metric.id)}</th>`).join('');
+  const comparisonSwitch = `<label class="metric-comparison-switch matrix-comparison-switch" title="${showComparisons ? '关闭' : '开启'}${kind === 'category' ? '品类' : '商品'}矩阵环比"><span>环比</span><input type="checkbox" data-comparison-toggle="${kind}" ${showComparisons ? 'checked' : ''}/><i aria-hidden="true"></i></label>`;
+  const rowsHtml = visible.length ? visible.map((row) => {
+    const verified = calculatedPromotion(row); const previousRow = previousEntityForRow(kind, row, previousIndex); const channels = row.promotionChannels || []; const planCount = channels.reduce((sum, channel) => sum + (channel.planCount || channel.plans?.length || 0), 0); const expanded = ui.expanded === row.key; const expansionSummary = `${channels.length} 类 / ${planCount} 个计划`;
+    const customCells = customMetrics.map((metric) => `<td class="entity-metric-cell metric-custom" data-mobile-label="${escape(metric.label)}"><strong>${escape(formatCustomMetric(metric.id, customMetricValue([row], metric.id)))}</strong>${badge(metric.id, row, previousRow)}</td>`).join('');
+    return `<tr class="${expanded ? 'entity-row-active' : ''}" data-entity-row="${escape(row.key)}"><td class="entity-name-cell"><strong title="${escape(row.name || '')}">${escape(row.name || '--')}</strong></td>${kind === 'product' ? `<td class="entity-id-cell mono">${escape(row.productId || '--')}</td><td class="entity-model-cell"><strong>${escape(row.model || '型号待补')}</strong><small>${escape(row.category || '品类待补')}</small></td>` : ''}<td class="entity-payment-cell"><span class="entity-value-line">${money(row.grossRevenue)}${badge('grossRevenue', row, previousRow)}</span><small class="negative entity-value-line">-${money(row.refundAmount)}${badge('refundAmount', row, previousRow)}</small></td><td class="entity-metric-cell metric-revenue"><strong>${money(row.revenue)}</strong>${badge('revenue', row, previousRow)}</td><td class="entity-metric-cell metric-spend"><strong>${money(row.spend)}</strong>${badge('spend', row, previousRow)}</td><td class="entity-metric-cell metric-promotion-revenue"><strong>${money(row.promotionRevenue)}</strong>${badge('promotionRevenue', row, previousRow)}</td><td class="entity-metric-cell metric-roi"><strong>${fmtNumber(verified.roi)}</strong>${badge('roi', row, previousRow)}</td><td class="entity-metric-cell metric-fee-rate"><strong>${percent(verified.feeRate)}</strong>${badge('feeRate', row, previousRow)}</td>${customCells}<td class="entity-promotion-cell">${channels.length ? `<button class="promotion-toggle" data-entity-kind="${kind}" data-entity-key="${escape(row.key)}" data-entity-summary="${escape(expansionSummary)}" aria-expanded="${expanded}">${expanded ? '收起' : '展开'} ${escape(expansionSummary)}</button>` : '<small>暂无付费数据</small>'}</td><td class="entity-match-cell"><span class="match ${escape(row.matchStatus || 'unmatched')}">${row.matchStatus === 'id' ? 'ID 已关联' : row.matchStatus === 'name' ? '名称关联' : row.matchStatus === 'sales-only' ? '待补推广' : row.matchStatus === 'promotion-only' ? '待补经营' : '未关联'}</span></td></tr>`;
+  }).join('') : `<tr><td colspan="${columns}" class="empty-cell">${allRows.length ? '没有符合当前筛选条件的数据。' : '导入对应报表后展示关联矩阵。'}</td></tr>`;
+  return `<article class="entity-matrix"><header class="matrix-head"><div><h3>${kind === 'product' ? '商品排行经营矩阵' : '品类 360 经营矩阵'}</h3><p>${kind === 'product' ? '商品 ID、型号、品类、销售与每种推广计划在同一行核对。' : '品类花费按商品资料库映射的单品付费汇总，和整店推广花费可核对。'}</p></div><div class="matrix-tools"><label class="search-field"><span>搜索</span><input data-entity-keyword="${kind}" value="${escape(ui.keyword)}" placeholder="名称、ID、型号" /></label>${entityFilterMenu(kind, 'category', categories, allCategories.length)}${kind === 'product' ? entityFilterMenu(kind, 'model', models, allModels.length) : ''}<button class="btn text small" data-entity-clear="${kind}">清除筛选</button>${comparisonSwitch}<button class="btn secondary small matrix-metric-button" data-card-settings="${kind}">自定义数据 ${customMetricIds.length}/${MATRIX_CUSTOM_METRIC_LIMIT}</button></div></header><div class="selection-summary"><div><span>当前范围</span><strong>${visible.length} / ${allRows.length} 项</strong></div><div><span>支付 / 退款</span><strong>${money(summary.grossRevenue)}</strong><small>-${money(summary.refundAmount)}</small></div><div><span>净 GSV</span><strong>${money(summary.revenue)}</strong></div><div><span>推广花费</span><strong>${money(summary.spend)}</strong></div><div><span>推广成交</span><strong>${money(summary.promotionRevenue)}</strong></div><div><span>ROI</span><strong>${fmtNumber(summary.roi)}</strong></div><div><span>费率</span><strong>${percent(summary.feeRate)}</strong></div></div>${entityComparisonChart(visible, kind)}<div class="table-wrap entity-table" data-entity-table="${kind}"><table class="${kind}-matrix-table" style="min-width:${1270 + customMetricIds.length * 145}px"><thead><tr><th>${sortHeader(kind === 'product' ? '商品' : '品类', 'name')}</th>${kind === 'product' ? `<th>${sortHeader('商品 ID', 'productId')}</th><th>${sortHeader('型号 / 品类', 'model')}</th>` : ''}<th>${sortHeader('支付 / 退款', 'grossRevenue')}</th><th>${sortHeader('净 GSV', 'revenue')}</th><th>${sortHeader('推广花费', 'spend')}</th><th>${sortHeader('推广成交', 'promotionRevenue')}</th><th>${sortHeader('ROI', 'roi')}</th><th>${sortHeader('费率', 'feeRate')}</th>${customHeaders}<th>${sortHeader('推广类型 / 计划', 'promotionCount')}</th><th>关联</th></tr></thead><tbody>${rowsHtml}</tbody></table></div></article>`;
 }
 function captureEntityScroll() {
   document.querySelectorAll('[data-entity-table]').forEach((table) => {
@@ -780,23 +862,9 @@ function operationsView(model, header) {
   let panel;
   if (state.activePanel === 'overview') panel = overviewPanel(model);
   else if (state.activePanel === 'category') {
-    const rows = entityRows('category', dashboard.categories);
-    const cards = [
-      { id: 'category-linked', metricId: 'linkedCount', label: '已关联品类', value: fmtNumber(cardMetricValue(rows, 'linkedCount'), 0), detail: '当前筛选范围内销售与单品付费已关联', tone: 'mint' },
-      { id: 'category-sales-only', metricId: 'salesOnlyCount', label: '待补单品付费', value: fmtNumber(cardMetricValue(rows, 'salesOnlyCount'), 0), detail: '当前筛选范围内仅有品类 360 销售数据', tone: 'orange' },
-      { id: 'category-promotion-only', metricId: 'promotionOnlyCount', label: '待补品类 360', value: fmtNumber(cardMetricValue(rows, 'promotionOnlyCount'), 0), detail: '当前筛选范围内仅有单品付费数据', tone: 'blue' },
-      { id: 'category-revenue', metricId: 'revenue', label: '品类净 GSV', value: money(cardMetricValue(rows, 'revenue')), detail: '当前筛选范围', tone: '' },
-    ];
-    panel = `<section class="workspace-content">${managedMetricGrid('category', cards, rows)}${entityTable(dashboard.categories, 'category')}</section>`;
+    panel = `<section class="workspace-content">${entityTable(dashboard.categories, 'category')}</section>`;
   } else if (state.activePanel === 'product') {
-    const rows = entityRows('product', dashboard.products);
-    const cards = [
-      { id: 'product-linked', metricId: 'linkedCount', label: '已关联单品', value: fmtNumber(cardMetricValue(rows, 'linkedCount'), 0), detail: '当前筛选范围内经营与推广已关联', tone: 'mint' },
-      { id: 'product-sales-only', metricId: 'salesOnlyCount', label: '待补推广数据', value: fmtNumber(cardMetricValue(rows, 'salesOnlyCount'), 0), detail: '当前筛选范围内仅有商品经营', tone: 'orange' },
-      { id: 'product-promotion-only', metricId: 'promotionOnlyCount', label: '待补经营数据', value: fmtNumber(cardMetricValue(rows, 'promotionOnlyCount'), 0), detail: '当前筛选范围内仅有单品推广', tone: 'blue' },
-      { id: 'product-spend', metricId: 'spend', label: '单品推广花费', value: money(cardMetricValue(rows, 'spend')), detail: '当前筛选范围', tone: 'purple' },
-    ];
-    panel = `<section class="workspace-content">${managedMetricGrid('product', cards, rows)}${entityTable(dashboard.products, 'product')}</section>`;
+    panel = `<section class="workspace-content">${entityTable(dashboard.products, 'product')}</section>`;
   } else panel = warehousePanel(model);
   return `${header}${operationsNav()}${modeToolbar()}${panel}`;
 }
@@ -1243,10 +1311,18 @@ function bindShell() {
   document.querySelector('#clear-local')?.addEventListener('click', async () => { if (!window.confirm('将清空当前浏览器的全部本地报表、商品资料和销售扣除。确定继续？')) return; await localClear(); state.localReports = []; state.localMeta = { productCatalog: [], productCatalogSource: { fileName: '', updatedAt: null }, salesDeductions: [] }; await localPutMeta(state.localMeta); render(); });
   document.querySelectorAll('[data-trend-toggle]').forEach((button) => button.addEventListener('click', () => { const metricName = button.dataset.trendToggle; state.trendMetrics = state.trendMetrics.includes(metricName) ? (state.trendMetrics.length > 1 ? state.trendMetrics.filter((item) => item !== metricName) : state.trendMetrics) : [...state.trendMetrics, metricName]; render(); }));
   document.querySelectorAll('[data-card-settings]').forEach((button) => button.addEventListener('click', () => { state.cardUi.openPanel = button.dataset.cardSettings; render(); }));
+  document.querySelectorAll('[data-comparison-toggle]').forEach((input) => input.addEventListener('change', () => { saveComparisonVisibility(input.dataset.comparisonToggle, input.checked); render(); }));
   document.querySelectorAll('[data-close-card-settings]').forEach((button) => button.addEventListener('click', () => { state.cardUi.openPanel = ''; render(); }));
-  document.querySelector('[data-add-custom-card]')?.addEventListener('click', () => { const panel = state.cardUi.openPanel; const cards = loadCustomCards(panel); const used = new Set(cards.map((card) => card.metricId)); const metric = CUSTOM_METRICS.find((item) => !used.has(item.id)); if (!metric || cards.length >= 6) return; saveCustomCards(panel, [...cards, { id: `${panel}_${crypto.randomUUID()}`, metricId: metric.id }]); render(); });
-  document.querySelectorAll('[data-card-delete]').forEach((button) => button.addEventListener('click', () => { const panel = state.cardUi.openPanel; saveCustomCards(panel, loadCustomCards(panel).filter((card) => card.id !== button.dataset.cardDelete)); render(); }));
-  document.querySelectorAll('[data-card-metric]').forEach((select) => select.addEventListener('change', () => { const panel = state.cardUi.openPanel; saveCustomCards(panel, loadCustomCards(panel).map((card) => card.id === select.dataset.cardMetric ? { ...card, metricId: select.value } : card)); render(); }));
+  document.querySelectorAll('[data-card-metric-toggle]').forEach((input) => input.addEventListener('change', () => { const panel = state.cardUi.openPanel; const metricId = input.dataset.cardMetricToggle; const coreMetricIds = new Set(CORE_METRIC_IDS_BY_PANEL[panel] || []); const cards = loadCustomCards(panel).filter((card) => !coreMetricIds.has(card.metricId) && card.metricId !== metricId); if (input.checked) cards.push({ id: `${panel}_${metricId}`, metricId }); saveCustomCards(panel, cards); render(); }));
+  document.querySelectorAll('[data-matrix-metric-toggle]').forEach((input) => input.addEventListener('change', () => { const panel = state.cardUi.openPanel; const metricId = input.dataset.matrixMetricToggle; if (!['category', 'product'].includes(panel)) return; const metricIds = loadMatrixMetrics(panel).filter((id) => id !== metricId); if (input.checked && metricIds.length < MATRIX_CUSTOM_METRIC_LIMIT) metricIds.push(metricId); saveMatrixMetrics(panel, metricIds); render(); }));
+  document.querySelectorAll('[data-matrix-metric-move]').forEach((button) => button.addEventListener('click', (event) => { event.stopPropagation(); const panel = state.cardUi.openPanel; if (!['category', 'product'].includes(panel)) return; const [metricId, direction] = button.dataset.matrixMetricMove.split(':'); moveMatrixMetric(panel, metricId, direction === 'up' ? -1 : 1); render(); }));
+  document.querySelectorAll('[data-matrix-metric-order]').forEach((item) => {
+    item.addEventListener('dragstart', (event) => { event.dataTransfer.effectAllowed = 'move'; event.dataTransfer.setData('text/plain', item.dataset.matrixMetricOrder); item.classList.add('dragging'); });
+    item.addEventListener('dragend', () => { item.classList.remove('dragging'); document.querySelectorAll('[data-matrix-metric-order].drag-over').forEach((target) => target.classList.remove('drag-over')); });
+    item.addEventListener('dragover', (event) => { event.preventDefault(); event.dataTransfer.dropEffect = 'move'; item.classList.add('drag-over'); });
+    item.addEventListener('dragleave', () => item.classList.remove('drag-over'));
+    item.addEventListener('drop', (event) => { event.preventDefault(); const panel = state.cardUi.openPanel; const sourceId = event.dataTransfer.getData('text/plain'); const targetId = item.dataset.matrixMetricOrder; if (!['category', 'product'].includes(panel) || !sourceId || !targetId) return; reorderMatrixMetric(panel, sourceId, targetId); render(); });
+  });
   document.querySelectorAll('[data-entity-keyword]').forEach((input) => input.addEventListener('input', (event) => { state.entityUi[event.currentTarget.dataset.entityKeyword].keyword = event.currentTarget.value; render(); }));
   document.querySelectorAll('[data-entity-filter-toggle]').forEach((button) => button.addEventListener('click', () => { const { kind, key: field } = parseEntityTarget(button.dataset.entityFilterToggle); const ui = state.entityUi[kind]; if (!ui || !['category', 'model'].includes(field)) return; ui.filterMenu = ui.filterMenu === field ? '' : field; render(); }));
   document.querySelectorAll('[data-entity-filter-query]').forEach((input) => input.addEventListener('input', (event) => { const { kind, key: field } = parseEntityTarget(event.currentTarget.dataset.entityFilterQuery); const ui = state.entityUi[kind]; if (!ui || !['category', 'model'].includes(field)) return; const config = entityFilterConfig(field); ui[config.query] = event.currentTarget.value; ui.filterMenu = field; renderWithEntityFilterFocus(kind, field, event.currentTarget.selectionStart ?? event.currentTarget.value.length); }));

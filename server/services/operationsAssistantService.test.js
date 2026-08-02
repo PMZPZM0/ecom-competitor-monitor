@@ -935,9 +935,23 @@ test("operations comparisons follow the selected end date and preserve natural p
         importedAt: `${date}T12:00:00.000Z`,
         rows: [{ productId: "1001", productName: "测试商品", storeName: "测试店铺", spend: 10, revenue: 30, clicks: 5, orders: 1 }],
       });
+      if (month === "2026-07") {
+        reports.push({
+          id: `category-${date}`,
+          type: "category",
+          storeName: "测试店铺",
+          reportDate: date,
+          periodKind: "day",
+          periodStart: date,
+          periodEnd: date,
+          importedAt: `${date}T12:00:00.000Z`,
+          rows: [{ primaryCategory: "厨房电器", secondaryCategory: "锅具", category: "锅具", storeName: "测试店铺", grossRevenue: 100, refundAmount: 10, revenue: 90, refundDataAvailable: true, visitors: 10, paidBuyers: 2 }],
+        });
+      }
     }
   }
-  const workspace = buildOperationsWorkspace({ reports }, {
+  const productCatalog = [{ id: "catalog-1001", storeName: "测试店铺", productId: "1001", category: "锅具", model: "型号 A", sourceName: "测试", createdAt: "2026-07-01T00:00:00.000Z" }];
+  const workspace = buildOperationsWorkspace({ reports, productCatalog }, {
     filters: { sourcePeriodKind: "auto", storeName: "测试店铺", start: "2026-07-01", end: "2026-07-31" },
   });
   const comparisons = workspace.dashboard.comparisons;
@@ -965,8 +979,16 @@ test("operations comparisons follow the selected end date and preserve natural p
   assert.equal(comparisons.month.previous.store.revenue, 2700);
   assert.equal(comparisons.month.current.store.feeRate, 310 / 2790);
   assert.equal(comparisons.month.previous.store.feeRate, 300 / 2700);
+  assert.equal(comparisons.day.current.products[0].revenue, 90);
+  assert.equal(comparisons.day.current.products[0].spend, 10);
+  assert.equal(comparisons.day.current.products[0].feeRate, 10 / 90);
+  assert.equal(comparisons.day.current.products[0].roi, 3);
+  assert.equal(comparisons.month.current.categories[0].revenue, 2790);
+  assert.equal(comparisons.month.current.categories[0].spend, 310);
+  assert.equal(comparisons.month.current.categories[0].feeRate, 310 / 2790);
+  assert.equal(comparisons.month.current.categories[0].roi, 3);
 
-  const customWorkspace = buildOperationsWorkspace({ reports }, {
+  const customWorkspace = buildOperationsWorkspace({ reports, productCatalog }, {
     filters: { sourcePeriodKind: "auto", storeName: "测试店铺", start: "2026-07-20", end: "2026-07-29" },
   });
   const customComparison = customWorkspace.dashboard.comparisons.custom;
