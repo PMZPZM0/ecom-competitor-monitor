@@ -85,6 +85,13 @@ import {
   stopQwenPawOperationsConsole,
 } from "./services/operationsAssistantService.js";
 import {
+  operationsAgentEntityTypes,
+  operationsAgentMetricKeys,
+  operationsAgentQueryPayload,
+  operationsAgentSchema,
+  projectOperationsWorkspaceForAgent,
+} from "./services/operationsAgentQueryService.js";
+import {
   activateCloudSync,
   disconnectCloudSync,
   publicCloudSync,
@@ -669,14 +676,19 @@ function operationsAnalysisRecord(analysis, source = "manual") {
   };
 }
 
-async function runOperationsAnalysis({ source = "manual", sendToFeishu = false } = {}) {
+async function runOperationsAnalysis({ source = "manual", sendToFeishu = false, filters = {}, agentQuery = null } = {}) {
   const db = await readDb();
-  const workspace = buildOperationsWorkspace(db.operations);
+  const state = normalizeOperationsState(db.operations);
+  const baseWorkspace = buildOperationsWorkspace(state, { filters });
+  const workspace = agentQuery ? projectOperationsWorkspaceForAgent(baseWorkspace, agentQuery) : baseWorkspace;
+  const selectedReportIds = new Set(baseWorkspace.reports.map((report) => report.id));
+  const scopedReports = state.reports.filter((report) => selectedReportIds.has(report.id));
   const analysis = await analyzeOperationsWorkspace(db.modelConfig, workspace, {
     principles: db.operations?.principles || "",
-    reports: db.operations?.reports || [],
+    reports: scopedReports,
+    ...(agentQuery ? { agentQuery: workspace.agentQuery } : {}),
   });
-  const record = operationsAnalysisRecord(analysis, source);
+  const record = operationsAnalysisRecord({ ...analysis, ...(agentQuery ? { query: workspace.agentQuery } : {}) }, source);
   let sent = false;
   let sendError = "";
   if (sendToFeishu && workspace.freshness.fresh) {
@@ -705,7 +717,13 @@ async function runOperationsAnalysis({ source = "manual", sendToFeishu = false }
     });
     return current;
   });
-  return { analysis: record, workspace, sent, sendError };
+  return {
+    analysis: record,
+    workspace,
+    ...(agentQuery ? { data: operationsAgentQueryPayload(baseWorkspace, agentQuery) } : {}),
+    sent,
+    sendError,
+  };
 }
 
 function stopOperationsDailyReport() {
@@ -841,6 +859,58 @@ app.post("/api/agent-tools/audit", async (req, res) => {
     details: z.unknown().optional(),
   }).strict().parse(req.body || {});
   res.status(201).json(await recordAgentAction(dbRuntimeInfo().dataDir, input));
+});
+
+const operationsAgentQuerySchema = z.object({
+  periodKind: z.enum(["all", ...OPERATIONS_PERIOD_KINDS]).optional().default("all"),
+  sourcePeriodKind: z.enum(["auto", "all", ...OPERATIONS_PERIOD_KINDS]).optional().default("all"),
+  start: z.string().regex(/^$|^\d{4}-\d{2}-\d{2}$/).optional().default(""),
+  end: z.string().regex(/^$|^\d{4}-\d{2}-\d{2}$/).optional().default(""),
+  storeName: z.string().trim().max(80).optional().default(""),
+  entityType: z.enum([...operationsAgentEntityTypes]).optional().default("all"),
+  entityIds: z.array(z.string().trim().min(1).max(240)).max(80).optional().default([]),
+  metrics: z.array(z.enum([...operationsAgentMetricKeys])).max(operationsAgentMetricKeys.length).optional().default([]),
+}).strict().superRefine((value, context) => {
+  if (value.start && value.end && value.start > value.end) {
+    context.addIssue({ code: "custom", path: ["end"], message: "结束日期不能早于开始日期。" });
+  }
+  if (value.entityIds.length && value.entityType === "all") {
+    context.addIssue({ code: "custom", path: ["entityType"], message: "按对象筛选时必须明确选择店铺、品类、商品或人群。" });
+  }
+});
+
+function operationsFiltersFromAgentQuery(input) {
+  return {
+    periodKind: input.periodKind,
+    sourcePeriodKind: input.sourcePeriodKind,
+    start: input.start,
+    end: input.end,
+    storeName: input.storeName,
+  };
+}
+
+app.get("/api/agent-tools/operations/schema", async (req, res) => {
+  requireAgentToolAccess(req);
+  res.json(operationsAgentSchema());
+});
+
+app.post("/api/agent-tools/operations/query", async (req, res) => {
+  requireAgentToolAccess(req);
+  const input = operationsAgentQuerySchema.parse(req.body || {});
+  const db = await readDb();
+  const workspace = buildOperationsWorkspace(db.operations, { filters: operationsFiltersFromAgentQuery(input) });
+  res.json(operationsAgentQueryPayload(workspace, input));
+});
+
+app.post("/api/agent-tools/operations/analyze", async (req, res) => {
+  requireAgentToolAccess(req);
+  const input = operationsAgentQuerySchema.parse(req.body || {});
+  const result = await runOperationsAnalysis({
+    source: "qwenpaw",
+    filters: operationsFiltersFromAgentQuery(input),
+    agentQuery: input,
+  });
+  res.json({ analysis: result.analysis, data: result.data });
 });
 
 app.post("/api/operations/reports/preview", parseOperationsUpload, async (req, res) => {

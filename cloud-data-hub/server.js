@@ -27,11 +27,11 @@ const MAX_TEAM_MEMBER_LIMIT = 500;
 const MAX_UPLOAD_BYTES = 64 * 1024 * 1024;
 const DEFAULT_STORAGE_QUOTA_BYTES = 2 * 1024 * 1024 * 1024;
 const MANAGED_CODE_ENCRYPTION_SECRET = String(process.env.MANAGED_CODE_ENCRYPTION_SECRET || process.env.CLOUD_ADMIN_PASSWORD || randomToken(48));
-const QQ_EMAIL_PATTERN = /^[A-Z0-9._%+-]+@qq\.com$/i;
+const LOGIN_USERNAME_PATTERN = /^(?=.{2,40}$)(?=.*[\p{Script=Han}A-Za-z0-9])[\p{Script=Han}A-Za-z0-9._-]+$/u;
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: MAX_UPLOAD_BYTES } });
 
 const initialState = {
-  schemaVersion: 4,
+  schemaVersion: 5,
   platform: { allowTeamCreation: true },
   users: [],
   // A user account is global, while access and administration rights belong to
@@ -90,12 +90,27 @@ function randomToken(bytes = 32) {
   return crypto.randomBytes(bytes).toString("base64url");
 }
 
-function normalizeQqEmail(value) {
-  const email = String(value || "").trim().toLowerCase();
-  if (!QQ_EMAIL_PATTERN.test(email)) {
-    throw Object.assign(new Error("仅支持 @qq.com 邮箱注册。"), { status: 400, code: "QQ_EMAIL_REQUIRED" });
+function normalizeLoginUsername(value) {
+  const username = String(value || "").trim().normalize("NFKC");
+  if (!LOGIN_USERNAME_PATTERN.test(username)) {
+    throw Object.assign(new Error("用户名需为 2-40 位中文、字母、数字或 . _ -，并至少包含一个中文、字母或数字。"), { status: 400, code: "USERNAME_INVALID" });
   }
-  return email;
+  return username;
+}
+
+function loginKey(value) {
+  return String(value || "").trim().toLocaleLowerCase("zh-CN");
+}
+
+function accountByLoginName(db, value) {
+  const key = loginKey(value);
+  return db.users.find((user) => loginKey(user.username) === key || loginKey(user.email) === key) || null;
+}
+
+function normalizeDisplayName(value, fallback = "用户") {
+  const accountName = String(fallback || "用户").trim();
+  const fallbackName = (accountName.includes("@") ? accountName.split("@")[0] : accountName) || "用户";
+  return (String(value || "").trim().replace(/\s+/g, " ") || fallbackName).slice(0, 40);
 }
 
 function managedCodeKey() {
@@ -157,10 +172,11 @@ function normalizeState(value = {}) {
       salesDeductions: Array.isArray(item.salesDeductions) ? item.salesDeductions.slice(-2_000) : [],
     })) : [];
   const sourceUsers = Array.isArray(value.users) ? value.users : [];
+  const platformAdminUserIds = new Set(sourceUsers.filter((user) => user?.role === "platform-admin").map((user) => String(user.id || "")));
   const validTeamIds = new Set(teams.map((team) => team.id));
   const membershipByKey = new Map();
   for (const source of Array.isArray(value.teamMemberships) ? value.teamMemberships : []) {
-    if (!source || !validTeamIds.has(String(source.teamId || "")) || !String(source.userId || "").trim()) continue;
+    if (!source || !validTeamIds.has(String(source.teamId || "")) || !String(source.userId || "").trim() || platformAdminUserIds.has(String(source.userId || ""))) continue;
     const userId = String(source.userId).trim();
     const teamId = String(source.teamId).trim();
     const key = `${userId}\u0000${teamId}`;
@@ -180,6 +196,7 @@ function normalizeState(value = {}) {
   // Migrate every pre-membership account exactly once. `teamId` stays in the
   // user record only as a temporary compatibility mirror for old local clients.
   for (const source of sourceUsers) {
+    if (source?.role === "platform-admin") continue;
     const legacyTeamId = String(source?.teamId || "").trim();
     if (!legacyTeamId || !validTeamIds.has(legacyTeamId) || !source?.id) continue;
     const key = `${source.id}\u0000${legacyTeamId}`;
@@ -202,6 +219,7 @@ function normalizeState(value = {}) {
     return {
       ...source,
       role: source.role === "platform-admin" ? "platform-admin" : "member",
+      displayName: normalizeDisplayName(source.displayName, source.username || source.email),
       activeTeamId,
       // Kept until all deployed clients have received the membership-aware UI.
       teamId: activeTeamId,
@@ -210,6 +228,7 @@ function normalizeState(value = {}) {
   return {
     ...initialState,
     ...value,
+    schemaVersion: initialState.schemaVersion,
     platform: {
       ...initialState.platform,
       ...(value.platform && typeof value.platform === "object" ? value.platform : {}),
@@ -325,15 +344,21 @@ function teamById(db, teamId) {
 }
 
 function membershipsForUser(db, userId) {
+  const user = db.users.find((item) => item.id === userId);
+  if (!user || user.role === "platform-admin") return [];
   return db.teamMemberships.filter((membership) => membership.userId === userId);
 }
 
 function membershipsForTeam(db, teamId) {
-  return db.teamMemberships.filter((membership) => membership.teamId === teamId);
+  return db.teamMemberships.filter((membership) => {
+    if (membership.teamId !== teamId) return false;
+    const user = db.users.find((item) => item.id === membership.userId);
+    return Boolean(user && user.role !== "platform-admin");
+  });
 }
 
 function membershipForUser(db, userId, teamId) {
-  return db.teamMemberships.find((membership) => membership.userId === userId && membership.teamId === teamId) || null;
+  return membershipsForUser(db, userId).find((membership) => membership.teamId === teamId) || null;
 }
 
 function activeMembershipForUser(db, user, teamId) {
@@ -583,6 +608,7 @@ function publicUser(db, user) {
   return {
     id: user.id,
     username: user.username,
+    displayName: normalizeDisplayName(user.displayName, user.username || user.email),
     role: user.role,
     teamId: user.activeTeamId || user.teamId || "",
     memberships: membershipsForUser(db, user.id)
@@ -762,7 +788,7 @@ async function ensureInitialAdmin() {
     const username = String(process.env.CLOUD_ADMIN_USERNAME || "owner").trim() || "owner";
     const generated = String(process.env.CLOUD_ADMIN_PASSWORD || randomToken(20));
     const password = hashPassword(generated);
-    db.users.push({ id: id("user"), username, role: "platform-admin", teamId: "", passwordHash: password.key, passwordSalt: password.salt, status: "active", createdAt: now() });
+    db.users.push({ id: id("user"), username, displayName: normalizeDisplayName("", username), role: "platform-admin", teamId: "", passwordHash: password.key, passwordSalt: password.salt, status: "active", createdAt: now() });
     logAudit(db, { action: "platform.bootstrap", summary: `已创建平台管理员 ${username}` });
     if (!process.env.CLOUD_ADMIN_PASSWORD) console.log(`[cloud-hub] 初始管理员密码（仅显示一次）: ${generated}`);
     return db;
@@ -844,16 +870,16 @@ app.post("/api/auth/email-code", async (req, res) => {
 
 app.post("/api/auth/register", async (req, res) => {
   const input = z.object({
-    email: z.string().trim().min(6).max(254),
+    username: z.string().trim().min(2).max(40),
     inviteCode: z.string().trim().min(8).max(80),
     password: z.string().min(10).max(240),
-  }).parse(req.body || {});
-  const email = normalizeQqEmail(input.email);
+  }).strict().parse(req.body || {});
+  const username = normalizeLoginUsername(input.username);
   const password = hashPassword(input.password);
   let created;
   await updateDb((db) => {
-    if (db.users.some((user) => user.username.toLowerCase() === email || String(user.email || "").toLowerCase() === email)) {
-      throw Object.assign(new Error("该 QQ 邮箱已注册，请直接登录。"), { status: 409, code: "EMAIL_ALREADY_REGISTERED" });
+    if (accountByLoginName(db, username)) {
+      throw Object.assign(new Error("该用户名已被使用，请换一个用户名。"), { status: 409, code: "USERNAME_ALREADY_REGISTERED" });
     }
     const invitation = db.invitations.find((item) => item.codeHash === sha256(input.inviteCode));
     if (!invitation || invitation.revokedAt || invitation.exhaustedAt || Date.parse(invitation.expiresAt || "") <= Date.now() || !teamById(db, invitation.teamId)) {
@@ -867,7 +893,7 @@ app.post("/api/auth/register", async (req, res) => {
       }
     }
     created = {
-      id: id("user"), username: email, email, role: "member", teamId: invitation.teamId, activeTeamId: invitation.teamId,
+      id: id("user"), username, displayName: username, role: "member", teamId: invitation.teamId, activeTeamId: invitation.teamId,
       passwordHash: password.key, passwordSalt: password.salt, status: "active", createdAt: now(),
     };
     db.users.push(created);
@@ -1024,8 +1050,7 @@ app.post("/api/auth/invitations/accept", requireUser, async (req, res) => {
 app.post("/api/auth/login", async (req, res) => {
   const input = z.object({ username: z.string().trim().min(1).max(80), password: z.string().min(1).max(240) }).parse(req.body || {});
   const db = await readDb();
-  const loginName = input.username.toLowerCase();
-  const user = db.users.find((item) => item.username.toLowerCase() === loginName || String(item.email || "").toLowerCase() === loginName);
+  const user = accountByLoginName(db, input.username);
   if (!user || !verifyPassword(input.password, user)) return res.status(401).json({ message: "账号或密码不正确。" });
   if (user.status !== "active") return res.status(403).json({ message: "该账号已被停用，无法登录。", code: "ACCOUNT_SUSPENDED" });
   const fallback = user.role === "platform-admin" ? null : firstAvailableMembership(db, user);
@@ -1050,6 +1075,20 @@ app.post("/api/auth/logout", (req, res) => {
 
 app.get("/api/session", requireUser, (req, res) => {
   res.json({ user: publicUser(req.hub.db, req.hub.user) });
+});
+
+app.patch("/api/account/profile", requireUser, async (req, res) => {
+  const input = z.object({ displayName: z.string().trim().min(1).max(40) }).strict().parse(req.body || {});
+  const db = await updateDb((next) => {
+    const user = next.users.find((item) => item.id === req.hub.user.id);
+    if (!user) throw Object.assign(new Error("账号不存在。"), { status: 404 });
+    user.displayName = normalizeDisplayName(input.displayName, user.username || user.email);
+    user.updatedAt = now();
+    logAudit(next, { actor: user.username, action: "account.profile.update", teamId: user.activeTeamId || "", summary: `修改显示名称：${user.displayName}` });
+    return next;
+  });
+  const user = db.users.find((item) => item.id === req.hub.user.id);
+  res.json({ user: publicUser(db, user), message: "个人名称已更新，登录账号保持不变。" });
 });
 
 app.post("/api/session/team", requireUser, async (req, res) => {
@@ -1203,14 +1242,17 @@ app.post("/api/admin/teams/:teamId/admins", requireUser, requireTeamManager, asy
   const db = await updateDb((next) => {
     const team = teamById(next, req.params.teamId);
     if (!team) throw Object.assign(new Error("团队不存在或已停用。"), { status: 404 });
-    if (!teamMemberCapacity(next, team).available) throw Object.assign(new Error("团队成员名额已满，无法新增管理员。"), { status: 409, code: "TEAM_MEMBER_LIMIT_REACHED" });
-    let account = next.users.find((item) => item.username.toLowerCase() === input.username.toLowerCase());
+    let account = accountByLoginName(next, input.username);
+    if (account?.role === "platform-admin") {
+      throw Object.assign(new Error("平台超级管理员不能加入团队，也不占用团队成员名额。"), { status: 403, code: "PLATFORM_ADMIN_MEMBERSHIP_FORBIDDEN" });
+    }
+    const prior = account ? membershipForUser(next, account.id, req.params.teamId) : null;
+    if (!prior && !teamMemberCapacity(next, team).available) throw Object.assign(new Error("团队成员名额已满，无法新增管理员。"), { status: 409, code: "TEAM_MEMBER_LIMIT_REACHED" });
     if (!account) {
       const password = hashPassword(input.password);
-      account = { id: id("user"), username: input.username, role: "member", teamId: req.params.teamId, activeTeamId: req.params.teamId, passwordHash: password.key, passwordSalt: password.salt, status: "active", createdAt: now() };
+      account = { id: id("user"), username: input.username, displayName: normalizeDisplayName("", input.username), role: "member", teamId: req.params.teamId, activeTeamId: req.params.teamId, passwordHash: password.key, passwordSalt: password.salt, status: "active", createdAt: now() };
       next.users.push(account);
     }
-    const prior = membershipForUser(next, account.id, req.params.teamId);
     if (prior) {
       prior.role = "team-admin";
       prior.status = "active";
@@ -1225,7 +1267,7 @@ app.post("/api/admin/teams/:teamId/admins", requireUser, requireTeamManager, asy
   });
   res.status(201).json({ admins: membershipsForTeam(db, req.params.teamId).filter((item) => item.role === "team-admin" && item.status === "active").map((item) => {
     const account = db.users.find((user) => user.id === item.userId);
-    return { id: account?.id || item.userId, username: account?.username || "", createdAt: account?.createdAt || item.createdAt };
+    return { id: account?.id || item.userId, username: account?.username || "", displayName: normalizeDisplayName(account?.displayName, account?.username), createdAt: account?.createdAt || item.createdAt };
   }) });
 });
 
@@ -1263,9 +1305,9 @@ app.put("/api/admin/members/:userId/membership", requireUser, async (req, res) =
   }).strict().parse(req.body || {});
   let membership;
   const db = await updateDb((next) => {
-    const account = next.users.find((item) => item.id === req.params.userId);
+    const account = next.users.find((item) => item.id === req.params.userId && item.role !== "platform-admin");
     const team = teamById(next, input.teamId);
-    if (!account) throw Object.assign(new Error("用户不存在。"), { status: 404 });
+    if (!account) throw Object.assign(new Error("用户不存在，或该账号是不能加入团队的平台超级管理员。"), { status: 404, code: "PLATFORM_ADMIN_MEMBERSHIP_FORBIDDEN" });
     if (!team) throw Object.assign(new Error("团队不存在或已停用。"), { status: 404 });
     if (!canManageTeam(next, req.hub.user, input.teamId)) throw Object.assign(new Error("你没有管理该团队成员的权限。"), { status: 403 });
     membership = membershipForUser(next, account.id, team.id);

@@ -2,6 +2,7 @@
 
 import fs from "node:fs/promises";
 import path from "node:path";
+import { createHash } from "node:crypto";
 
 const TOOL_TOKEN = String(process.env.ECOM_AGENT_TOOL_TOKEN || "").trim();
 const WORKSPACE_DIR = path.resolve(String(process.env.ECOM_AGENT_WORKSPACE_DIR || process.cwd()));
@@ -15,6 +16,14 @@ const DEFAULT_IMAGE_REQUEST = Object.freeze({
   background: "auto",
   count: 1,
 });
+const OPERATIONS_ENTITY_TYPES = Object.freeze(["all", "store", "category", "product", "audience"]);
+const OPERATIONS_METRICS = Object.freeze([
+  "gross_revenue", "refund_amount", "gsv", "promotion_spend", "promotion_revenue", "fee_rate",
+  "management_roi", "platform_roi", "visitors", "paid_buyers", "conversion_rate", "clicks",
+  "impressions", "orders", "page_views", "favorites", "cart_users", "cart_items", "paid_items",
+  "collection_cart_rate", "cpc", "cost_per_collect_cart", "sales_rows", "promotion_rows",
+]);
+const registeredReferenceImages = new Map();
 
 const PRICE_CHANNELS = Object.freeze([
   { key: "normal", label: "普通价" },
@@ -41,6 +50,31 @@ function normalizeLocalBaseUrl(value) {
 
 function jsonSchema(properties = {}, required = []) {
   return { type: "object", properties, required, additionalProperties: false };
+}
+
+function operationsQueryProperties() {
+  return {
+    period_kind: { type: "string", enum: ["all", "day", "week", "month", "custom"], description: "展示周期；一般保持 all。" },
+    source_period_kind: { type: "string", enum: ["auto", "all", "day", "week", "month", "custom"], description: "报表原始周期。指定日期范围时优先使用 auto，避免把月报和日报混算。" },
+    start: { type: "string", pattern: "^\\d{4}-\\d{2}-\\d{2}$", description: "开始日期，YYYY-MM-DD。" },
+    end: { type: "string", pattern: "^\\d{4}-\\d{2}-\\d{2}$", description: "结束日期，YYYY-MM-DD。" },
+    store_name: { type: "string", maxLength: 80, description: "店铺名称；必须使用数据字典或查询结果中的准确名称。" },
+    entity_type: { type: "string", enum: OPERATIONS_ENTITY_TYPES, description: "查询对象层级。传 entity_ids 时不能使用 all。" },
+    entity_ids: { type: "array", items: { type: "string", maxLength: 240 }, maxItems: 80, description: "精确对象标识，可使用商品 ID、型号、名称、品类名或店铺名。" },
+    metrics: { type: "array", items: { type: "string", enum: OPERATIONS_METRICS }, maxItems: OPERATIONS_METRICS.length, description: "需要返回或重点分析的指标；为空时返回全部指标。" },
+  };
+}
+
+function creationRequestProperties() {
+  return {
+    user_request: { type: "string", minLength: 1, maxLength: 4_000, description: "用户原始创作需求，不要自行补造品牌、型号、价格或活动信息。" },
+    creation_mode: { type: "string", enum: ["product", "free"], description: "商品模式必须先登记至少一张产品参考图。" },
+    ratio: { type: "string", enum: ["1:1", "4:5", "3:4", "2:3", "9:16", "4:3", "3:2", "16:9"] },
+    resolution: { type: "string", enum: ["1k", "2k", "4k"] },
+    quality: { type: "string", enum: ["low", "medium", "high"] },
+    background: { type: "string", enum: ["auto", "opaque", "transparent"] },
+    reference_image_ids: { type: "array", items: { type: "string" }, maxItems: 3, description: "upload_reference_image 返回的产品参考图 ID。" },
+  };
 }
 
 const tools = [
@@ -116,14 +150,19 @@ const tools = [
     inputSchema: jsonSchema(),
   },
   {
-    name: "get_operations_data",
-    description: "读取本机已导入的推广、市场、人群、竞品报表及本地计算的费率、ROI、预算建议。",
+    name: "get_operations_schema",
+    description: "读取经营罗盘可查询的店铺/品类/商品/人群层级、全部指标、单位和正式计算公式。分析前不确定字段或公式时必须先调用。",
     inputSchema: jsonSchema(),
   },
   {
+    name: "get_operations_data",
+    description: "按店铺、日期、报表周期、对象和指标精准读取本机运营数据。返回明确查询口径、未匹配对象和服务端重新汇总后的指标。",
+    inputSchema: jsonSchema(operationsQueryProperties()),
+  },
+  {
     name: "analyze_operations_data",
-    description: "基于本机已导入的经营数据和截图生成分析及推广建议。不会修改推广计划。",
-    inputSchema: jsonSchema(),
+    description: "按店铺、日期、报表周期、对象和指标范围生成经营分析。金额和比率由正式汇总引擎计算，不会修改推广计划。",
+    inputSchema: jsonSchema(operationsQueryProperties()),
   },
   {
     name: "preview_operations_report",
@@ -154,14 +193,53 @@ const tools = [
     inputSchema: jsonSchema({ image_id: { type: "string" }, favorite: { type: "boolean" }, archived: { type: "boolean" } }, ["image_id"]),
   },
   {
+    name: "upload_reference_image",
+    description: "把QwenPaw工作区media目录中的图片登记为安全参考图句柄。不会读取media目录之外的文件；后续提示词或生图任务使用返回的 reference_image_id。",
+    inputSchema: jsonSchema({ file_path: { type: "string" }, role: { type: "string", enum: ["reference", "mask"] } }, ["file_path"]),
+  },
+  {
+    name: "analyze_creation_request",
+    description: "理解用户的一句话创作需求，结合已登记参考图确定任务类型、产品事实、修改边界和推荐方案；不提交生图任务。",
+    inputSchema: jsonSchema(creationRequestProperties(), ["user_request"]),
+  },
+  {
+    name: "create_prompt_plan",
+    description: "根据用户需求和已登记参考图生成安全、商业、创意三套可执行提示词方案，可保存到AI创作历史。",
+    inputSchema: jsonSchema({ ...creationRequestProperties(), save_history: { type: "boolean" } }, ["user_request"]),
+  },
+  {
     name: "create_image_task",
     description: "把用户确认的创作需求提交到本机 AI 生图队列。返回任务 ID 和状态，不会访问账号或文件系统。",
     inputSchema: jsonSchema({
       prompt: { type: "string" }, negative_prompt: { type: "string" }, ratio: { type: "string", enum: ["1:1", "4:5", "3:4", "2:3", "9:16", "4:3", "3:2", "16:9", "custom"] },
       custom_width: { type: "integer", minimum: 512, maximum: 4096 }, custom_height: { type: "integer", minimum: 512, maximum: 4096 },
       resolution: { type: "string", enum: ["1k", "2k", "4k"] }, quality: { type: "string", enum: ["low", "medium", "high"] }, count: { type: "integer", minimum: 1, maximum: 4 },
+      format: { type: "string", enum: ["png", "jpeg", "webp"] }, background: { type: "string", enum: ["auto", "opaque", "transparent"] }, compression: { type: "integer", minimum: 0, maximum: 100 },
       source_image_id: { type: "string" }, edit_intent: { type: "string", enum: ["local", "background", "outpaint", "redraw"] }, composition_mode: { type: "string", enum: ["keep", "smart"] },
+      reference_image_ids: { type: "array", items: { type: "string" }, maxItems: 4 }, mask_image_id: { type: "string" },
+      copy_text: { type: "string", maxLength: 500 }, copy_position: { type: "string", enum: ["top", "center", "bottom"] },
+      copy_style: { type: "string", enum: ["light", "dark"] }, copy_scale: { type: "string", enum: ["small", "medium", "large"] },
     }, ["prompt"]),
+  },
+  {
+    name: "retry_image_task",
+    description: "重试一个失败或已取消的AI生图任务，复用原任务参数和已保存参考图。",
+    inputSchema: jsonSchema({ job_id: { type: "string" } }, ["job_id"]),
+  },
+  {
+    name: "cancel_image_task",
+    description: "取消一个排队中或运行中的AI生图任务；已生成图片不会删除。",
+    inputSchema: jsonSchema({ job_id: { type: "string" } }, ["job_id"]),
+  },
+  {
+    name: "open_image_in_photoshop",
+    description: "把图片相册中的指定图片打开到本机Photoshop工作文件。",
+    inputSchema: jsonSchema({ image_id: { type: "string" } }, ["image_id"]),
+  },
+  {
+    name: "sync_image_from_photoshop",
+    description: "将Photoshop工作文件中的最新修改同步回经营罗盘图片相册。",
+    inputSchema: jsonSchema({ image_id: { type: "string" } }, ["image_id"]),
   },
   {
     name: "get_agent_activity",
@@ -176,7 +254,7 @@ function textResult(value, isError = false) {
 }
 
 function safeValue(value, depth = 0) {
-  if (depth > 5 || value === null || value === undefined) return null;
+  if (depth > 8 || value === null || value === undefined) return null;
   if (Array.isArray(value)) return value.slice(0, 80).map((item) => safeValue(item, depth + 1));
   if (typeof value === "object") {
     return Object.fromEntries(Object.entries(value)
@@ -407,6 +485,86 @@ async function reportForm(filePath, fields = {}) {
   return form;
 }
 
+function operationsQueryBody(input = {}) {
+  return {
+    ...(input.period_kind ? { periodKind: input.period_kind } : {}),
+    ...(input.source_period_kind ? { sourcePeriodKind: input.source_period_kind } : {}),
+    ...(input.start ? { start: input.start } : {}),
+    ...(input.end ? { end: input.end } : {}),
+    ...(input.store_name ? { storeName: input.store_name } : {}),
+    ...(input.entity_type ? { entityType: input.entity_type } : {}),
+    ...(Array.isArray(input.entity_ids) ? { entityIds: input.entity_ids } : {}),
+    ...(Array.isArray(input.metrics) ? { metrics: input.metrics } : {}),
+  };
+}
+
+async function registerReferenceImage(filePath, role = "reference") {
+  const resolved = await resolveAttachmentPath(filePath);
+  const type = mimeType(resolved);
+  if (!type.startsWith("image/")) throw new Error("参考文件必须是 PNG、JPEG 或 WebP 图片。");
+  const stat = await fs.stat(resolved);
+  if (stat.size > 8 * 1024 * 1024) throw new Error("单张参考图不能超过 8 MB。");
+  const signature = `${resolved}\0${stat.size}\0${stat.mtimeMs}`;
+  const id = `reference_${createHash("sha256").update(signature).digest("hex").slice(0, 20)}`;
+  const record = { id, filePath: resolved, fileName: path.basename(resolved), mimeType: type, role, size: stat.size, signature };
+  registeredReferenceImages.set(id, record);
+  return record;
+}
+
+async function registeredReferenceImage(id, expectedRole = "reference") {
+  const record = registeredReferenceImages.get(String(id || ""));
+  if (!record) throw new Error(`参考图句柄不存在或Agent已重启，请重新调用 upload_reference_image：${id || "未提供 ID"}`);
+  if (record.role !== expectedRole) throw new Error(expectedRole === "mask" ? "请选择登记为 mask 的蒙版图片。" : "蒙版图片不能作为普通产品参考图。" );
+  const resolved = await resolveAttachmentPath(record.filePath);
+  const stat = await fs.stat(resolved);
+  const signature = `${resolved}\0${stat.size}\0${stat.mtimeMs}`;
+  if (signature !== record.signature) throw new Error(`参考图 ${record.fileName} 已发生变化，请重新登记。`);
+  return record;
+}
+
+async function registeredReferenceList(ids = [], role = "reference") {
+  return Promise.all([...new Set(ids || [])].map((id) => registeredReferenceImage(id, role)));
+}
+
+async function appendRegisteredImages(form, field, records) {
+  for (const record of records) {
+    const buffer = await fs.readFile(record.filePath);
+    form.append(field, new Blob([buffer], { type: record.mimeType }), record.fileName);
+  }
+}
+
+function promptParameters(input = {}) {
+  return {
+    ratio: input.ratio || "1:1",
+    resolution: input.resolution || "2k",
+    quality: input.quality || "high",
+    background: input.background || "auto",
+  };
+}
+
+async function quickPromptForm(input, { saveHistory = false } = {}) {
+  const references = await registeredReferenceList(input.reference_image_ids || [], "reference");
+  const form = new FormData();
+  form.append("request", JSON.stringify({
+    userRequest: String(input.user_request || "").trim(),
+    parameters: promptParameters(input),
+    creationMode: input.creation_mode || (references.length ? "product" : "free"),
+    saveHistory,
+  }));
+  await appendRegisteredImages(form, "productImages", references);
+  return form;
+}
+
+async function imageTaskForm(request, referenceIds = [], maskId = "") {
+  const references = await registeredReferenceList(referenceIds, "reference");
+  const mask = maskId ? await registeredReferenceImage(maskId, "mask") : null;
+  const form = new FormData();
+  form.append("request", JSON.stringify(request));
+  await appendRegisteredImages(form, "referenceImages", references);
+  if (mask) await appendRegisteredImages(form, "maskImage", [mask]);
+  return { form, referenceCount: references.length, maskApplied: Boolean(mask) };
+}
+
 async function executeTool(name, input = {}) {
   switch (name) {
     case "get_workspace_state": {
@@ -476,10 +634,12 @@ async function executeTool(name, input = {}) {
       return safeValue(await localApi(`/api/products/${encodeURIComponent(input.product_id)}/feishu-sync`, { method: "POST", body: {} }));
     case "get_local_evidence_status":
       return safeValue(await localApi("/api/local-evidence"));
+    case "get_operations_schema":
+      return safeValue(await localApi("/api/agent-tools/operations/schema"));
     case "get_operations_data":
-      return safeWorkspace(await localApi("/api/operations"));
+      return safeValue(await localApi("/api/agent-tools/operations/query", { method: "POST", body: operationsQueryBody(input) }));
     case "analyze_operations_data": {
-      const result = await localApi("/api/operations/analyze", { method: "POST", body: {} });
+      const result = await localApi("/api/agent-tools/operations/analyze", { method: "POST", body: operationsQueryBody(input) });
       return safeValue(result);
     }
     case "preview_operations_report": {
@@ -504,6 +664,38 @@ async function executeTool(name, input = {}) {
       if (typeof input.archived === "boolean") body.isArchived = input.archived;
       return safeValue(await localApi(`/api/images/${encodeURIComponent(input.image_id)}`, { method: "PATCH", body }));
     }
+    case "upload_reference_image": {
+      const reference = await registerReferenceImage(input.file_path, input.role || "reference");
+      return safeValue({
+        action: "reference_image_registered",
+        reference_image_id: reference.id,
+        file_name: reference.fileName,
+        mime_type: reference.mimeType,
+        bytes: reference.size,
+        role: reference.role,
+        lifetime: "current_agent_session",
+      });
+    }
+    case "analyze_creation_request": {
+      const result = await localApi("/api/prompt-studio/quick-generate", {
+        method: "POST",
+        form: await quickPromptForm(input, { saveHistory: false }),
+      });
+      return safeValue({
+        action: "creation_request_analyzed",
+        request: result.request || result.interpretedRequest,
+        warnings: result.warnings || [],
+        recommendedVariantKey: result.recommendedVariantKey,
+        model: result.model,
+      });
+    }
+    case "create_prompt_plan": {
+      const result = await localApi("/api/prompt-studio/quick-generate", {
+        method: "POST",
+        form: await quickPromptForm(input, { saveHistory: input.save_history !== false }),
+      });
+      return safeValue({ action: "prompt_plan_created", plan: result });
+    }
     case "create_image_task": {
       const request = {
         ...DEFAULT_IMAGE_REQUEST,
@@ -513,14 +705,39 @@ async function executeTool(name, input = {}) {
         ...(input.resolution ? { resolution: input.resolution } : {}),
         ...(input.quality ? { quality: input.quality } : {}),
         ...(input.count ? { count: Number(input.count) } : {}),
+        ...(input.format ? { format: input.format } : {}),
+        ...(input.background ? { background: input.background } : {}),
+        ...(input.compression !== undefined ? { compression: Number(input.compression) } : {}),
         ...(input.custom_width ? { customWidth: Number(input.custom_width) } : {}),
         ...(input.custom_height ? { customHeight: Number(input.custom_height) } : {}),
-        ...(input.source_image_id ? { sourceImageId: input.source_image_id, editMode: "annotation" } : {}),
+        ...(input.source_image_id ? { sourceImageId: input.source_image_id, editMode: input.mask_image_id ? "mask" : "annotation" } : {}),
         ...(input.edit_intent ? { editIntent: input.edit_intent } : {}),
         ...(input.composition_mode ? { compositionMode: input.composition_mode } : {}),
+        ...(input.copy_text ? { copyText: input.copy_text } : {}),
+        ...(input.copy_position ? { copyPosition: input.copy_position } : {}),
+        ...(input.copy_style ? { copyStyle: input.copy_style } : {}),
+        ...(input.copy_scale ? { copyScale: input.copy_scale } : {}),
       };
-      return safeValue({ action: "image_task_created", job: await localApi("/api/image-jobs", { method: "POST", body: request }) });
+      const references = input.reference_image_ids || [];
+      if (!references.length && !input.mask_image_id) {
+        return safeValue({ action: "image_task_created", job: await localApi("/api/image-jobs", { method: "POST", body: request }) });
+      }
+      const prepared = await imageTaskForm(request, references, input.mask_image_id);
+      return safeValue({
+        action: "image_task_created",
+        referenceCount: prepared.referenceCount,
+        maskApplied: prepared.maskApplied,
+        job: await localApi("/api/image-jobs", { method: "POST", form: prepared.form }),
+      });
     }
+    case "retry_image_task":
+      return safeValue({ action: "image_task_retried", job: await localApi(`/api/image-jobs/${encodeURIComponent(input.job_id)}/retry`, { method: "POST", body: {} }) });
+    case "cancel_image_task":
+      return safeValue({ action: "image_task_cancelled", job: await localApi(`/api/image-jobs/${encodeURIComponent(input.job_id)}`, { method: "DELETE" }) });
+    case "open_image_in_photoshop":
+      return safeValue({ action: "photoshop_opened", result: await localApi(`/api/images/${encodeURIComponent(input.image_id)}/photoshop/open`, { method: "POST", body: {} }) });
+    case "sync_image_from_photoshop":
+      return safeValue({ action: "photoshop_synced", result: await localApi(`/api/images/${encodeURIComponent(input.image_id)}/photoshop/sync`, { method: "POST", body: {} }) });
     case "get_agent_activity":
       return safeValue(await localApi(`/api/agent-tools/audit?limit=${Math.min(200, Math.max(1, Number(input.limit) || 50))}`));
     default:

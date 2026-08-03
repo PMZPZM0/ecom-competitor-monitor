@@ -46,7 +46,7 @@ const OPERATIONS_LEDGER_VERSION = 2;
 const DEFAULT_TARGETS = Object.freeze({ targetRoi: 2, maxFeeRate: 0.3, dailyBudgetCap: 0 });
 const DEFAULT_DAILY_REPORT = Object.freeze({ enabled: false, time: "09:30", lastRunAt: null, lastSentAt: null, lastError: "" });
 const QWENPAW_OPERATIONS_AGENT_ID = "default";
-const QWENPAW_OPERATIONS_CONFIG_REVISION = "operations-agent-official-runtime-v1";
+const QWENPAW_OPERATIONS_CONFIG_REVISION = "operations-agent-official-runtime-v2";
 const QWENPAW_PROVIDER_ID = "ecommerce-monitor-model";
 const serviceDirectory = path.dirname(fileURLToPath(import.meta.url));
 let qwenPawOperationsContextUrl = "http://127.0.0.1:4317/api/operations/agent-context";
@@ -2243,6 +2243,15 @@ function localOperationsAnalysis(workspace) {
   }
   const total = workspace.totals;
   const overview = workspace.storeOverview || { revenue: total, performance: total, revenueSource: null, performanceSource: null };
+  const entityType = workspace.agentQuery?.entityType || "all";
+  const scopeLabel = ({ product: "所选商品", category: "所选品类", audience: "所选人群", store: "所选店铺" })[entityType] || "整店";
+  const scopedCount = entityType === "product"
+    ? workspace.dashboard?.products?.length || 0
+    : entityType === "category"
+      ? workspace.dashboard?.categories?.length || 0
+      : entityType === "audience"
+        ? workspace.audiences?.length || 0
+        : workspace.dashboard?.stores?.length || 0;
   const revenueSource = overview.revenueSource?.type || "当前报表";
   const performanceSource = overview.performanceSource?.type || "当前报表";
   const promotionCoverageIncomplete = Boolean(workspace.dashboard?.sources?.storeSales)
@@ -2253,7 +2262,7 @@ function localOperationsAnalysis(workspace) {
       mode: "rule",
       summary: "本地销售与单品付费报表统计周期未对齐，暂不生成整周期费率、ROI 或预算调整建议。",
       insights: [
-        `整店净 GSV ${fixedNumber(overview.revenue.revenue)}（支付 ${fixedNumber(overview.revenue.grossRevenue)} - 退款 ${fixedNumber(overview.revenue.refundAmount)}；来源：${revenueSource}）。`,
+        `${scopeLabel}净 GSV ${fixedNumber(overview.revenue.revenue)}（支付 ${fixedNumber(overview.revenue.grossRevenue)} - 退款 ${fixedNumber(overview.revenue.refundAmount)}；来源：${revenueSource}）。`,
         `已导入单品推广消耗 ${fixedNumber(overview.performance.spend)}；${coverageWarning || "缺少对应周期的单品付费报表"}。`,
       ],
       actions: [],
@@ -2262,8 +2271,8 @@ function localOperationsAnalysis(workspace) {
   }
   const managementRoi = overview.managementRoi ?? overview.performance.roi;
   const insights = [
-    `整店净 GSV ${fixedNumber(overview.revenue.revenue)}（支付 ${fixedNumber(overview.revenue.grossRevenue)} - 退款 ${fixedNumber(overview.revenue.refundAmount)}；来源：${revenueSource}）；推广消耗 ${fixedNumber(overview.performance.spend)}，ROI ${fixedNumber(overview.performance.roi)}（来源：${performanceSource}）。`,
-    `经营 ROI ${fixedNumber(managementRoi)}、推广费率 ${percentNumber(overview.performance.feeRate)}（净 GSV ÷ 推广花费；推广花费 ÷ 净 GSV），已覆盖 ${workspace.products.length} 个可优化单品。`,
+    `${scopeLabel}净 GSV ${fixedNumber(overview.revenue.revenue)}（支付 ${fixedNumber(overview.revenue.grossRevenue)} - 退款 ${fixedNumber(overview.revenue.refundAmount)}；来源：${revenueSource}）；推广消耗 ${fixedNumber(overview.performance.spend)}，平台 ROI ${fixedNumber(overview.performance.roi)}（推广成交金额 ÷ 推广花费；来源：${performanceSource}）。`,
+    `经营 ROI ${fixedNumber(managementRoi)}（净 GSV ÷ 推广花费）、推广费率 ${percentNumber(overview.performance.feeRate)}（推广花费 ÷ 净 GSV），当前范围纳入 ${scopedCount} 个对象。`,
   ];
   return {
     mode: "rule",
@@ -2310,7 +2319,7 @@ async function screenshotContent(reports) {
   return images;
 }
 
-export async function analyzeOperationsWorkspace(modelConfig, workspace, { principles = "", reports = [] } = {}) {
+export async function analyzeOperationsWorkspace(modelConfig, workspace, { principles = "", reports = [], agentQuery = null } = {}) {
   const fallback = localOperationsAnalysis(workspace);
   const resolved = resolveModelConfig(modelConfig);
   if (!resolved.apiKey) return fallback;
@@ -2324,6 +2333,7 @@ export async function analyzeOperationsWorkspace(modelConfig, workspace, { princ
     audiences: workspace.audiences.slice(0, 12),
     deterministicSuggestions: workspace.suggestions.slice(0, 12),
     archive: { currentDate: workspace.currentDate, days: workspace.archive?.days?.slice(0, 30) || [] },
+    query: agentQuery || workspace.agentQuery || null,
     operatingPrinciples: text(principles, 4_000),
   };
   const response = await requestModelApiJson(`${resolved.baseUrl}/responses`, {
@@ -2336,7 +2346,7 @@ export async function analyzeOperationsWorkspace(modelConfig, workspace, { princ
         role: "system",
         content: [{
           type: "input_text",
-          text: "你是严谨的电商运营助手。只能根据提供的数据与截图分析，不得补造数据或声称看到了未给出的后台信息。金额、费率与 ROI 已由本地公式计算，你只解释原因、风险和优先级。历史对比只能使用 archive 中同店铺、同报表类型、comparison.previousDate 存在的记录；口径不一致或没有前日记录必须明确说明无法比较。尊重运营人员的经营原则。输出 JSON：{summary:string,insights:string[],actions:string[]}。每条行动都应包含对象、建议动作和依据。",
+          text: "你是严谨的电商运营助手。只能根据提供的数据与截图分析，不得补造数据或声称看到了未给出的后台信息。金额、费率与 ROI 已由本地公式计算，你只解释原因、风险和优先级。query 是本次查询的唯一店铺、日期、报表周期、对象和指标范围，不得把范围外对象混入结论。历史对比只能使用 archive 中同店铺、同报表类型、comparison.previousDate 存在的记录；口径不一致或没有前日记录必须明确说明无法比较。尊重运营人员的经营原则。输出 JSON：{summary:string,insights:string[],actions:string[]}。每条行动都应包含对象、建议动作和依据。",
         }],
       }, {
         role: "user",
@@ -2504,6 +2514,8 @@ export function qwenPawWorkspaceAgentInstructions(operatingPrinciples = "") {
 每个 SKU 的每个账号视角都必须完整列出 verifiedChannels 中的所有渠道和金额；只有 verifiedChannels 可以报为价格。若一个 SKU 没有已验证渠道，也要单独列出并说明 unavailableChannels 的原因。
 查价完成后必须注明账号范围、SKU 覆盖（已列出数/工具返回 skuCount）、证据时间和不可用原因；未验证价格不得猜测、不得用历史价替代当前价。
 所有金额、费率和 ROI 以工具返回的本地计算结果为准；历史数据只能按相同店铺、相同报表类型和相同统计口径比较，口径不一致或没有前序数据时必须明确说明；数据过期或缺失时必须明确说明。
+用户指定店铺、日期、日报/周报/月报、商品、型号、品类或指标时，必须把它们传给 get_operations_data 或 analyze_operations_data，不能先读取整库再凭文字筛选。字段或公式不确定时先调用 get_operations_schema；返回 missingEntityIds 时必须明确说明未匹配对象。
+AI 创作需求不完整时调用 analyze_creation_request；需要可执行方案时调用 create_prompt_plan。用户提供参考图时必须先调用 upload_reference_image，再把 reference_image_id 传给提示词或生图工具。用户确认出图后调用 create_image_task，查询状态调用 get_image_queue；重试、取消、打开 Photoshop 和同步 Photoshop 分别调用对应工具，不能声称已执行而没有工具回执。
 回答使用简洁中文：先给结论，再列依据、执行回执、风险和下一步。
 `;
 }
@@ -2522,7 +2534,27 @@ async function writeQwenPawWorkspace(installDirectory, operatingPrinciples) {
   }
   const skillDirectory = path.join(skillsDirectory, "ecommerce-operations-assistant");
   await fs.mkdir(skillDirectory, { recursive: true });
-  await fs.writeFile(path.join(skillDirectory, "SKILL.md"), "---\nname: ecommerce-operations-assistant\ndescription: Analyze only the local ecommerce operations context supplied by 经营罗盘.\n---\n\n# 电商运营数据分析\n\n需要本机数据或动作时，只能调用 ecommerce_monitor MCP 工具。工具结果是唯一事实来源。\n", "utf8");
+  await fs.writeFile(path.join(skillDirectory, "SKILL.md"), `---
+name: ecommerce-operations-assistant
+description: Analyze local ecommerce operations data and run AI creation workflows only through 经营罗盘 tools.
+---
+
+# 电商运营与 AI 创作
+
+需要本机数据或动作时，只能调用 ecommerce_monitor MCP 工具。工具结果是唯一事实来源。
+
+## 运营数据
+
+1. 字段或公式不明确时先调用 get_operations_schema。
+2. 用户指定店铺、日期、报表周期、商品、型号、品类、人群或指标时，原样传给 get_operations_data 或 analyze_operations_data。
+3. 必须报告 missingEntityIds、数据新鲜度、周期覆盖和不可用指标，不得用零或推测值代替。
+
+## AI 创作
+
+1. 用户提供图片时先调用 upload_reference_image。
+2. 需求不完整时调用 analyze_creation_request；需要三套可执行提示词时调用 create_prompt_plan。
+3. 用户确认出图后调用 create_image_task；任务控制和 Photoshop 往返必须使用对应工具并报告真实回执。
+`, "utf8");
   await fs.writeFile(path.join(workspace, "skill.json"), `${JSON.stringify({ schema_version: "workspace-skill-manifest.v1", version: 0, skills: { "ecommerce-operations-assistant": { enabled: true, channels: ["all"], source: "customized" } } }, null, 2)}\n`, "utf8");
   return workspace;
 }
@@ -2550,9 +2582,10 @@ function qwenPawApplicationMcp(installDirectory, workspace) {
         tools: [
           "get_workspace_state", "find_products", "get_product_prices", "capture_product_price", "set_product_monitoring",
           "set_sku_monitor_price", "retry_local_product_data", "get_capture_queue", "capture_products_batch", "set_global_monitor",
-          "sync_product_to_feishu", "get_local_evidence_status", "get_operations_data", "analyze_operations_data",
+          "sync_product_to_feishu", "get_local_evidence_status", "get_operations_schema", "get_operations_data", "analyze_operations_data",
           "preview_operations_report", "import_operations_report", "get_image_queue", "get_image_library", "update_image_library_item",
-          "create_image_task", "get_agent_activity",
+          "upload_reference_image", "analyze_creation_request", "create_prompt_plan", "create_image_task", "retry_image_task",
+          "cancel_image_task", "open_image_in_photoshop", "sync_image_from_photoshop", "get_agent_activity",
         ],
       },
     },

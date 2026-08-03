@@ -38,3 +38,36 @@ test("all normalized paid metrics can be selected as up to eight matrix columns"
   assert.match(source, /moveMatrixMetric\(metric\.id, 1\)/);
   assert.match(source, /已选列顺序/);
 });
+
+test("all local fee-rate surfaces share the qualified, warning, and high thresholds", () => {
+  assert.match(source, /FEE_RATE_QUALIFIED_MAX = 0\.095/);
+  assert.match(source, /FEE_RATE_WARNING_MAX = 0\.11/);
+  assert.match(source, /Number\(value\) <= FEE_RATE_QUALIFIED_MAX/);
+  assert.match(source, /Number\(value\) <= FEE_RATE_WARNING_MAX/);
+  assert.match(source, /function FeeRateValue\(/);
+  assert.match(source, /feeRateMetricTone\(store\.feeRate\)/);
+  assert.match(source, /colorForValue=\{\(value\) => feeRateChartColor\(value \/ 100\)\}/);
+  for (const expression of [
+    "totals.feeRate",
+    "item.feeRate",
+    "selectionSummary.feeRate",
+    "type.feeRate",
+    "plan.feeRate",
+  ]) {
+    assert.match(source, new RegExp(`FeeRateValue value=\\{${expression.replace(".", "\\.")}\\}`));
+  }
+  assert.doesNotMatch(source, /value <= 0\.08/);
+  assert.doesNotMatch(source, /value <= 0\.12/);
+});
+
+test("local matrix controls sit above the table and close native filters on outside clicks", () => {
+  const headerIndex = source.indexOf('<CardHeader className="border-b border-slate-200">', source.indexOf("function EntityTable("));
+  const toolsIndex = source.indexOf('ref={matrixToolsRef}', headerIndex);
+  const tableIndex = source.indexOf('className="max-h-[530px] overflow-auto"', toolsIndex);
+  assert.ok(headerIndex >= 0 && toolsIndex > headerIndex && tableIndex > toolsIndex);
+  assert.match(source, /const matrixToolsRef = useRef<HTMLDivElement>\(null\)/);
+  assert.match(source, /document\.addEventListener\("pointerdown", handlePointerDown\)/);
+  assert.match(source, /querySelectorAll<HTMLDetailsElement>\("details\[open\]"\)/);
+  assert.match(source, /document\.removeEventListener\("pointerdown", handlePointerDown\)/);
+  assert.match(source, />\s*清除筛选\s*<\/button>/);
+});

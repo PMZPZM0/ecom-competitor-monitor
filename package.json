@@ -2,7 +2,7 @@
   "name": "tmall-competitor-monitor",
   "productName": "经营罗盘",
   "private": true,
-  "version": "1.0.38",
+  "version": "1.0.39",
   "type": "module",
   "main": "electron/main.mjs",
   "scripts": {

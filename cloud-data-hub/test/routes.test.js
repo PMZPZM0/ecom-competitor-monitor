@@ -29,7 +29,8 @@ function latestProductCatalogEntriesForTest(entries = []) {
 
 test("the product brand and team cards expose a clear operating identity", () => {
   assert.match(htmlSource, /<title>经营罗盘 · 团队经营决策<\/title>/);
-  assert.match(htmlSource, /matrix-drag-order-3/);
+  assert.match(htmlSource, /styles\.css\?v=[^"']+/);
+  assert.match(htmlSource, /app\.js\?v=[^"']+/);
   assert.match(appSource, /operationsCore\.js\?v=20260801-auto-comparison-8/);
   assert.match(appSource, /function brandLockup\(subtitle, compact = false\)/);
   assert.match(appSource, /<strong>经营罗盘<\/strong>/);
@@ -164,7 +165,7 @@ test("sales deduction warehouse keeps history separate from the active calculati
 test("normal login, invitation acceptance, and self-service team creation open operations data", () => {
   assert.match(appSource, /function openOperationsHome\(\) \{[\s\S]*state\.page = 'operations';[\s\S]*state\.activePanel = 'overview';/);
   assert.match(appSource, /if \(register\) \{ const result = await api\('\/api\/auth\/register'/);
-  assert.match(appSource, /state\.authBusy = ''; state\.authFeedback = null; state\.authDraft = \{ username: '', email: '', password: '', inviteCode: '' \};\n      openOperationsHome\(\);\n      await bootstrap\(\);/);
+  assert.match(appSource, /state\.authBusy = ''; state\.authFeedback = null; state\.authDraft = \{ username: '', password: '', inviteCode: '' \};\n      openOperationsHome\(\);\n      await bootstrap\(\);/);
   assert.match(appSource, /state\.session = result\.user; openOperationsHome\(\); await bootstrap\(\); setToast\('团队已创建，已进入运营数据。'\);/);
   assert.match(appSource, /state\.session = result\.user; openOperationsHome\(\); await bootstrap\(\); setToast\('已加入团队，已进入运营数据。'\);/);
 });
@@ -248,13 +249,26 @@ test("category and product matrices include linked top-ten sales and spend bars"
   assert.match(stylesSource, /\.entity-bar-track i\.spend \{ background: #3478d4; \}/);
 });
 
+test("matrix result controls sit below the top-ten chart and directly above the detail table", () => {
+  const matrixStart = appSource.indexOf('return `<article class="entity-matrix">');
+  const chartIndex = appSource.indexOf('${entityComparisonChart(visible, kind)}', matrixStart);
+  const toolsIndex = appSource.indexOf('class="matrix-tools matrix-table-tools"', matrixStart);
+  const tableIndex = appSource.indexOf('data-entity-table="${kind}"', matrixStart);
+  assert.ok(matrixStart >= 0 && chartIndex > matrixStart && toolsIndex > chartIndex && tableIndex > toolsIndex);
+  assert.match(appSource, /<header class="matrix-head"><div><h3>[\s\S]*?<\/p><\/div><\/header><div class="selection-summary">/);
+  assert.match(stylesSource, /\.matrix-table-tools \{ position: relative; z-index: 12;/);
+});
+
 test("top-ten charts expose promotion fee rate with shared risk thresholds", () => {
+  assert.match(appSource, /const FEE_RATE_QUALIFIED_MAX = 0\.095/);
+  assert.match(appSource, /const FEE_RATE_WARNING_MAX = 0\.11/);
   assert.match(appSource, /function feeRateTone\(value\)/);
-  assert.match(appSource, /Number\(value\) <= 0\.08/);
-  assert.match(appSource, /Number\(value\) <= 0\.12/);
+  assert.match(appSource, /Number\(value\) <= FEE_RATE_QUALIFIED_MAX/);
+  assert.match(appSource, /Number\(value\) <= FEE_RATE_WARNING_MAX/);
   assert.match(appSource, /const rate = calculatedPromotion\(row\)\.feeRate/);
   assert.match(appSource, /class="entity-bar-rate"/);
-  assert.match(appSource, /fee-rate \$\{feeRateTone\(rate\)\}/);
+  assert.match(appSource, /function feeRateValue\(value\)/);
+  assert.match(appSource, /\$\{feeRateValue\(rate\)\}/);
   assert.match(stylesSource, /\.fee-rate\.good/);
   assert.match(stylesSource, /\.fee-rate\.warn/);
   assert.match(stylesSource, /\.fee-rate\.high/);
@@ -265,7 +279,7 @@ test("comparison charts always use the currently filtered date, store, and perio
   assert.match(appSource, /state\.workspace = await api\(`\/api\/web\/workspace\?\$\{query\(filters\)\}`\)/);
   assert.match(appSource, /state\.filters = \{ \.\.\.state\.filters, \.\.\.next \}/);
   assert.match(appSource, /applyScope\(dateRangeForPreset\(preset\)\)/);
-  assert.match(appSource, /applyScope\(\{ start, end \}\)/);
+  assert.match(appSource, /applyScope\(ordered\)/);
   assert.match(appSource, /entityComparisonChart\(visible, kind\)/);
   assert.match(source, /buildOperationsWorkspace\(\{[\s\S]*reports: reportsForTeam\(db, teamId\)[\s\S]*\}, \{ filters \}\)/);
 });
@@ -297,7 +311,7 @@ test("store overview ranks category sales and exposes sales and spend shares", (
 test("store category structure shows fee rate from spend divided by net GSV", () => {
   assert.match(appSource, /const totals = sumRows\(active\)/);
   assert.match(appSource, /整体推广费率/);
-  assert.match(appSource, /percent\(totals\.feeRate\)/);
+  assert.match(appSource, /feeRateValue\(totals\.feeRate\)/);
   assert.match(appSource, /<span>类目推广费率<\/span>/);
   assert.match(appSource, /<small>推广花费 ÷ 类目净 GSV<\/small>/);
   assert.doesNotMatch(appSource, /promotionRevenue\s*\/\s*(?:row\.)?revenue/);
@@ -318,9 +332,12 @@ test("store category contribution labels every amount, share, rate, and formula"
 test("registration is invitation-only and the legacy email-code route is explicitly retired", () => {
   assert.match(source, /app\.post\("\/api\/auth\/email-code"/);
   assert.match(source, /res\.status\(410\).*EMAIL_REGISTRATION_DISABLED/);
-  assert.match(source, /QQ_EMAIL_PATTERN = .*@qq\\\.com/);
+  assert.match(source, /LOGIN_USERNAME_PATTERN = /);
+  assert.match(source, /function normalizeLoginUsername\(value\)/);
+  assert.match(source, /username: z\.string\(\)\.trim\(\)\.min\(2\)\.max\(40\)/);
   assert.match(source, /inviteCode: z\.string\(\)\.trim\(\)\.min\(8\)\.max\(80\)/);
   assert.match(source, /team\.invite\.register/);
+  assert.doesNotMatch(source, /normalizeQqEmail/);
   assert.doesNotMatch(source, /import nodemailer/);
 });
 
@@ -376,8 +393,8 @@ test("desktop sync setup is an optional, clearly scoped connection flow", () => 
 test("promotion types use linked net GSV while each plan uses its own promotion revenue", () => {
   assert.match(operationsCoreSource, /feeRate: metrics\.spend > 0 && metrics\.revenue > 0 \? metrics\.spend \/ metrics\.revenue : null,/);
   assert.match(operationsCoreSource, /feeRate: linked\.complete && linked\.linkedRevenue > 0 \? metrics\.spend \/ linked\.linkedRevenue : null,/);
-  assert.match(appSource, /<dt>计划费率<\/dt><dd>\$\{percent\(plan\.feeRate\)\}<\/dd>/);
-  assert.match(appSource, /整体费率 <b>\$\{percent\(channel\.feeRate\)\}<\/b>/);
+  assert.match(appSource, /<dt>计划费率<\/dt><dd>\$\{feeRateValue\(plan\.feeRate\)\}<\/dd>/);
+  assert.match(appSource, /整体费率 \$\{feeRateValue\(channel\.feeRate\)\}/);
 });
 
 test("report upload and archive share one warehouse panel", () => {
@@ -456,10 +473,12 @@ test("revoked invitations and device codes are removed from the management paylo
   assert.match(appSource, /state\.team\.invitations \|\| \[\]\)\.filter\(\(item\) => !item\.revokedAt\)/);
 });
 
-test("registration UI collects QQ email, password, and team invitation code", () => {
-  assert.match(appSource, /name="email"/);
+test("registration UI collects username, password, and team invitation code without requiring email", () => {
+  assert.match(appSource, /用户名或原 QQ 邮箱/);
+  assert.match(appSource, /name="username"/);
   assert.match(appSource, /name="inviteCode"/);
   assert.match(appSource, /注册并加入团队/);
+  assert.doesNotMatch(appSource, /name="email"/);
   assert.doesNotMatch(appSource, /name="emailCode"/);
   assert.doesNotMatch(appSource, /id="send-email-code"/);
 });
@@ -479,22 +498,74 @@ test("entity filter panels escape the matrix crop and use the available viewport
   assert.match(stylesSource, /\.entity-matrix\{overflow:visible/);
   assert.match(stylesSource, /\.matrix-head\{position:relative;z-index:12;/);
   assert.match(stylesSource, /\.entity-filter-panel \{ position: absolute; z-index: 48;/);
-  assert.match(stylesSource, /max-height: min\(470px, calc\(100vh - 150px\)\)/);
-  assert.match(stylesSource, /\.entity-filter-options \{ min-height: 0; max-height: 370px; overflow: auto;/);
+  assert.match(stylesSource, /max-height: min\(560px, calc\(100vh - 120px\)\)/);
+  assert.match(stylesSource, /\.entity-filter-options \{ min-height: 90px; max-height: 370px; flex: 1 1 auto; overflow: auto;/);
   assert.match(appSource, /class="entity-filter entity-filter-\$\{field\}"/);
   assert.match(stylesSource, /\.entity-matrix \{ width: 100%; max-width: 100%; \}/);
   assert.match(stylesSource, /\.matrix-tools \.entity-filter \{ position: static; \}/);
-  assert.match(stylesSource, /\.entity-filter-category \.entity-filter-panel \{ right: auto; left: 12px; \}/);
-  assert.match(stylesSource, /\.entity-filter-model \.entity-filter-panel \{ right: 12px; left: auto; \}/);
+  assert.match(stylesSource, /\.matrix-tools \.entity-filter-panel \{\s+position: fixed;/);
+  assert.match(stylesSource, /bottom: max\(12px, env\(safe-area-inset-bottom\)\)/);
+  assert.match(stylesSource, /max-height: calc\(100dvh - 24px\)/);
+  assert.match(stylesSource, /\.matrix-tools \.entity-filter-category \.entity-filter-panel,\s+\.matrix-tools \.entity-filter-model \.entity-filter-panel \{ right: 12px; left: 12px; \}/);
+});
+
+test("category and product filters keep up to three manually saved combinations", () => {
+  assert.match(appSource, /const ENTITY_FILTER_HISTORY_LIMIT = 3/);
+  assert.match(appSource, /entityFilterHistoryStorageKey\(kind\)/);
+  assert.match(appSource, /ecom-operations-entity-filter-history-v1:\$\{kind\}/);
+  assert.match(appSource, /function upsertEntityFilterHistory\(kind, categories, manualName = ''\)/);
+  assert.match(appSource, /data-entity-filter-history-save/);
+  assert.match(appSource, /data-entity-filter-history-apply/);
+  assert.match(appSource, /data-entity-filter-history-delete/);
+  assert.match(appSource, /data-entity-filter-history-clear/);
+  assert.match(appSource, /normalizeEntityLinkedSelection\(kind, 'category'\)/);
+  assert.match(stylesSource, /\.entity-filter-history \{/);
+});
+
+test("entity filter menus close on outside clicks without swallowing inside selection", () => {
+  assert.match(appSource, /document\.addEventListener\('click', \(event\) => \{/);
+  assert.match(appSource, /event\.target\.closest\('\.entity-filter'\)/);
+  assert.match(appSource, /ui\.filterMenu = ''; ui\.historySaveOpen = false; ui\.historyDraft = ''/);
+});
+
+test("custom and upload date ranges always keep start on or before end", () => {
+  assert.match(appSource, /function normalizeOrderedDateRange\(start, end, changed = ''\)/);
+  assert.match(appSource, /changed === 'end' \? \{ start: end, end \} : \{ start, end: start \}/);
+  assert.match(appSource, /#filter-start/);
+  assert.match(appSource, /#filter-end/);
+  assert.match(appSource, /normalizeOrderedDateRange\(event\.currentTarget\.value, endInput\.value, 'start'\)/);
+  assert.match(appSource, /normalizeOrderedDateRange\(startInput\.value, event\.currentTarget\.value, 'end'\)/);
+  assert.match(appSource, /normalizeOrderedDateRange\(item\.periodStart, item\.periodEnd, 'end'\)/);
 });
 
 test("registration preserves the in-progress form and displays request feedback in the form", () => {
-  assert.match(appSource, /authDraft: \{ username: '', email: '', password: '', inviteCode: '' \}/);
+  assert.match(appSource, /authDraft: \{ username: '', password: '', inviteCode: '' \}/);
   assert.match(appSource, /function updateAuthDraft\(form\)/);
-  assert.match(appSource, /value="\$\{escape\(draft\.email\)\}"/);
+  assert.match(appSource, /value="\$\{escape\(draft\.username\)\}"/);
   assert.match(appSource, /value="\$\{escape\(draft\.inviteCode\)\}"/);
   assert.match(appSource, /class="auth-feedback/);
   assert.match(stylesSource, /\.auth-feedback \{ padding: 10px 11px;/);
+});
+
+test("users have editable display names while login identifiers remain stable", () => {
+  assert.match(source, /app\.patch\("\/api\/account\/profile", requireUser/);
+  assert.match(source, /displayName: normalizeDisplayName\(user\.displayName, user\.username \|\| user\.email\)/);
+  assert.match(source, /function accountByLoginName\(db, value\)/);
+  assert.match(source, /loginKey\(user\.email\)/);
+  assert.match(appSource, /function profileModal\(\)/);
+  assert.match(appSource, /id="open-profile"/);
+  assert.match(appSource, /id="profile-form"/);
+  assert.match(appSource, /\/api\/account\/profile/);
+  assert.match(appSource, /member\.displayName \|\| member\.username/);
+  assert.match(stylesSource, /\.profile-button \{/);
+});
+
+test("platform super admins are excluded from memberships, member counts, and team member lists", () => {
+  assert.match(source, /if \(!user \|\| user\.role === "platform-admin"\) return \[\];/);
+  assert.match(source, /return Boolean\(user && user\.role !== "platform-admin"\);/);
+  assert.match(source, /platformAdminUserIds\.has\(String\(source\.userId \|\| ""\)\)/);
+  assert.match(source, /PLATFORM_ADMIN_MEMBERSHIP_FORBIDDEN/);
+  assert.match(source, /const memberCount = membershipsForTeam\(db, team\.id\)\.length;/);
 });
 
 test("deleting a team detaches members instead of deleting their login accounts", () => {
@@ -563,20 +634,51 @@ test("multi-team memberships, invite registration, device activation, and catalo
   const emailCode = await request("/api/auth/email-code", { method: "POST", body: { email: "member@qq.com" } });
   assert.equal(emailCode.status, 410);
   assert.equal((await emailCode.json()).code, "EMAIL_REGISTRATION_DISABLED");
-  assert.equal((await request("/api/auth/register", { method: "POST", body: { email: "member@qq.com", password: "a-strong-test-password" } })).status, 400);
+  assert.equal((await request("/api/auth/register", { method: "POST", body: { username: "member_01", password: "a-strong-test-password" } })).status, 400);
 
   const adminLogin = await request("/api/auth/login", { method: "POST", body: { username: "owner", password: "test-platform-admin-password" } });
-  await json(adminLogin, 200);
+  const adminLoginBody = await json(adminLogin, 200);
   const adminCookie = adminLogin.headers.get("set-cookie")?.split(";")[0];
   assert.ok(adminCookie);
+  assert.equal(adminLoginBody.user.memberships.length, 0);
 
   const teamA = (await json(await request("/api/admin/teams", { method: "POST", cookie: adminCookie, body: { name: "Team A", plan: "team", memberLimit: 6 } }), 201)).team;
+  assert.equal(teamA.memberCount, 0, "platform admin must not consume a team seat");
+  const hubPath = path.join(dataDir, "hub.json");
+  const persistedHub = JSON.parse(await fs.readFile(hubPath, "utf8"));
+  persistedHub.teamMemberships.push({ id: "membership_legacy_platform_admin", userId: adminLoginBody.user.id, teamId: teamA.id, role: "team-admin", status: "active", joinedAt: new Date().toISOString() });
+  await fs.writeFile(hubPath, JSON.stringify(persistedHub, null, 2), "utf8");
+  const normalizedLegacyMembership = await json(await request(`/api/admin/teams/${teamA.id}`, { cookie: adminCookie }), 200);
+  assert.equal(normalizedLegacyMembership.team.memberCount, 0, "legacy super-admin memberships must be ignored during normalization");
+  assert.equal(normalizedLegacyMembership.members.length, 0);
+  assert.equal((await json(await request("/api/session", { cookie: adminCookie }), 200)).user.memberships.length, 0);
   const invite = await json(await request(`/api/teams/${teamA.id}/invitations`, { method: "POST", cookie: adminCookie, body: { label: "Team A invite", expiresInDays: 7 } }), 201);
-  const registered = await request("/api/auth/register", { method: "POST", body: { email: "member@qq.com", inviteCode: invite.code, password: "a-strong-test-password" } });
+  const invalidUsername = await request("/api/auth/register", { method: "POST", body: { username: "invalid name", inviteCode: invite.code, password: "a-strong-test-password" } });
+  assert.equal(invalidUsername.status, 400);
+  assert.equal((await invalidUsername.json()).code, "USERNAME_INVALID");
+  const registered = await request("/api/auth/register", { method: "POST", body: { username: "Operator_01", inviteCode: invite.code, password: "a-strong-test-password" } });
   const registeredBody = await json(registered, 201);
   const memberCookie = registered.headers.get("set-cookie")?.split(";")[0];
   const userId = registeredBody.user.id;
+  assert.equal(registeredBody.user.username, "Operator_01");
+  assert.equal(registeredBody.user.displayName, "Operator_01");
   assert.equal(registeredBody.user.memberships.length, 1);
+  const duplicateUsername = await request("/api/auth/register", { method: "POST", body: { username: "operator_01", inviteCode: invite.code, password: "a-strong-test-password" } });
+  assert.equal(duplicateUsername.status, 409);
+  assert.equal((await duplicateUsername.json()).code, "USERNAME_ALREADY_REGISTERED");
+  const profile = await json(await request("/api/account/profile", { method: "PATCH", cookie: memberCookie, body: { displayName: "张三" } }), 200);
+  assert.equal(profile.user.username, "Operator_01");
+  assert.equal(profile.user.displayName, "张三");
+
+  const platformAdminMembership = await request(`/api/admin/members/${adminLoginBody.user.id}/membership`, { method: "PUT", cookie: adminCookie, body: { teamId: teamA.id, role: "team-admin", note: "不应出现" } });
+  assert.equal(platformAdminMembership.status, 404);
+  assert.equal((await platformAdminMembership.json()).code, "PLATFORM_ADMIN_MEMBERSHIP_FORBIDDEN");
+  const platformAdminPromotion = await request(`/api/admin/teams/${teamA.id}/admins`, { method: "POST", cookie: adminCookie, body: { username: "owner", password: "test-platform-admin-password" } });
+  assert.equal(platformAdminPromotion.status, 403);
+  assert.equal((await platformAdminPromotion.json()).code, "PLATFORM_ADMIN_MEMBERSHIP_FORBIDDEN");
+  const detailWithoutPlatformAdmin = await json(await request(`/api/admin/teams/${teamA.id}`, { cookie: adminCookie }), 200);
+  assert.equal(detailWithoutPlatformAdmin.team.memberCount, 1);
+  assert.equal(detailWithoutPlatformAdmin.members.some((member) => member.role === "platform-admin"), false);
 
   const teamB = (await json(await request("/api/admin/teams", { method: "POST", cookie: adminCookie, body: { name: "Team B", plan: "team", memberLimit: 6 } }), 201)).team;
   await json(await request(`/api/admin/members/${userId}/membership`, { method: "PUT", cookie: adminCookie, body: { teamId: teamA.id, role: "member", note: "A 组运营" } }), 200);
@@ -596,10 +698,13 @@ test("multi-team memberships, invite registration, device activation, and catalo
   const sessionAfterDeletion = await json(await request("/api/session", { cookie: memberCookie }), 200);
   assert.equal(sessionAfterDeletion.user.teamId, teamA.id);
   assert.equal(sessionAfterDeletion.user.memberships.length, 1);
-  assert.equal((await request("/api/auth/login", { method: "POST", body: { username: "member@qq.com", password: "a-strong-test-password" } })).status, 200);
+  const relogin = await json(await request("/api/auth/login", { method: "POST", body: { username: "operator_01", password: "a-strong-test-password" } }), 200);
+  assert.equal(relogin.user.displayName, "张三");
+  assert.equal(relogin.user.username, "Operator_01");
 
   await json(await request(`/api/admin/teams/${teamA.id}/admins`, { method: "POST", cookie: adminCookie, body: { username: "manager@qq.com", password: "another-strong-password" } }), 201);
   await json(await request(`/api/admin/teams/${teamA.id}/admins`, { method: "POST", cookie: adminCookie, body: { username: "manager2@qq.com", password: "another-strong-password" } }), 201);
+  assert.equal((await request("/api/auth/login", { method: "POST", body: { username: "manager@qq.com", password: "another-strong-password" } })).status, 200, "existing QQ-email-shaped accounts must remain login-compatible");
   const belowMemberLimit = await request(`/api/admin/teams/${teamA.id}`, { method: "PATCH", cookie: adminCookie, body: { name: "Team A", plan: "team", memberLimit: 2 } });
   assert.equal(belowMemberLimit.status, 409);
   const patchedTeam = await json(await request(`/api/admin/teams/${teamA.id}`, { method: "PATCH", cookie: adminCookie, body: { name: "Team A", plan: "team", memberLimit: 3 } }), 200);

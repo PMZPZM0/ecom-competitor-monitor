@@ -196,6 +196,7 @@ type CoreMetricCard = {
   value: string;
   detail: string;
   tone: "slate" | "emerald" | "blue" | "amber" | "rose";
+  valueClassName?: string;
   emphasis?: boolean;
   selected?: boolean;
   onClick?: () => void;
@@ -249,6 +250,8 @@ const CUSTOM_CARD_STORAGE_KEY = "operations-custom-cards-v1";
 const COMPARISON_VISIBILITY_STORAGE_KEY = "operations-comparison-visibility-v1";
 const MATRIX_METRIC_STORAGE_KEY = "operations-matrix-metrics-v1";
 const MATRIX_CUSTOM_METRIC_LIMIT = 8;
+const FEE_RATE_QUALIFIED_MAX = 0.095;
+const FEE_RATE_WARNING_MAX = 0.11;
 const MATRIX_FIXED_METRIC_IDS = new Set<CustomMetricId>([
   "grossRevenue", "refundAmount", "revenue", "spend", "promotionRevenue", "roi", "feeRate",
 ]);
@@ -574,6 +577,39 @@ function percent(value: number | null | undefined) {
   return Number.isFinite(numeric) ? `${(numeric * 100).toFixed(1)}%` : "--";
 }
 
+function feeRateTone(value: number | null | undefined) {
+  if (value === null || value === undefined || !Number.isFinite(Number(value))) return "neutral" as const;
+  if (Number(value) <= FEE_RATE_QUALIFIED_MAX) return "good" as const;
+  if (Number(value) <= FEE_RATE_WARNING_MAX) return "warn" as const;
+  return "high" as const;
+}
+
+function feeRateBadgeClassName(value: number | null | undefined) {
+  const classes = {
+    good: "border-emerald-200 bg-emerald-50 text-emerald-700",
+    warn: "border-amber-200 bg-amber-50 text-amber-700",
+    high: "border-rose-200 bg-rose-50 text-rose-700",
+    neutral: "border-slate-200 bg-slate-100 text-slate-500",
+  };
+  return classes[feeRateTone(value)];
+}
+
+function feeRateMetricTone(value: number | null | undefined): CoreMetricCard["tone"] {
+  return { good: "emerald", warn: "amber", high: "rose", neutral: "slate" }[feeRateTone(value)] as CoreMetricCard["tone"];
+}
+
+function feeRateTextClassName(value: number | null | undefined) {
+  return { good: "text-emerald-700", warn: "text-amber-700", high: "text-rose-700", neutral: "text-slate-500" }[feeRateTone(value)];
+}
+
+function feeRateChartColor(value: number | null | undefined) {
+  return { good: "#0f9f83", warn: "#d99a18", high: "#d94c5c", neutral: "#94a3b8" }[feeRateTone(value)];
+}
+
+function FeeRateValue({ value, className = "" }: { value: number | null | undefined; className?: string }) {
+  return <span className={`inline-flex min-h-6 items-center justify-center border px-2 py-1 text-xs font-semibold tabular-nums ${feeRateBadgeClassName(value)} ${className}`}>{percent(value)}</span>;
+}
+
 function fixed(value: number | null | undefined, digits = 2) {
   if (value === null || value === undefined) return "--";
   const numeric = Number(value);
@@ -839,6 +875,7 @@ function MetricTile({
   selected = false,
   onClick,
   surfaceClassName,
+  valueClassName = "",
 }: {
   label: string;
   value: string;
@@ -849,6 +886,7 @@ function MetricTile({
   selected?: boolean;
   onClick?: () => void;
   surfaceClassName?: string;
+  valueClassName?: string;
 }) {
   const tones = {
     slate: "border-slate-200 before:bg-slate-500",
@@ -863,7 +901,7 @@ function MetricTile({
       <div className={`text-xs font-semibold text-slate-500 ${selected ? "pr-12" : ""}`}>{label}</div>
       <div className="mt-2 flex min-w-0 flex-wrap items-baseline gap-x-2 gap-y-1.5">
         <div
-          className={`whitespace-nowrap font-semibold tracking-normal text-slate-950 ${emphasis && !compactValue ? "text-3xl" : emphasis ? "text-xl" : "text-2xl"}`}
+          className={`whitespace-nowrap font-semibold tracking-normal text-slate-950 ${emphasis && !compactValue ? "text-3xl" : emphasis ? "text-xl" : "text-2xl"} ${valueClassName}`}
         >
           {value}
         </div>
@@ -997,7 +1035,8 @@ function MetricCardGrid({ panel, coreCards, currentEntities, comparisons, compar
         {customCards.map((card) => {
           const metric = CUSTOM_METRICS.find((item) => item.id === card.metricId) || CUSTOM_METRICS[0];
           const trendEnabled = panel === "store" && Boolean(onToggleTrendMetric);
-          return <MetricTile key={card.id} label={metric.label} value={formatCustomMetric(card.metricId, customMetricValue(currentRecords, card.metricId))} detail={metric.description} tone={metric.tone} selected={trendEnabled && trendMetrics.includes(card.metricId)} onClick={trendEnabled ? () => onToggleTrendMetric?.(card.metricId) : undefined} comparison={comparison?.(card.metricId)} />;
+          const value = customMetricValue(currentRecords, card.metricId);
+          return <MetricTile key={card.id} label={metric.label} value={formatCustomMetric(card.metricId, value)} detail={metric.description} tone={card.metricId === "feeRate" ? feeRateMetricTone(value) : metric.tone} valueClassName={card.metricId === "feeRate" ? feeRateTextClassName(value) : ""} selected={trendEnabled && trendMetrics.includes(card.metricId)} onClick={trendEnabled ? () => onToggleTrendMetric?.(card.metricId) : undefined} comparison={comparison?.(card.metricId)} />;
         })}
       </section>
       {settingsOpen && (
@@ -1022,6 +1061,7 @@ function DashboardBarChart({
   data,
   formatter,
   color,
+  colorForValue,
   emptyText,
 }: {
   title: string;
@@ -1029,6 +1069,7 @@ function DashboardBarChart({
   data: Array<{ key?: string; id?: string; name: string; value: number }>;
   formatter: (value: number) => string;
   color: string;
+  colorForValue?: (value: number) => string;
   emptyText?: string;
 }) {
   const [query, setQuery] = useState("");
@@ -1073,7 +1114,7 @@ function DashboardBarChart({
                   <YAxis type="category" tickLine={false} axisLine={false} dataKey="name" tick={{ fill: "#475569", fontSize: 11 }} width={172} />
                   <Tooltip cursor={{ fill: "#f1f5f9" }} formatter={(value) => [formatter(Number(value)), title]} contentStyle={{ borderRadius: 6, borderColor: "#e2e8f0", boxShadow: "0 12px 30px rgba(15, 23, 42, .1)" }} />
                   <Bar dataKey="value" radius={[0, 4, 4, 0]} maxBarSize={24}>
-                    {visibleData.map((item) => <Cell key={item.key || item.name} fill={color} fillOpacity={0.9} />)}
+                    {visibleData.map((item) => <Cell key={item.key || item.name} fill={colorForValue?.(item.value) || color} fillOpacity={0.9} />)}
                     <LabelList dataKey="value" position="right" fill="#334155" fontSize={11} formatter={(value) => formatter(Number(value))} />
                   </Bar>
                 </BarChart>
@@ -1122,14 +1163,6 @@ function CategoryContributionPanel({
   const maxSpend = Math.max(1, ...rankedCategories.map((item) => Number(item.spend) || 0));
   const share = (value: number, total: number) =>
     total > 0 ? Math.max(0, Math.min(1, value / total)) : 0;
-  const rateClassName = (value: number | null) => {
-    if (value === null) return "border-slate-200 bg-slate-100 text-slate-500";
-    if (value <= 0.08)
-      return "border-emerald-200 bg-emerald-50 text-emerald-700";
-    if (value <= 0.12)
-      return "border-amber-200 bg-amber-50 text-amber-700";
-    return "border-rose-200 bg-rose-50 text-rose-700";
-  };
 
   if (!activeCategories.length) return null;
 
@@ -1159,9 +1192,7 @@ function CategoryContributionPanel({
           <div className="min-w-0 border-t border-sky-100 px-3 py-2.5 sm:border-l sm:border-t-0">
             <dt className="text-[10px] font-semibold text-slate-500">类目整体推广费率</dt>
             <dd className="mt-1">
-              <span className={`inline-flex border px-2 py-1 text-xs font-semibold ${rateClassName(totals.feeRate)}`}>
-                {percent(totals.feeRate)}
-              </span>
+              <FeeRateValue value={totals.feeRate} />
               <span className="ml-2 text-[10px] font-medium text-slate-500">
                 {totals.feeRateCategoryCount} / {activeCategories.length} 个类目参与计算
               </span>
@@ -1249,9 +1280,7 @@ function CategoryContributionPanel({
 
               <div className="flex items-center justify-between gap-3 border-t border-slate-100 pt-3 lg:block lg:border-l lg:border-t-0 lg:pl-4 lg:pt-0">
                 <span className="block text-[10px] font-semibold text-slate-500">类目推广费率</span>
-                <span className={`inline-flex border px-2 py-1 text-xs font-semibold lg:mt-1.5 ${rateClassName(item.feeRate)}`}>
-                  {percent(item.feeRate)}
-                </span>
+                <FeeRateValue value={item.feeRate} className="lg:mt-1.5" />
                 <span className="hidden text-[9px] text-slate-400 lg:mt-1 lg:block">花费 ÷ 净 GSV</span>
               </div>
             </div>
@@ -2821,7 +2850,7 @@ export function OperationsAssistant({
               { id: "store-revenue", metricId: "revenue", label: "整店净 GSV", value: money(store.revenue), detail: store.refundDataAvailable ? `支付 ${money(store.grossRevenue)} · 退款 ${money(store.refundAmount)}${store.salesDeduction > 0 ? ` · 扣除 ${money(store.salesDeduction)}` : ""}` : "当前报表缺退款字段，需重新导入商品经营报表", tone: "emerald", emphasis: true, selected: selectedTrendMetrics.includes("revenue"), onClick: () => toggleTrendMetric("revenue") },
               { id: "store-spend", metricId: "spend", label: "推广花费", value: money(store.spend), detail: storePromotionCoverageComplete ? "单品推广消耗" : "已导入单品推广消耗，非完整周期", tone: "blue", emphasis: true, selected: selectedTrendMetrics.includes("spend"), onClick: () => toggleTrendMetric("spend") },
               { id: "store-roi", metricId: "managementRoi", label: "整店经营 ROI", value: fixed(store.managementRoi), detail: storePromotionCoverageComplete ? "净 GSV ÷ 推广花费" : "缺少同周期单品付费，暂不计算", tone: "amber", emphasis: true, selected: selectedTrendMetrics.includes("managementRoi"), onClick: () => toggleTrendMetric("managementRoi") },
-              { id: "store-fee-rate", metricId: "feeRate", label: "推广费率", value: percent(store.feeRate), detail: storePromotionCoverageComplete ? "推广花费 ÷ 净 GSV" : "缺少同周期单品付费，暂不计算", tone: "rose", emphasis: true, selected: selectedTrendMetrics.includes("feeRate"), onClick: () => toggleTrendMetric("feeRate") },
+              { id: "store-fee-rate", metricId: "feeRate", label: "推广费率", value: percent(store.feeRate), detail: storePromotionCoverageComplete ? "推广花费 ÷ 净 GSV" : "缺少同周期单品付费，暂不计算", tone: feeRateMetricTone(store.feeRate), valueClassName: feeRateTextClassName(store.feeRate), emphasis: true, selected: selectedTrendMetrics.includes("feeRate"), onClick: () => toggleTrendMetric("feeRate") },
             ]}
             currentEntities={[store]}
             comparisons={dashboard.comparisons}
@@ -2867,8 +2896,8 @@ export function OperationsAssistant({
                         <div className="text-sm font-semibold text-slate-900">
                           经营 ROI {fixed(item.managementRoi)}
                         </div>
-                        <div className="mt-1 text-xs text-slate-500">
-                          费率 {percent(item.feeRate)}
+                        <div className="mt-1 flex items-center justify-end gap-1.5 text-xs text-slate-500">
+                          <span>费率</span><FeeRateValue value={item.feeRate} className="min-h-5 px-1.5 py-0.5 text-[10px]" />
                         </div>
                       </div>
                     </div>
@@ -2916,6 +2945,7 @@ export function OperationsAssistant({
                   data={categoryFeeRateBars}
                   formatter={(value) => `${value.toFixed(1)}%`}
                   color="#d97706"
+                  colorForValue={(value) => feeRateChartColor(value / 100)}
                   emptyText={dashboard.sourceWarnings.categoryPromotion || undefined}
                 />
               </CardContent>
@@ -4392,8 +4422,21 @@ function EntityTable({
   const [matrixMetricSettingsOpen, setMatrixMetricSettingsOpen] = useState(false);
   const [draggingMatrixMetricId, setDraggingMatrixMetricId] = useState<CustomMetricId | null>(null);
   const [showComparisons, setShowComparisons] = useState(() => loadComparisonVisibility(kind));
+  const matrixToolsRef = useRef<HTMLDivElement>(null);
   useEffect(() => saveMatrixMetrics(kind, matrixMetricIds), [kind, matrixMetricIds]);
   useEffect(() => saveComparisonVisibility(kind, showComparisons), [kind, showComparisons]);
+  useEffect(() => {
+    const handlePointerDown = (event: PointerEvent) => {
+      const target = event.target;
+      if (!(target instanceof Node) || matrixToolsRef.current?.contains(target)) return;
+      matrixToolsRef.current
+        ?.querySelectorAll<HTMLDetailsElement>("details[open]")
+        .forEach((details) => details.removeAttribute("open"));
+      setShowHistorySave(false);
+    };
+    document.addEventListener("pointerdown", handlePointerDown);
+    return () => document.removeEventListener("pointerdown", handlePointerDown);
+  }, []);
   const dataItems = useMemo(() => items.filter(hasVisibleBusinessData), [items]);
   const categoryOptions = useMemo(
     () =>
@@ -4574,12 +4617,47 @@ function EntityTable({
   };
   return (
     <Card>
-      <CardHeader className="flex flex-row flex-wrap items-center justify-between gap-3">
+      <CardHeader className="border-b border-slate-200">
         <div>
           <CardTitle>{title}</CardTitle>
           <p className="mt-1 text-xs text-slate-500">{subtitle}</p>
         </div>
-        <div className="flex flex-wrap items-center gap-2">
+      </CardHeader>
+      {["category", "product"].includes(kind) && (
+        <div className="grid border-b border-slate-200 bg-slate-50 sm:grid-cols-4 xl:grid-cols-7">
+          <div className="border-b border-slate-200 px-4 py-3 sm:col-span-2 xl:col-span-1 xl:border-b-0 xl:border-r">
+            <div className="text-xs font-medium text-slate-500">当前汇总</div>
+            <div className="mt-1 text-sm font-semibold text-slate-900">
+              {kind === "product"
+                ? `${visibleItems.length} 个商品${selectedCategoryNames.size ? ` · ${selectedCategoryNames.size} 个类目` : ""}${selectedModelNames.size ? ` · ${selectedModelNames.size} 个型号` : ""}`
+                : `${visibleItems.length} 个类目`}
+            </div>
+          </div>
+          <div className="border-b border-slate-200 px-4 py-3 sm:col-span-2 xl:col-span-1 xl:border-b-0 xl:border-r">
+            <div className="text-xs font-medium text-slate-500">支付 / 退款</div>
+            <div className="mt-1 text-sm font-semibold text-slate-900">
+              {money(selectionSummary.grossRevenue)}
+            </div>
+            <div className="mt-0.5 text-xs text-emerald-600">
+              - {money(selectionSummary.refundAmount)}
+            </div>
+          </div>
+          <SummaryMetric label="净 GSV" value={money(selectionSummary.revenue)} />
+          <SummaryMetric label="推广花费" value={money(selectionSummary.spend)} />
+          <SummaryMetric label="推广成交" value={money(selectionSummary.promotionRevenue)} />
+          <SummaryMetric label="ROI" value={fixed(selectionSummary.roi)} />
+          <SummaryMetric
+            label="费率"
+            value={<FeeRateValue value={selectionSummary.feeRate} />}
+            detail={
+              selectionSummary.refundDataAvailable
+                ? "推广花费 ÷ 净 GSV"
+                : "存在未提供退款的数据"
+            }
+          />
+        </div>
+      )}
+      <div ref={matrixToolsRef} className="relative z-20 flex flex-wrap items-center gap-2 border-b border-slate-200 bg-sky-50/60 px-4 py-2.5">
           <label className="relative">
             <Search className="pointer-events-none absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-slate-400" />
             <input
@@ -4749,6 +4827,20 @@ function EntityTable({
               </div>
             </details>
           )}
+          <button
+            type="button"
+            onClick={() => {
+              setKeyword("");
+              setSelectedCategoryNames(new Set());
+              setSelectedModelNames(new Set());
+              setCategoryPickerQuery("");
+              setModelPickerQuery("");
+            }}
+            disabled={!keyword && selectedCategoryNames.size === 0 && selectedModelNames.size === 0}
+            className="inline-flex h-8 items-center border border-transparent px-2 text-xs font-medium text-slate-500 hover:border-slate-200 hover:bg-white hover:text-slate-800 disabled:cursor-not-allowed disabled:opacity-40"
+          >
+            清除筛选
+          </button>
           <label className="inline-flex h-8 cursor-pointer items-center gap-2 border border-slate-200 bg-white px-2 text-xs font-medium text-slate-600 hover:border-teal-400 hover:text-teal-800" title={`${showComparisons ? "关闭" : "开启"}${kind === "category" ? "品类" : "商品"}矩阵环比`}>
             <span>环比</span>
             <input type="checkbox" checked={showComparisons} onChange={(event) => setShowComparisons(event.target.checked)} className="peer sr-only" />
@@ -4766,42 +4858,7 @@ function EntityTable({
             <Layers3 className="h-3.5 w-3.5" />
             {visibleItems.length}/{dataItems.length} 项
           </span>
-        </div>
-      </CardHeader>
-      {["category", "product"].includes(kind) && (
-        <div className="grid border-y border-slate-200 bg-slate-50 sm:grid-cols-4 xl:grid-cols-7">
-          <div className="border-b border-slate-200 px-4 py-3 sm:col-span-2 xl:col-span-1 xl:border-b-0 xl:border-r">
-            <div className="text-xs font-medium text-slate-500">当前汇总</div>
-            <div className="mt-1 text-sm font-semibold text-slate-900">
-              {kind === "product"
-                ? `${visibleItems.length} 个商品${selectedCategoryNames.size ? ` · ${selectedCategoryNames.size} 个类目` : ""}${selectedModelNames.size ? ` · ${selectedModelNames.size} 个型号` : ""}`
-                : `${visibleItems.length} 个类目`}
-            </div>
-          </div>
-          <div className="border-b border-slate-200 px-4 py-3 sm:col-span-2 xl:col-span-1 xl:border-b-0 xl:border-r">
-            <div className="text-xs font-medium text-slate-500">支付 / 退款</div>
-            <div className="mt-1 text-sm font-semibold text-slate-900">
-              {money(selectionSummary.grossRevenue)}
-            </div>
-            <div className="mt-0.5 text-xs text-emerald-600">
-              - {money(selectionSummary.refundAmount)}
-            </div>
-          </div>
-          <SummaryMetric label="净 GSV" value={money(selectionSummary.revenue)} />
-          <SummaryMetric label="推广花费" value={money(selectionSummary.spend)} />
-          <SummaryMetric label="推广成交" value={money(selectionSummary.promotionRevenue)} />
-          <SummaryMetric label="ROI" value={fixed(selectionSummary.roi)} />
-          <SummaryMetric
-            label="费率"
-            value={percent(selectionSummary.feeRate)}
-            detail={
-              selectionSummary.refundDataAvailable
-                ? "推广花费 ÷ 净 GSV"
-                : "存在未提供退款的数据"
-            }
-          />
-        </div>
-      )}
+      </div>
       <div className="max-h-[530px] overflow-auto">
         <table className="w-full text-left text-sm" style={{ minWidth: `${1320 + matrixMetricIds.length * 145}px` }}>
           <thead className="sticky top-0 z-10 border-y border-slate-100 bg-slate-50 text-xs text-slate-500">
@@ -5028,7 +5085,7 @@ const EntityTableRow = memo(function EntityTableRow({
         <td className="px-4 py-3 text-slate-700"><div>{money(item.spend)}</div>{showComparisons && <div className="mt-1">{comparisonBadge("spend")}</div>}</td>
         <td className="px-4 py-3 text-slate-700"><div>{money(item.promotionRevenue)}</div>{showComparisons && <div className="mt-1">{comparisonBadge("promotionRevenue")}</div>}</td>
         <td className="px-4 py-3 font-medium text-slate-800"><div>{fixed(item.roi)}</div>{showComparisons && <div className="mt-1">{comparisonBadge("roi")}</div>}</td>
-        <td className="px-4 py-3 font-medium text-slate-800"><div>{percent(item.feeRate)}</div>{showComparisons && <div className="mt-1">{comparisonBadge("feeRate")}</div>}</td>
+        <td className="px-4 py-3 font-medium text-slate-800"><FeeRateValue value={item.feeRate} />{showComparisons && <div className="mt-1">{comparisonBadge("feeRate")}</div>}</td>
         {customMetricIds.map((metricId) => (
           <td key={metricId} className="px-4 py-3 text-slate-700">
             <div className="font-medium text-slate-800">{formatCustomMetric(metricId, entityMetricValue(item, metricId))}</div>
@@ -5126,7 +5183,7 @@ const PromotionChannelBreakdown = memo(function PromotionChannelBreakdown({
                 <div><div className="text-[10px] opacity-70">关联净 GSV</div><div className="mt-0.5 font-semibold">{money(type.linkedRevenue)}</div></div>
                 <div><div className="text-[10px] opacity-70">成交</div><div className="mt-0.5 font-semibold">{money(type.promotionRevenue)}</div></div>
                 <div><div className="text-[10px] opacity-70">ROI</div><div className="mt-0.5 font-semibold">{fixed(type.roi)}</div></div>
-                <div><div className="text-[10px] opacity-70">推广费率</div><div className="mt-0.5 font-semibold">{percent(type.feeRate)}</div></div>
+                <div><div className="text-[10px] opacity-70">推广费率</div><FeeRateValue value={type.feeRate} className="mt-0.5 min-h-5 px-1.5 py-0.5 text-[10px]" /></div>
               </div>
             </div>
             <div className="min-w-[820px]">
@@ -5143,7 +5200,7 @@ const PromotionChannelBreakdown = memo(function PromotionChannelBreakdown({
                   <span className="text-right font-medium text-slate-800">{money(plan.spend)}</span>
                   <span className="text-right font-medium text-slate-800">{money(plan.promotionRevenue)}</span>
                   <span className="text-right font-medium text-slate-800">{fixed(plan.roi)}</span>
-                  <span className="text-right font-medium text-slate-800">{percent(plan.feeRate)}</span>
+                  <span className="flex justify-end"><FeeRateValue value={plan.feeRate} className="min-h-5 px-1.5 py-0.5 text-[10px]" /></span>
                 </div>
               ))}
             </div>
@@ -5160,7 +5217,7 @@ function SummaryMetric({
   detail,
 }: {
   label: string;
-  value: string;
+  value: ReactNode;
   detail?: string;
 }) {
   return (

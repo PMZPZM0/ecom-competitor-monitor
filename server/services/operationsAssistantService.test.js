@@ -1173,6 +1173,17 @@ test("QwenPaw instructions require complete per-SKU verified price reporting", (
   assert.match(instructions, /不得猜测/);
 });
 
+test("QwenPaw instructions require scoped operations queries and real AI creation tool receipts", () => {
+  const instructions = qwenPawWorkspaceAgentInstructions();
+  assert.match(instructions, /get_operations_schema/);
+  assert.match(instructions, /get_operations_data/);
+  assert.match(instructions, /missingEntityIds/);
+  assert.match(instructions, /upload_reference_image/);
+  assert.match(instructions, /create_prompt_plan/);
+  assert.match(instructions, /create_image_task/);
+  assert.match(instructions, /不能声称已执行而没有工具回执/);
+});
+
 test("QwenPaw official bootstrap selects Windows x64 and Apple Silicon without cross-architecture fallback", () => {
   assert.deepEqual(qwenPawBootstrapPlan({ platform: "win32", arch: "x64" }), {
     platform: "win32",
